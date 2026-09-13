@@ -1,0 +1,33 @@
+name: Compile Fortnite 27.11 DLLs
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract prepared source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = 'Reboot-27.11-Source.zip'
+          $expected = 'c456b97c0a224866e017467949bf53799490760412628c01f85c531f20ab8a96'
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $expected) { throw 'Source ZIP does not match the prepared version.' }
+          Expand-Archive -LiteralPath $archive -DestinationPath source
+      - name: Compile server and client
+        shell: pwsh
+        run: ./source/Reboot-27.11-Source/scripts/Build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Reboot-27.11-Windows-x64
+          path: source/Reboot-27.11-Source/dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Reboot-27.11-Corresponding-Source
+          path: Reboot-27.11-Source.zip
+          if-no-files-found: error
