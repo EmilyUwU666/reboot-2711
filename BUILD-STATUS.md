@@ -1,16 +1,21 @@
 # Fortnite 27.11 build status
 
-Both Windows x64 DLLs compiled successfully with MSVC on Windows Server 2022.
+Revision 2 compiled successfully with MSVC on Windows Server 2022.
 
-- Build: https://github.com/EmilyUwU666/reboot-2711/actions/runs/34749861091
-- Workflow commit: 3d0c64234c0e4fd5f86cad41085f7208937ecf2b
+- Build: https://github.com/EmilyUwU666/reboot-2711/actions/runs/34776838190
+- Workflow commit: 5bc7ba30d9158975a0a35ef5318a057d484762ce
 - Compiler result: 0 errors, 2 warnings.
+- Tests: 23 Windows ProcessEvent lookup checks and 25 version-parser checks passed.
 - The build script checked that both outputs are x64 PE DLLs and generated SHA256SUMS.txt.
-- DLL package: https://github.com/EmilyUwU666/reboot-2711/actions/runs/34749861091/artifacts/10315228229
-- Corresponding corrected source: https://github.com/EmilyUwU666/reboot-2711/actions/runs/34749861091/artifacts/10315018733
+- DLL package: https://github.com/EmilyUwU666/reboot-2711/actions/runs/34776838190/artifacts/10323337616
+- Corresponding source: https://github.com/EmilyUwU666/reboot-2711/actions/runs/34776838190/artifacts/10323238257
 
-Outputs are Reboot-27.11-Server.dll and Reboot-27.11-Client.dll.
+Outputs are Reboot-27.11-Server.dll and Reboot-27.11-Client.dll. Replace both together after closing Fortnite.
 
-The initial source archive's VALIDATION.md predates this successful build. The workflow corrects its PowerShell tool-discovery issue and packages the corrected corresponding source separately.
+The first package stopped on the user's installation because ProcessEvent was not located in the UObject virtual table. Revision 2 avoids the inferred default-object field offset during this lookup, recognizes bounded jump stubs, and logs the build string and detailed lookup results. It retains the upstream Season 27 signature and rejects unresolved/ambiguous matches. This is a candidate fix; successful startup on the user's executable is not yet confirmed.
 
-Game startup, backend login, multiplayer and Fortnite 27.11 gameplay compatibility remain untested. Compilation does not establish runtime compatibility.
+The original ZIP is retained as the reproducible baseline. The workflow applies build-support/revision2.patch and packages the resulting corresponding source. The original VALIDATION.md predates these builds; this record and REVISION-2.md describe the current status.
+
+If startup still fails, collect %TEMP%/Reboot-27.11-Client-startup.log and, when present, %TEMP%/Reboot-27.11-Server-startup.log. Revision 2 logs build and lookup data without requiring a game executable upload.
+
+Backend login, multiplayer and Fortnite gameplay compatibility remain unverified. Compilation and synthetic tests do not establish runtime compatibility.
