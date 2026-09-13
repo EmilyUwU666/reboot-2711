@@ -18,21 +18,31 @@ jobs:
           $expected = 'c456b97c0a224866e017467949bf53799490760412628c01f85c531f20ab8a96'
           if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $expected) { throw 'Source ZIP does not match the prepared version.' }
           Expand-Archive -LiteralPath $archive -DestinationPath source
-      - name: Fix build-tool discovery
+      - name: Apply revision 2
+        shell: bash
+        run: |
+          git apply --check --directory=source/Reboot-27.11-Source build-support/revision2.patch
+          git apply --directory=source/Reboot-27.11-Source build-support/revision2.patch
+      - name: Test startup lookup and version guard
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /WX source\Reboot-27.11-Source\tests\process_event_lookup_tests.cpp /Fe:lookup-tests.exe
+          if errorlevel 1 exit /b 1
+          lookup-tests.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /WX source\Reboot-27.11-Source\tests\build_version_tests.cpp /Fe:version-tests.exe
+          if errorlevel 1 exit /b 1
+          version-tests.exe
+          if errorlevel 1 exit /b 1
+      - name: Package corresponding revision 2 source
         shell: python
         run: |
           from pathlib import Path
           import zipfile
           root = Path('source/Reboot-27.11-Source')
-          p = root / 'scripts/Build.ps1'
-          s = p.read_text()
-          old = "'MSBuild\\**\\Bin\\MSBuild.exe' |\n        Select-Object -First 1"
-          assert old in s, 'Expected build script version not found'
-          s = s.replace('$msbuild = & $vswhere', '$msbuildCandidates = @(& $vswhere')
-          s = s.replace(old, "'MSBuild\\**\\Bin\\MSBuild.exe')\n    $discoveryExitCode = $LASTEXITCODE\n    $msbuild = $msbuildCandidates | Select-Object -First 1")
-          s = s.replace('if ($LASTEXITCODE -ne 0 -or -not $msbuild)', 'if ($discoveryExitCode -ne 0 -or -not $msbuild)')
-          p.write_text(s)
-          with zipfile.ZipFile('Reboot-27.11-Corrected-Source.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+          with zipfile.ZipFile('Reboot-27.11-Revision2-Source.zip', 'w', zipfile.ZIP_DEFLATED) as z:
               for f in root.rglob('*'):
                   if f.is_file():
                       z.write(f, f.relative_to(root.parent))
@@ -41,11 +51,11 @@ jobs:
         run: ./source/Reboot-27.11-Source/scripts/Build.ps1
       - uses: actions/upload-artifact@v4
         with:
-          name: Reboot-27.11-Windows-x64
+          name: Reboot-27.11-Revision2-Windows-x64
           path: source/Reboot-27.11-Source/dist/
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
-          name: Reboot-27.11-Corresponding-Source
-          path: Reboot-27.11-Corrected-Source.zip
+          name: Reboot-27.11-Revision2-Source
+          path: Reboot-27.11-Revision2-Source.zip
           if-no-files-found: error
