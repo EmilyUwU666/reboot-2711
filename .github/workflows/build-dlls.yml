@@ -18,6 +18,24 @@ jobs:
           $expected = 'c456b97c0a224866e017467949bf53799490760412628c01f85c531f20ab8a96'
           if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $expected) { throw 'Source ZIP does not match the prepared version.' }
           Expand-Archive -LiteralPath $archive -DestinationPath source
+      - name: Fix build-tool discovery
+        shell: python
+        run: |
+          from pathlib import Path
+          import zipfile
+          root = Path('source/Reboot-27.11-Source')
+          p = root / 'scripts/Build.ps1'
+          s = p.read_text()
+          old = "'MSBuild\\**\\Bin\\MSBuild.exe' |\n        Select-Object -First 1"
+          assert old in s, 'Expected build script version not found'
+          s = s.replace('$msbuild = & $vswhere', '$msbuildCandidates = @(& $vswhere')
+          s = s.replace(old, "'MSBuild\\**\\Bin\\MSBuild.exe')\n    $discoveryExitCode = $LASTEXITCODE\n    $msbuild = $msbuildCandidates | Select-Object -First 1")
+          s = s.replace('if ($LASTEXITCODE -ne 0 -or -not $msbuild)', 'if ($discoveryExitCode -ne 0 -or -not $msbuild)')
+          p.write_text(s)
+          with zipfile.ZipFile('Reboot-27.11-Corrected-Source.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+              for f in root.rglob('*'):
+                  if f.is_file():
+                      z.write(f, f.relative_to(root.parent))
       - name: Compile server and client
         shell: pwsh
         run: ./source/Reboot-27.11-Source/scripts/Build.ps1
@@ -29,5 +47,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Reboot-27.11-Corresponding-Source
-          path: Reboot-27.11-Source.zip
+          path: Reboot-27.11-Corrected-Source.zip
           if-no-files-found: error
