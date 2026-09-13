@@ -18,6 +18,12 @@ jobs:
           $expected = 'c456b97c0a224866e017467949bf53799490760412628c01f85c531f20ab8a96'
           if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $expected) { throw 'Source ZIP does not match the prepared version.' }
           Expand-Archive -LiteralPath $archive -DestinationPath source
+      - name: Normalize patch line endings
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('build-support/revision2.patch')
+          p.write_bytes(p.read_bytes().replace(b'\r\n', b'\n'))
       - name: Apply revision 2
         shell: bash
         run: |
