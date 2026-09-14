@@ -1,0 +1,322 @@
+diff --git a/BACKEND-SETUP.md b/BACKEND-SETUP.md
+new file mode 100644
+index 0000000..16c1b11
+--- /dev/null
++++ b/BACKEND-SETUP.md
+@@ -0,0 +1,78 @@
++# Reboot 27.11 local backend - candidate 1
++
++This ready-to-run Windows x64 package supplies the discovery access-token route
++and v2 discovery data missing from Reboot Launcher's older embedded backend.
++Those missing responses caused repeated HTTP 404s in the supplied 27.11 logs.
++It includes Node.js, installed dependencies, the original nonempty manifest and
++chunk files, and source code. No Node installation or compilation is required.
++
++This is a backend update. It does not establish that the experimental Erbium
++client/server DLLs are compatible or that the reported host crash is fixed.
++The latest client log showed a connection timeout after the host log stopped.
++
++## Start it
++
++1. Close the Fortnite host and playing client, then stop the embedded backend
++   using Reboot Launcher's Backend page.
++2. Extract the **entire** artifact ZIP into a writable folder such as
++   `C:\Reboot2711\Backend`. Run it from that folder, not from inside the ZIP.
++3. Double-click **START-BACKEND.cmd**. Keep its window open. It should report
++   `LawinServer started listening on port 3551` and an XMPP listener on port 80.
++4. In Reboot Launcher, open **Backend** and select type **Local**, port **3551**.
++   Use **Check server** if shown. The launcher should use the running backend.
++5. Keep the DLL selections below, then start the game-server instance and leave
++   it running. Start your separate playing client.
++6. For the first connection test, open the playing client's console with F8 or
++   tilde and enter `open 127.0.0.1:7777`.
++
++| Internal files setting | Selection |
++| --- | --- |
++| Authentication patcher | Existing Reboot-27.11-Auth.dll |
++| Unreal engine patcher | Existing Reboot-27.11-Client.dll |
++| Game server type | Custom |
++| Game server | Existing Reboot-27.11-Server.dll |
++
++The included backend listens only on this PC. HTTP uses 3551; XMPP/matchmaking
++uses 80. Port 8080 forwards to the local XMPP listener to support the cached
++configuration seen in the earlier logs. Game sessions point to 127.0.0.1:7777.
++The startup check reports occupied ports; it does not terminate other processes.
++
++Keep your old backend folder. This package has its own bundled profile/config
++files; it does not migrate custom edits or overwrite the old backend. It retains
++upstream's existing location for saved client settings. To return to the old
++backend, close this backend window and select Embedded in Reboot Launcher.
++
++## What was checked
++
++The Windows build verifies and includes the original manifest and chunk bytes,
++installs dependencies using the pinned package-lock.json, and tests the 27.11
++discovery-token response, v1/v2 discovery surfaces, default Solo playlist links,
++manifest HTTP body/hash, matchmaking destination, and both local WebSocket ports.
++It also checks that a second backend reports an occupied port instead of taking
++over the running one. See BUILD-INFO.txt for exact versions and workflow details.
++
++These are backend checks, not a full Fortnite match. A loading screen after a
++network timeout or a host crash still needs game/runtime investigation.
++
++If backend startup fails, read **backend-startup.log** beside START-BACKEND.cmd.
++For a game failure after switching, retain both game logs from the same attempt
++and any crash report produced by the game. Source and dependency licenses are
++included; no game binaries are bundled.
++
++## Provenance and changes
++
++LawinServer by Lawin0129 and contributors, GPL-3.0:
++https://github.com/Lawin0129/LawinServer/tree/7f0f26d7a772c6122c42b1783fd75f497e86d3a9
++
++The discovery fixes and payloads are provided by that upstream revision.
++This package adds the portable launcher, file/port checks, local-only listener
++configuration, an 8080-to-80 XMPP alias, and executable HTTP/WebSocket checks.
++It sets the STW event toggle to false to match the earlier launcher configuration.
++The backend HTTP port is fixed at 3551 for the existing authentication DLL.
++
++Unmodified official Node.js Windows x64 runtime, version 24.21.0:
++https://nodejs.org/dist/v24.21.0/
++
++The workflow verifies the Node ZIP using Node's published SHA256 list, retains
++its LICENSE in runtime/LICENSE, and records the archive/runtime hashes. The
++backend source, wrapper, tests, and npm dependency source are all included.
+diff --git a/Config/config.ini b/Config/config.ini
+index d2ec140..ee478f2 100644
+--- a/Config/config.ini
++++ b/Config/config.ini
+@@ -10,7 +10,7 @@ bCompletedSeasonalQuests=false
+ # If this is set to true, you will receive all founder's pack rewards upon logging into StW if the account didn't claim them yet.
+ bGrantFoundersPacks=false
+ # If this is set to true, all Save the World events will be displayed in lobby (Season 13 and above).
+-bAllSTWEventsActivated=true
++bAllSTWEventsActivated=false
+ 
+ [GameServer]
+ # Matchmaker gameserver config, you can use this to connect to gameservers like rift (titanium), fortmp, etc... (they have to be hosting though).
+diff --git a/START-BACKEND.cmd b/START-BACKEND.cmd
+new file mode 100644
+index 0000000..0210436
+--- /dev/null
++++ b/START-BACKEND.cmd
+@@ -0,0 +1,15 @@
++@echo off
++setlocal
++cd /d "%~dp0"
++title Reboot 27.11 local backend
++if not exist "runtime\node.exe" (
++  echo Extract the entire Reboot-27.11-Backend-Windows-x64 ZIP first.
++  pause
++  exit /b 1
++)
++"runtime\node.exe" "start-backend.cjs"
++set "backend_exit_code=%errorlevel%"
++echo.
++echo Backend stopped. See backend-startup.log for details.
++pause
++exit /b %backend_exit_code%
+diff --git a/index.js b/index.js
+index b0a0963..6af8af7 100644
+--- a/index.js
++++ b/index.js
+@@ -25,8 +25,8 @@ express.use(require("./structure/matchmaking.js"));
+ express.use(require("./structure/cloudstorage.js"));
+ express.use(require("./structure/mcp.js"));
+ 
+-const port = process.env.PORT || 3551;
+-express.listen(port, () => {
++const port = 3551;
++express.listen(port, "127.0.0.1", () => {
+     console.log("LawinServer started listening on port", port);
+ 
+     require("./structure/xmpp.js");
+diff --git a/start-backend.cjs b/start-backend.cjs
+new file mode 100644
+index 0000000..a36d3f7
+--- /dev/null
++++ b/start-backend.cjs
+@@ -0,0 +1,72 @@
++'use strict';
++
++// Local launcher for the pinned LawinServer source. No installation is required.
++const fs = require('node:fs');
++const path = require('node:path');
++const net = require('node:net');
++const crypto = require('node:crypto');
++const util = require('node:util');
++
++process.chdir(__dirname);
++const logFile = path.join(__dirname, 'backend-startup.log');
++// Append so a second launch cannot erase the running backend's diagnostics.
++fs.appendFileSync(logFile, '');
++const writeConsole = console.log.bind(console);
++function log(...values) {
++    const line = `[${new Date().toISOString()}] ${util.format(...values)}`;
++    writeConsole(line);
++    try { fs.appendFileSync(logFile, line + '\n'); } catch { /* Preserve console output if storage is unavailable. */ }
++}
++console.log = log;
++console.error = log;
++process.on('uncaughtExceptionMonitor', error => log('Backend exception:', error.stack || error.message));
++
++async function checkPort(port) {
++    await new Promise((resolve, reject) => {
++        const probe = net.createServer();
++        probe.once('error', error => reject(new Error(`Local port ${port} is unavailable (${error.code}). Stop the embedded backend or the other application using it, then retry.`)));
++        probe.listen(port, '127.0.0.1', () => probe.close(resolve));
++    });
++}
++
++async function main() {
++    log('Reboot 27.11 backend candidate 1; Node %s; PID %d', process.version, process.pid);
++    log('LawinServer source: 7f0f26d7a772c6122c42b1783fd75f497e86d3a9');
++    const expected = {
++        'LawinServer.manifest': '55bb954f5596cadbe03693e1c06ca73368d427f3',
++        'LawinServer.chunk': '96e1b78c367bd015f425abd8ca9ea1b6ccdee6f5'
++    };
++    for (const [name, digest] of Object.entries(expected)) {
++        const data = fs.readFileSync(path.join(__dirname, 'responses', 'CloudDir', name));
++        if (!data.length || crypto.createHash('sha1').update(data).digest('hex') !== digest)
++            throw new Error(`${name} is incomplete or changed. Extract a fresh copy of this package.`);
++    }
++    log('Manifest and chunk integrity verified.');
++    for (const port of [3551, 80, 8080]) await checkPort(port);
++
++    // Earlier launcher CloudStorage settings used 8080 while its XMPP server used 80.
++    // Accept that cached setting as well as the corrected port 80 supplied here.
++    const xmppAlias = net.createServer(socket => {
++        const upstream = net.connect({host: '127.0.0.1', port: 80});
++        socket.on('error', () => upstream.destroy());
++        upstream.on('error', () => socket.destroy());
++        socket.on('close', () => upstream.destroy());
++        upstream.on('close', () => socket.destroy());
++        socket.pipe(upstream).pipe(socket);
++    });
++    xmppAlias.on('error', error => {
++        log('XMPP compatibility listener failed:', error.message);
++        process.exit(1);
++    });
++    await new Promise(resolve => xmppAlias.listen(8080, '127.0.0.1', resolve));
++    require('./index.js');
++    log('Reboot Launcher: Backend type = Local; port = 3551. Keep this window open.');
++    log('Game-server destination: 127.0.0.1:7777. The game server must run separately.');
++}
++
++main().catch(error => {
++    log('Startup failed:', error.message);
++    process.exitCode = 1;
++    // Also close an alias if a source-loading error happened after it was opened.
++    process.exit(1);
++});
+diff --git a/structure/xmpp.js b/structure/xmpp.js
+index adeb4ad..eb58230 100644
+--- a/structure/xmpp.js
++++ b/structure/xmpp.js
+@@ -7,7 +7,7 @@ const matchmaker = require("./matchmaker.js");
+ 
+ const port = 80;
+ 
+-const wss = new WebSocket({ port: port }, () => console.log("XMPP and Matchmaker started listening on port", port));
++const wss = new WebSocket({ port: port, host: "127.0.0.1" }, () => console.log("XMPP and Matchmaker started listening on port", port));
+ wss.on("error", (err) => {
+     console.log("XMPP and Matchmaker \x1b[31mFAILED\x1b[0m to start hosting.");
+ })
+diff --git a/tests/backend-smoke-tests.cjs b/tests/backend-smoke-tests.cjs
+new file mode 100644
+index 0000000..98fc915
+--- /dev/null
++++ b/tests/backend-smoke-tests.cjs
+@@ -0,0 +1,92 @@
++'use strict';
++const assert = require('node:assert/strict');
++const fs = require('node:fs');
++const path = require('node:path');
++const os = require('node:os');
++const {spawn} = require('node:child_process');
++const {once} = require('node:events');
++const crypto = require('node:crypto');
++const WebSocket = require('ws');
++
++const root = path.resolve(__dirname, '..');
++const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'reboot-backend-test-'));
++let child;
++let checks = 0;
++let output = '';
++const expect = (condition, label) => { assert.ok(condition, label); ++checks; };
++const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
++async function request(endpoint, method = 'GET', body) {
++    const response = await fetch('http://127.0.0.1:3551' + endpoint, {
++        method, headers: {'content-type': 'application/json', 'user-agent': 'Fortnite/++Fortnite+Release-27.11-CL-29739262 Windows/10'},
++        body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(5000)
++    });
++    expect(response.status === 200, `${method} ${endpoint}: expected HTTP 200, got ${response.status}`);
++    return response;
++}
++async function testWebSocket(port) {
++    const socket = new WebSocket(`ws://127.0.0.1:${port}`, 'xmpp');
++    const timer = setTimeout(() => socket.terminate(), 5000);
++    try {
++        await once(socket, 'open', {signal: AbortSignal.timeout(5000)});
++        const message = once(socket, 'message', {signal: AbortSignal.timeout(5000)});
++        socket.send('<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" to="prod.ol.epicgames.com" version="1.0"/>');
++        const [reply] = await message;
++        expect(reply.toString().includes('<open'), `XMPP framing reply on ${port}`);
++    } finally { clearTimeout(timer); socket.terminate(); }
++}
++async function main() {
++    child = spawn(process.execPath, ['start-backend.cjs'], {cwd: root, env: {...process.env, LOCALAPPDATA: scratch}, stdio: ['ignore', 'pipe', 'pipe']});
++    child.stdout.on('data', data => { output += data.toString(); });
++    child.stderr.on('data', data => { output += data.toString(); });
++    let ready = false;
++    for (let i = 0; i < 100; ++i) {
++        if (child.exitCode !== null) throw new Error('Backend exited during startup: ' + output);
++        if (output.includes('XMPP and Matchmaker started listening on port 80')) { ready = true; break; }
++        await wait(100);
++    }
++    expect(ready, 'backend and XMPP startup within 10 seconds');
++    const branch = '++Fortnite+Release-27.11';
++    const endpoint = '/fortnite/api/discovery/accessToken/' + encodeURIComponent(branch);
++    const token = await (await request(endpoint)).json();
++    expect(token.branchName === branch && token.appId === 'Fortnite' && typeof token.token === 'string' && token.token.length > 0,
++        '27.11 discovery-token schema and decoded branch');
++    const repeat = await (await request(endpoint)).json();
++    expect(repeat.token === token.token, 'repeated discovery requests succeed consistently');
++    for (const url of ['/discovery/surface/page', '/api/v2/discovery/surface/page']) {
++        const discovery = await (await request(url, 'POST', {})).json();
++        expect(Array.isArray(discovery.Panels) && discovery.Panels.length > 0, 'discovery panels');
++        const results = discovery.Panels.flatMap(panel => panel.Pages || []).flatMap(page => page.results || []);
++        expect(results.some(result => result.linkData?.mnemonic === 'playlist_defaultsolo'), 'default Solo playlist advertised');
++    }
++    const related = await (await request('/links/api/fn/mnemonic/playlist_defaultsolo/related')).json();
++    expect(related.links?.playlist_defaultsolo?.mnemonic === 'playlist_defaultsolo', 'Solo related link');
++    const meta = await (await request('/launcher/api/public/assets/Windows/5cb97847cee34581afdbc445400e2f77/FortniteContentBuilds')).json();
++    const manifest = Buffer.from(await (await request('/' + meta.items.MANIFEST.path)).arrayBuffer());
++    expect(manifest.length === 1281628, 'manifest body is complete');
++    expect(crypto.createHash('sha1').update(manifest).digest('hex') === meta.items.MANIFEST.hash, 'manifest body matches advertised hash');
++    const chunk = Buffer.from(await (await request('/Builds/Fortnite/Content/CloudDir/LawinServer.chunk')).arrayBuffer());
++    expect(chunk.length === 529481, 'chunk is complete');
++    const session = await (await request('/fortnite/api/matchmaking/session/test-session')).json();
++    expect(session.serverAddress === '127.0.0.1' && session.serverPort === 7777, 'matchmaking points to local game server');
++    const engine = await (await request('/fortnite/api/cloudstorage/system/DefaultEngine.ini')).text();
++    expect(engine.includes('ServerPort=80') && !engine.includes('ServerPort=8080'), 'cloud configuration matches primary XMPP listener');
++    await testWebSocket(80);
++    await testWebSocket(8080);
++
++    const duplicate = spawn(process.execPath, ['start-backend.cjs'], {cwd: root, env: {...process.env, LOCALAPPDATA: scratch}, stdio: ['ignore', 'pipe', 'pipe']});
++    let duplicateOutput = '';
++    duplicate.stdout.on('data', data => { duplicateOutput += data.toString(); });
++    duplicate.stderr.on('data', data => { duplicateOutput += data.toString(); });
++    const timeout = setTimeout(() => duplicate.kill(), 10000);
++    try {
++        const [code] = await once(duplicate, 'exit');
++        expect(code === 1 && duplicateOutput.includes('3551 is unavailable'), 'occupied backend port reported without takeover');
++    } finally { clearTimeout(timeout); if (duplicate.exitCode === null) duplicate.kill(); }
++    await request(endpoint);
++    console.log(`${checks} backend HTTP/WebSocket checks passed`);
++}
++main().catch(error => { console.error(error.stack || error); if (output) console.error(output); process.exitCode = 1; })
++    .finally(async () => {
++        if (child && child.exitCode === null) { const ended = once(child, 'exit'); child.kill(); await ended; }
++        fs.rmSync(scratch, {recursive: true, force: true});
++    });
