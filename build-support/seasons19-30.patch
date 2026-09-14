@@ -1,0 +1,1059 @@
+diff --git a/COMPATIBILITY.md b/COMPATIBILITY.md
+new file mode 100644
+index 0000000..cfdbcb2
+--- /dev/null
++++ b/COMPATIBILITY.md
+@@ -0,0 +1,55 @@
++# Seasons 19-30 compatibility - candidate 1
++
++This package enables existing Erbium paths over game releases 19.xx-30.xx,
++with engine version 5.0-5.5. Engine and game versions are parsed independently.
++This is an experimental target range, not a list of verified playable builds.
++
++| Game release range | Battle Royale map | Implementation status |
++| --- | --- | --- |
++| 19.xx-22.xx | Artemis_Terrain | Existing Erbium map/native paths enabled |
++| 23.xx-26.xx | Asteria_Terrain | Existing Erbium map/native paths enabled |
++| 27.xx | Athena_Terrain | Earlier 27.11 path retained and neighboring releases enabled |
++| 28.xx-30.xx | Helios_Terrain | Existing Erbium map/native paths enabled |
++
++Both DLLs use the same profile. UE5 builds below 5.3 use the existing legacy
++replication path; UE5.3 and later use the existing Iris path unless explicitly
++disabled in shared configuration. The Season 29+ Iris inventory-filter path
++now checks that its configuration object/property exists before accessing it.
++Missing required core bindings, including the FName constructor, stop SDK
++initialization with diagnostics rather than being treated as compatible.
++
++The shared reflection profile preserves upstream's layout boundaries at 20.00,
++20.20 and 24.30. It does not invent offsets for unknown executables. All other
++engine-specific finders, hooks and gameplay paths remain from the pinned base.
++Neither a nonzero signature match nor accepting a version string proves that
++an address has the right ABI or that all hooks/gameplay features work.
++
++Upstream documents support through 19.40 and partial support from 20.00 through
++30.00. Later 30.xx releases are selectable but receive an additional diagnostic
++because they exceed that documented endpoint. See
++[upstream README](https://github.com/plooshi/Erbium/tree/44568e08cbe411ba197d3e0e900685750d46afdc).
++
++## What is known from the earlier 27.11 attempt
++
++The authentication candidate allowed lobby login. ProcessEvent resolved, and
++one earlier host log recorded a player joining. A later connection timed out;
++the paired host log ended before the client connected. A host crash was also
++reported without a matching crash dump. A complete match was not verified.
++None of the new Seasons 19-30 DLLs has yet been run against a Fortnite executable.
++
++## Verification provided with this candidate
++
++- Parser/profile checks cover all twelve seasons, exact game/engine separation,
++  patch-boundary reflection layouts, map selection, matching Iris policy,
++  out-of-range versions, malformed labels and numeric overflow.
++- Windows ProcessEvent lookup tests exercise the existing lookup safeguards.
++- Windows authentication tests cover scanners and synthetic hook/URL behavior.
++- The CI build validates all three binaries as AMD64 PE32+ DLLs with entry points.
++- The pinned backend is queried using all twelve season identifiers for discovery,
++  profiles and local matchmaking. Those HTTP checks use synthetic user agents;
++  they do not run the Fortnite clients.
++
++The artifact's BUILD-INFO.txt identifies the actual completed build. Gameplay,
++player replication, vehicles, movement workarounds, stability and complete matches
++remain unverified across this range. Special events, Creative, Save the World,
++XP/quests and persistence are outside this Battle Royale candidate's validation.
+diff --git a/Erbium/Erbium/Private/dllmain.cpp b/Erbium/Erbium/Private/dllmain.cpp
+index 66c1233..cdd2d51 100644
+--- a/Erbium/Erbium/Private/dllmain.cpp
++++ b/Erbium/Erbium/Private/dllmain.cpp
+@@ -70,8 +70,11 @@ void Main()
+         CreateThread(0, 0, (LPTHREAD_START_ROUTINE)GUI::Init, 0, 0, 0);
+     }
+ 
++    FConfiguration::bEnableIris = FConfiguration::bEnableIris && SDK::SelectedProfile.UseIris;
++
+     if (wcscmp(FConfiguration::Playlist, L"/DurianPlaylist/Playlist/Playlist_Durian.Playlist_Durian") == 0)
+         FConfiguration::bEnableIris = false;
++    Reboot2711::RecordProfile("Server", SDK::DetectedBuildString.c_str(), SDK::SelectedProfile, FConfiguration::bEnableIris);
+ 
+     if (VersionInfo.EngineVersion >= 5.0)
+     {
+@@ -121,9 +124,14 @@ void Main()
+         }
+         *IrisBool = true;
+ 
+-        if (VersionInfo.FortniteVersion >= 29)
++        if (SDK::SelectedProfile.NeedsInventoryFilter)
+         {
+             auto ReplicationBridgeConfig = UObjectReplicationBridgeConfig::GetDefaultObj();
++            if (!ReplicationBridgeConfig || ReplicationBridgeConfig->GetOffset("FilterConfigs") == -1)
++            {
++                Reboot2711::ReportStartupFailure("Server", "The required Iris inventory filter configuration is unavailable.", SDK::DetectedBuildString.c_str());
++                return;
++            }
+ 
+             auto FortInventoryName = FName(L"/Script/FortniteGame.FortInventory");
+             for (int i = 0; i < ReplicationBridgeConfig->FilterConfigs.Num(); i++)
+@@ -218,7 +226,7 @@ void Main()
+     auto& LocalPlayers = UWorld::GetWorld()->OwningGameInstance->LocalPlayers;
+     if (LocalPlayers.Num() > 0)
+         LocalPlayers.Remove(0);
+-    const wchar_t* terrainOpen = L"open Athena_Terrain";
++    const wchar_t* terrainOpen = SDK::SelectedProfile.OpenMap;
+ 
+     if (wcsstr(FConfiguration::Playlist, L"/MoleGame/Playlists/Playlist_MoleGame"))
+     {
+@@ -227,21 +235,8 @@ void Main()
+     }
+     else if (VersionInfo.FortniteVersion >= 12.00 && wcsstr(FConfiguration::Playlist, L"/Game/Athena/Playlists/Creative/Playlist_PlaygroundV2.Playlist_PlaygroundV2"))
+         terrainOpen = L"open Creative_NoApollo_Terrain";
+-    else
+-    {
+-        if (VersionInfo.FortniteVersion >= 27.00)
+-        {
+-            if (VersionInfo.FortniteVersion >= 28.00)
+-                terrainOpen = L"open Helios_Terrain";
+-        }
+-        else if (VersionInfo.FortniteVersion >= 23.00)
+-            terrainOpen = L"open Asteria_Terrain";
+-        else if (VersionInfo.FortniteVersion >= 19.00)
+-            terrainOpen = L"open Artemis_Terrain";
+-        else if (VersionInfo.FortniteVersion >= 11.00)
+-            terrainOpen = L"open Apollo_Terrain";
+-    }
+ 
++    Reboot2711::WriteStartupLog("Server", std::string("Loading map: ") + Reboot2711::PrintableBuild(terrainOpen));
+     UKismetSystemLibrary::ExecuteConsoleCommand(UWorld::GetWorld(), FString(terrainOpen), nullptr);
+ 
+     auto EncryptionPatch = FindEncryptionPatch();
+diff --git a/ErbiumClient/ErbiumClient/Private/dllmain.cpp b/ErbiumClient/ErbiumClient/Private/dllmain.cpp
+index 2b9256c..f4fecde 100644
+--- a/ErbiumClient/ErbiumClient/Private/dllmain.cpp
++++ b/ErbiumClient/ErbiumClient/Private/dllmain.cpp
+@@ -44,8 +44,11 @@ void Main()
+         return;
+     }
+ 
++    FConfiguration::bEnableIris = FConfiguration::bEnableIris && SDK::SelectedProfile.UseIris;
++
+     if (wcscmp(FConfiguration::Playlist, L"/DurianPlaylist/Playlist/Playlist_Durian.Playlist_Durian") == 0)
+         FConfiguration::bEnableIris = false;
++    Reboot2711::RecordProfile("Client", SDK::DetectedBuildString.c_str(), SDK::SelectedProfile, FConfiguration::bEnableIris);
+ 
+     if (VersionInfo.EngineVersion >= 5.0)
+     {
+diff --git a/PROVENANCE.md b/PROVENANCE.md
+index a0235a0..55d095e 100644
+--- a/PROVENANCE.md
++++ b/PROVENANCE.md
+@@ -1,50 +1,29 @@
+-# Source and changes
+-
+-This is an unofficial 27.11-targeted distribution of **Erbium**, prepared for
+-use as the custom server/client components in **Reboot Launcher**. It is not
+-a fork of the Project Reboot 3.0 server and does not claim upstream endorsement.
+-
+-## Pinned base
+-
+-- Repository: https://github.com/plooshi/Erbium
+-- Commit: `44568e08cbe411ba197d3e0e900685750d46afdc`
+-- License: GNU GPL version 3; original license text remains in `LICENSE`.
+-- Existing SDK, engine hooks, gameplay code, vendored ImGui/curl/zlib, and their
+-  notices remain from upstream. The SDK is Erbium's abstraction layer; this
+-  package contains no Fortnite executable or game asset files.
+-
+-Preserve the license and notices and provide corresponding source when
+-redistributing a built derivative under the applicable GPL terms. The Windows
+-workflow produces a source artifact alongside its DLL artifact.
+-
+-## Changes in this distribution
+-
+-- Shared, exact 27.11 build-string validation before SDK binding initialization.
+-- Bound checks for the engine build string and handling for absent version
+-  discovery functions, name references, object classes, and core SDK bindings.
+-- Server/client startup messages and failure logs for the added checks.
+-- Guards for missing Iris configuration, missing game viewport/world, and an
+-  empty local-player list during server setup.
+-- Solo configuration with siphon disabled; both projects use the same config.
+-- Explicit x64 build target and distinct paired output names.
+-- Windows build script, PE/preflight checks, CI recipe, portable parser tests,
+-  setup instructions, and a validation record.
+-
+-The Season 27 map path, Iris integration, UE5 reflection support, replication,
+-gameplay and client console originate from upstream. They were not newly
+-implemented or runtime-verified for this distribution.
+-
+-## Integration sources inspected
+-
+-- [Erbium SDK and version-specific bindings](https://github.com/plooshi/Erbium/blob/44568e08cbe411ba197d3e0e900685750d46afdc/SDK/Offsets.h)
+-- [Erbium server startup and map selection](https://github.com/plooshi/Erbium/blob/44568e08cbe411ba197d3e0e900685750d46afdc/Erbium/Erbium/Private/dllmain.cpp)
+-- [Erbium client](https://github.com/plooshi/Erbium/blob/44568e08cbe411ba197d3e0e900685750d46afdc/ErbiumClient/ErbiumClient/Private/dllmain.cpp)
+-- [Reboot Launcher DLL selection](https://github.com/Auties00/Reboot-Launcher/blob/c6f82298b167ef2076bb59dc621f13dc5bd8d390/gui/lib/src/controller/dll_controller.dart)
+-- [Reboot Launcher host/client loading](https://github.com/Auties00/Reboot-Launcher/blob/c6f82298b167ef2076bb59dc621f13dc5bd8d390/gui/lib/src/button/game_start_button.dart)
+-- [Reload Backend README](https://github.com/Project-Reload/Reload-Backend): external backend reference only; not included or tested with this package.
+-
+-Project Reboot 3.0 was inspected first, including its `aboveS20` branch.
+-Erbium was chosen because its existing code includes Season 27-specific
+-bindings, newer replication handling, paired client changes, and the relevant
+-map selection. This selection does not turn upstream's partial support into
+-a verified release.
++# Provenance - Seasons 19-30 candidate 1
++
++Unofficial Erbium-based server/client components for Reboot Launcher.
++
++- Erbium: https://github.com/plooshi/Erbium, commit
++  44568e08cbe411ba197d3e0e900685750d46afdc; GPL-3.0.
++- Tellurium authentication: https://github.com/plooshi/Tellurium, commit
++  8750678312c011888b82878fb1d011b97b33fff5; BSD-3-Clause.
++- Existing portable LawinServer backend: commit
++  7f0f26d7a772c6122c42b1783fd75f497e86d3a9; GPL-3.0.
++- Launcher integration was checked against Auties00/Reboot-Launcher commit
++  c6f82298b167ef2076bb59dc621f13dc5bd8d390.
++
++The build begins with the original source archive, applies revision2.patch,
++then seasons19-30.patch. This preserves the earlier ProcessEvent lookup fixes.
++The new patch expands release selection, removes the forced 27.11 runtime
++version, centralizes the existing map/reflection/replication choices, adds
++startup diagnostics and missing-object checks, and updates build/setup files.
++The historical Reboot2711 directory name is retained in source for patch-chain
++continuity; it no longer implies an exact 27.11 runtime restriction.
++
++Native signatures and gameplay code remain from Erbium. New version acceptance
++is not verification of those signatures or offsets. Tellurium retains the
++previous bounded scanner/hook/URL changes; the season-range overlay updates
++its package names and diagnostics without claiming newly verified game ABIs.
++
++The build publishes matching source with the binaries and retains upstream
++licenses. No Fortnite executable or game content is distributed. Exact workflow
++commit, run URL and DLL hashes are recorded in BUILD-INFO.txt and SHA256SUMS.txt.
+diff --git a/README.md b/README.md
+index 281c63d..7aa1366 100644
+--- a/README.md
++++ b/README.md
+@@ -1,59 +1,28 @@
+-# Fortnite 27.11 for Reboot Launcher - experimental source project
+-
+-This is a **Windows x64, Erbium-based server and client pair** configured for
+-Fortnite **27.11**. It plugs into Reboot Launcher's custom DLL settings. It is
+-not a release from the Project Reboot or Erbium maintainers.
+-
+-**Status:** source prepared; Windows DLL compilation and in-game testing have
+-not been performed in the development environment. This is not a verified
+-playable release. See [VALIDATION.md](VALIDATION.md) for the exact checks run.
+-
+-On a Windows PC with Visual Studio 2022 C++ tools and a Windows SDK, run
+-`BUILD.cmd`. The build creates `dist/Reboot-27.11-Server.dll` and
+-`dist/Reboot-27.11-Client.dll`. Follow [SETUP.md](SETUP.md) to select both in
+-Reboot Launcher.
+-
+-The shared SDK checks the complete engine build string before initializing
+-27.11 bindings. Both DLLs reject other Fortnite releases. Server and client
+-retain upstream's matching Iris replication support, Season 27 map selection,
+-and game-phase logic. Extra startup checks report missing SDK bindings, missing
+-replication settings, and unavailable game objects.
+-
+-The default profile is solo, port 7777, 30 ticks/second, no siphon, no infinite
+-ammo/materials, no late game, and no automatic restart. Configuration remains
+-in `Erbium/Erbium/Public/Configuration.h`; rebuild both DLLs after changing it.
+-
+-Game content, a backend, and an authentication/redirect component are external
+-requirements. This source package does not provide them. Existing account,
+-login, or gameplay errors cannot be diagnosed from the version number alone.
+-
+-Code and dependencies originate from Erbium. See [PROVENANCE.md](PROVENANCE.md)
+-and [LICENSE](LICENSE). Upstream describes newer-season support as partial.
+-
+-## Upstream README
+-
+-# Erbium
+-
+-Erbium is a WIP universal gameserver for Fortnite.
+-
+-[**Join our Discord!**](https://discord.gg/WxNEGBxfKq)
+-
+-## Features
+-- **Version support**: Erbium supports version 3.4 (season 3) to 19.40 (chapter 3 season 1).
+-> Erbium also has partial support for 1.7.2 (season 0) to 3.3 (season 3) & 20.00 (chapter 3 season 2) to 30.00 (chapter 5 season 3)
+-- **Easy to use**: Erbium is designed to be fast & easy to configure for new users.
+-
+-## To-do
+-- **Creative**
+-- **XP**
+-- **Quests**
+-
+-## Configuration
+-- In order to change options, go to Erbium/Public/Configuration.h & configure to your liking!
+-
+-> If you have issues with a specific version or find a bug, please make an issue.
+-
+-> Contributions are highly appreciated!
+-
+-> If you use this, please give me credit.
+-> Credit to Milxnor for parts of Finders.cpp
++# Reboot Seasons 19-30 - experimental candidate 1
++
++Windows x64 server/client DLLs for Fortnite **19.xx through 30.xx**, based on
++Erbium, with a matching Tellurium authentication build for Reboot Launcher.
++Use [SETUP.md](SETUP.md) for installation and [COMPATIBILITY.md](COMPATIBILITY.md)
++for the supported code paths and remaining runtime limits.
++
++This expands the earlier 27.11-only candidate. It parses the actual game release,
++keeps the engine version separate, selects the chapter's Battle Royale island,
++and uses the existing engine/patch-specific reflection and replication paths.
++It rejects releases outside 19-30 and engines outside UE 5.0-5.5.
++
++The Windows workflow compiles the DLLs and runs synthetic startup/profile checks.
++**This is not a claim that every patch is playable.** Upstream labels 20.00-30.00
++as partial support. Later 30.xx labels are accepted experimentally without new
++verified native offsets. A complete 27.11 match was not established in the prior
++session; the client's loading stall and a reported host crash remain unresolved.
++
++Run BUILD.cmd on Windows with Visual Studio 2022 C++ tools to build the server
++and client. Outputs go to dist-S19-S30. The CI workflow also builds and packages
++the matching authentication DLL and corresponding sources.
++
++This project contains no Fortnite game binaries. Retain the GPL-3.0 license,
++upstream notices and corresponding source when redistributing these DLLs.
++
++Upstream: [plooshi/Erbium](https://github.com/plooshi/Erbium), commit
++44568e08cbe411ba197d3e0e900685750d46afdc. This is an unofficial derivative;
++upstream has not endorsed or verified this candidate.
+diff --git a/Reboot2711/Build.targets b/Reboot2711/Build.targets
+index 05fe10a..6f660df 100644
+--- a/Reboot2711/Build.targets
++++ b/Reboot2711/Build.targets
+@@ -3,20 +3,21 @@
+   <PropertyGroup>
+     <OutDir>$(MSBuildThisFileDirectory)..\build\$(Configuration)\</OutDir>
+     <IntDir>$(MSBuildThisFileDirectory)..\build\obj\$(ProjectName)\$(Configuration)\</IntDir>
+-    <TargetName Condition="'$(ProjectName)'=='Erbium'">Reboot-27.11-Server</TargetName>
+-    <TargetName Condition="'$(ProjectName)'=='ErbiumClient'">Reboot-27.11-Client</TargetName>
++    <TargetName Condition="'$(ProjectName)'=='Erbium'">Reboot-S19-S30-Server</TargetName>
++    <TargetName Condition="'$(ProjectName)'=='ErbiumClient'">Reboot-S19-S30-Client</TargetName>
+   </PropertyGroup>
+   <ItemDefinitionGroup>
+     <ClCompile>
+-      <PreprocessorDefinitions>REBOOT_TARGET_2711=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
++      <PreprocessorDefinitions>REBOOT_SEASONS_19_30=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+     </ClCompile>
+   </ItemDefinitionGroup>
+   <ItemGroup>
+     <ClInclude Include="$(MSBuildThisFileDirectory)BuildVersion.h" />
++    <ClInclude Include="$(MSBuildThisFileDirectory)RuntimeProfile.h" />
+     <ClInclude Include="$(MSBuildThisFileDirectory)Diagnostics.h" />
+     <ClInclude Include="$(MSBuildThisFileDirectory)ProcessEventLookup.h" />
+   </ItemGroup>
+-  <Target Name="Check2711Platform" BeforeTargets="PrepareForBuild">
+-    <Error Condition="'$(Platform)'!='x64'" Text="Select Release | x64. This 27.11 distribution requires 64-bit Windows." />
++  <Target Name="CheckSeasonsPlatform" BeforeTargets="PrepareForBuild">
++    <Error Condition="'$(Platform)'!='x64'" Text="Select Release | x64. This Seasons 19-30 distribution requires 64-bit Windows." />
+   </Target>
+ </Project>
+diff --git a/Reboot2711/BuildVersion.h b/Reboot2711/BuildVersion.h
+index 1422002..ddc064d 100644
+--- a/Reboot2711/BuildVersion.h
++++ b/Reboot2711/BuildVersion.h
+@@ -5,8 +5,8 @@
+ #include <optional>
+ #include <string_view>
+ 
+-// This distribution targets one Fortnite release. Changelists are recorded,
+-// not guessed or used as a substitute for testing the actual executable.
++// Experimental release selection. Recognition does not validate a game executable.
++// Keep engine and game versions separate; never infer either from the other.
+ namespace Reboot2711
+ {
+     struct BuildVersion
+@@ -14,6 +14,8 @@ namespace Reboot2711
+         unsigned EngineMajor = 0;
+         unsigned EngineMinor = 0;
+         std::uint64_t Changelist = 0;
++        unsigned Season = 0;
++        unsigned ReleaseMinor = 0;
+         std::wstring_view Release;
+     };
+ 
+@@ -63,16 +65,24 @@ namespace Reboot2711
+         pos += marker.size();
+         const auto release = text.substr(pos);
+         std::uint64_t gameMajor = 0, gameMinor = 0;
+-        if (!ReadNumber(text, pos, gameMajor) || !Consume(text, pos, L'.') || !ReadNumber(text, pos, gameMinor) || pos != text.size())
++        const auto gameStart = pos;
++        if (!ReadNumber(text, pos, gameMajor) || !Consume(text, pos, L'.'))
++            return std::nullopt;
++        const auto minorStart = pos;
++        if (!ReadNumber(text, pos, gameMinor) || pos != text.size()
++            || gameMajor > 99 || gameMinor > 99 || pos - minorStart != 2
++            || (minorStart - gameStart > 2 && text[gameStart] == L'0'))
+             return std::nullopt;
+ 
+-        return BuildVersion{ static_cast<unsigned>(major), static_cast<unsigned>(minor), cl, release };
++        return BuildVersion{ static_cast<unsigned>(major), static_cast<unsigned>(minor), cl,
++            static_cast<unsigned>(gameMajor), static_cast<unsigned>(gameMinor), release };
+     }
+ 
+     inline bool IsTarget(const BuildVersion& build)
+     {
+-        // Erbium represents UE versions as decimals (5.3, 5.4, ...).
+-        // Reject future multi-digit UE5 minors that representation cannot encode.
+-        return build.Release == L"27.11" && build.EngineMajor == 5 && build.EngineMinor <= 9;
++        // Existing SDK paths cover UE5 through 5.5; later engine layouts need review.
++        // This includes all two-digit 30.xx labels as experimental candidates.
++        return build.Season >= 19 && build.Season <= 30
++            && build.EngineMajor == 5 && build.EngineMinor <= 5;
+     }
+ }
+diff --git a/Reboot2711/Diagnostics.h b/Reboot2711/Diagnostics.h
+index 5c3989f..929b2b1 100644
+--- a/Reboot2711/Diagnostics.h
++++ b/Reboot2711/Diagnostics.h
+@@ -6,29 +6,48 @@
+ #include <fstream>
+ #include <string>
+ #include "ProcessEventLookup.h"
++#include "RuntimeProfile.h"
+ 
+ namespace Reboot2711
+ {
+-    inline void ReportStartupFailure(const char* role, const char* detail, const wchar_t* build = L"")
++    inline std::string PrintableBuild(const wchar_t* build)
+     {
+-        std::string buildText;
++        std::string result;
+         for (const wchar_t* p = build; p && *p; ++p)
+-            buildText += *p >= 32 && *p <= 126 ? static_cast<char>(*p) : '?';
+-        const std::string message = std::string("Fortnite 27.11 ") + role + " initialization stopped (revision 2).\n\n" + detail
+-            + (buildText.empty() ? "" : "\n\nDetected build: " + buildText)
+-            + "\n\nClose this game instance before retrying. This is an experimental Erbium-based build.";
++            result += *p >= 32 && *p <= 126 ? static_cast<char>(*p) : '?';
++        return result;
++    }
++
++    inline void WriteStartupLog(const char* role, const std::string& message)
++    {
+         std::fprintf(stderr, "%s\n", message.c_str());
+-        // Logging must not turn a recoverable initialization failure into a crash.
+         try
+         {
+             const auto path = std::filesystem::temp_directory_path()
+-                / (std::string("Reboot-27.11-") + role + "-startup.log");
++                / (std::string("Reboot-S19-S30-") + role + "-startup.log");
+             std::ofstream log(path, std::ios::app);
+-            log << message << '\n' << ProcessEventLookup::FailureDetails << '\n';
+-        }
+-        catch (...)
+-        {
++            log << "[PID " << GetCurrentProcessId() << "] " << message << '\n';
+         }
+-        MessageBoxA(nullptr, message.c_str(), "Reboot Launcher 27.11 - Erbium r2", MB_OK | MB_ICONERROR);
++        catch (...) { }
++    }
++
++    inline void RecordProfile(const char* role, const wchar_t* build, const RuntimeProfile& profile, bool irisEnabled)
++    {
++        WriteStartupLog(role, std::string("S19-S30 candidate 1 SDK initialized; build: ") + PrintableBuild(build)
++            + "; map: " + PrintableBuild(profile.OpenMap)
++            + "; replication: " + (irisEnabled ? "Iris" : "legacy")
++            + "; runtime compatibility: unverified");
++        if (profile.BeyondUpstreamDocumentedRange)
++            WriteStartupLog(role, "This 30.xx update is beyond upstream's documented 30.00 endpoint; no new native offsets are claimed.");
++    }
++
++    inline void ReportStartupFailure(const char* role, const char* detail, const wchar_t* build = L"")
++    {
++        const auto buildText = PrintableBuild(build);
++        const std::string message = std::string("Fortnite S19-S30 ") + role + " initialization stopped (candidate 1).\n\n" + detail
++            + (buildText.empty() ? "" : "\n\nDetected build: " + buildText)
++            + "\n\nClose this game instance before retrying. This is an experimental Erbium-based build.";
++        WriteStartupLog(role, message + '\n' + ProcessEventLookup::FailureDetails);
++        MessageBoxA(nullptr, message.c_str(), "Reboot S19-S30 - experimental candidate 1", MB_OK | MB_ICONERROR);
+     }
+ }
+diff --git a/Reboot2711/RuntimeProfile.h b/Reboot2711/RuntimeProfile.h
+new file mode 100644
+index 0000000..6073364
+--- /dev/null
++++ b/Reboot2711/RuntimeProfile.h
+@@ -0,0 +1,54 @@
++#pragma once
++#include "BuildVersion.h"
++
++namespace Reboot2711
++{
++    struct ReflectionLayout
++    {
++        unsigned OffsetInternal;
++        unsigned FieldMask;
++        unsigned FieldNext;
++        unsigned FieldName;
++        unsigned FramePropertyChain;
++        unsigned FrameNativeFunction;
++    };
++
++    struct RuntimeProfile
++    {
++        unsigned Season = 0;
++        unsigned ReleaseMinor = 0;
++        unsigned EngineMinor = 0;
++        const wchar_t* OpenMap = L"";
++        bool UseIris = false;
++        bool NeedsInventoryFilter = false;
++        bool BeyondUpstreamDocumentedRange = false;
++        ReflectionLayout Reflection{};
++    };
++
++    inline std::optional<RuntimeProfile> SelectRuntimeProfile(const BuildVersion& build)
++    {
++        if (!IsTarget(build))
++            return std::nullopt;
++        const auto release = build.Season * 100 + build.ReleaseMinor;
++        RuntimeProfile result;
++        result.Season = build.Season;
++        result.ReleaseMinor = build.ReleaseMinor;
++        result.EngineMinor = build.EngineMinor;
++        // These map names, thresholds and layouts come from the pinned Erbium source.
++        result.OpenMap = build.Season <= 22 ? L"open Artemis_Terrain"
++            : build.Season <= 26 ? L"open Asteria_Terrain"
++            : build.Season == 27 ? L"open Athena_Terrain" : L"open Helios_Terrain";
++        result.UseIris = build.EngineMinor >= 3;
++        result.NeedsInventoryFilter = result.UseIris && build.Season >= 29;
++        result.BeyondUpstreamDocumentedRange = release > 3000;
++        result.Reflection = {
++            release < 2000 ? 0x4cu : release >= 2430 ? 0x3cu : 0x44u,
++            release < 2000 ? 0x7bu : release >= 2430 ? 0x6bu : 0x73u,
++            release >= 2430 ? 0x18u : 0x20u,
++            release >= 2430 ? 0x20u : 0x28u,
++            release >= 2020 ? 0x88u : 0x80u,
++            release >= 2020 ? 0x90u : 0x88u
++        };
++        return result;
++    }
++}
+diff --git a/SDK/Core.h b/SDK/Core.h
+index 314e698..c7fba60 100644
+--- a/SDK/Core.h
++++ b/SDK/Core.h
+@@ -1,6 +1,6 @@
+ #pragma once
+ #include <tuple>
+-#ifdef REBOOT_TARGET_2711
++#ifdef REBOOT_SEASONS_19_30
+ #include "../Reboot2711/ProcessEventLookup.h"
+ #endif
+ using namespace UC;
+@@ -1292,7 +1292,7 @@ namespace SDK
+ 
+     inline void InitializeProcessEventVft(uintptr_t PEAddr)
+     {
+-#ifdef REBOOT_TARGET_2711
++#ifdef REBOOT_SEASONS_19_30
+         using namespace Reboot2711::ProcessEventLookup;
+         Offsets::ProcessEventVft = 0;
+         FailureDetails.clear();
+diff --git a/SDK/Offsets.h b/SDK/Offsets.h
+index 6d8a8a1..948e289 100644
+--- a/SDK/Offsets.h
++++ b/SDK/Offsets.h
+@@ -2,7 +2,7 @@
+ #include "Memcury.h"
+ #include <array>
+ #include <cstdio>
+-#include "../Reboot2711/BuildVersion.h"
++#include "../Reboot2711/RuntimeProfile.h"
+ 
+ namespace SDK
+ {
+@@ -19,6 +19,7 @@ namespace SDK
+     };
+     inline FVersionInfo VersionInfo{};
+     inline std::wstring DetectedBuildString;
++    inline Reboot2711::RuntimeProfile SelectedProfile{};
+ 
+     namespace Offsets
+     {
+@@ -86,14 +87,15 @@ namespace SDK
+             throw std::runtime_error("The engine returned an invalid build string.");
+         std::wstring BuildString(OutVar.Data, OutVar.NumElements - 1);
+         DetectedBuildString = BuildString;
+-#ifdef REBOOT_TARGET_2711
+-        static_assert(sizeof(void*) == 8, "Fortnite 27.11 requires an x64 DLL.");
++#ifdef REBOOT_SEASONS_19_30
++        static_assert(sizeof(void*) == 8, "Fortnite Seasons 19-30 require an x64 DLL.");
+         const auto ParsedBuild = Reboot2711::ParseBuildVersion(BuildString);
+         if (!ParsedBuild || !Reboot2711::IsTarget(*ParsedBuild))
+-            throw std::runtime_error("This DLL targets Fortnite 27.11 only. Detected: " + std::string(BuildString.begin(), BuildString.end()));
+-        VersionInfo.EngineVersion = ParsedBuild->EngineMajor + ParsedBuild->EngineMinor / 10.0;
+-        VersionInfo.FortniteVersion = 27.11;
+-        printf("27.11 target accepted: %ls (gameplay validation still required)\n", BuildString.c_str());
++            throw std::runtime_error("This experimental DLL accepts Fortnite 19.xx-30.xx with UE 5.0-5.5. Detected: " + std::string(BuildString.begin(), BuildString.end()));
++        VersionInfo.EngineVersion = (ParsedBuild->EngineMajor * 10 + ParsedBuild->EngineMinor) / 10.0;
++        VersionInfo.FortniteVersion = (ParsedBuild->Season * 100 + ParsedBuild->ReleaseMinor) / 100.0;
++        SelectedProfile = *Reboot2711::SelectRuntimeProfile(*ParsedBuild);
++        printf("Experimental S19-S30 build accepted: %ls (gameplay validation still required)\n", BuildString.c_str());
+ #else
+         std::wstring EngineVersion = BuildString.substr(0, BuildString.find(L'-'));
+         std::wstring FortniteCL = BuildString.substr(BuildString.find(L'-') + 1, BuildString.find(L'+') - BuildString.find(L'-') - 1);
+@@ -426,6 +428,21 @@ namespace SDK
+             }
+         }
+ 
++#ifdef REBOOT_SEASONS_19_30
++        const auto& Layout = SelectedProfile.Reflection;
++        Offsets::Offset_Internal = Layout.OffsetInternal;
++        Offsets::PropertyFlags = Layout.OffsetInternal - 0xc;
++        Offsets::ElementSize = Layout.OffsetInternal - 0x10;
++        Offsets::PropertiesSize = 0x58;
++        Offsets::Super = 0x40;
++        Offsets::FieldMask = Layout.FieldMask;
++        Offsets::Children = 0x48;
++        Offsets::FField_Next = Layout.FieldNext;
++        Offsets::FField_Name = Layout.FieldName;
++        Offsets::FFrame_PropertyChainForCompiledIn = Layout.FramePropertyChain;
++        Offsets::FFrame_CurrentNativeFunction = Layout.FrameNativeFunction;
++        Offsets::FFrame_Next = Layout.FieldNext;
++#else
+         Offsets::Offset_Internal = VersionInfo.FortniteVersion >= 12.10 && VersionInfo.FortniteVersion < 20 ? 0x4c : (VersionInfo.FortniteVersion >= 24.30 ? 0x3c : 0x44);
+         Offsets::PropertyFlags = Offsets::Offset_Internal - 0xc;
+         Offsets::ElementSize = Offsets::Offset_Internal - 0x10;
+@@ -438,6 +455,7 @@ namespace SDK
+         Offsets::FFrame_PropertyChainForCompiledIn = VersionInfo.FortniteVersion >= 20.20 ? 0x88 : 0x80;
+         Offsets::FFrame_CurrentNativeFunction = VersionInfo.FortniteVersion >= 20.20 ? 0x90 : 0x88;
+         Offsets::FFrame_Next = VersionInfo.FortniteVersion >= 24.30 ? 0x18 : (VersionInfo.FortniteVersion >= 12.10 ? 0x20 : 0x28);
++#endif
+ 
+         if (VersionInfo.EngineVersion < 4.22)
+             Offsets::ExecFunction = 0xB0;
+@@ -496,7 +514,7 @@ namespace SDK
+ 
+         // Reject missing core bindings before looking up objects or calling them.
+         // A nonzero signature match alone is not proof of runtime compatibility.
+-#ifdef REBOOT_TARGET_2711
++#ifdef REBOOT_SEASONS_19_30
+         const auto Require = [](uintptr_t address, const char* name)
+         {
+             if (!address)
+@@ -511,9 +529,10 @@ namespace SDK
+         Require(Offsets::StaticFindObject, "StaticFindObject");
+         Require(Offsets::StaticLoadObject, "StaticLoadObject");
+         Require(Offsets::SpawnActor, "SpawnActor");
++        Require(Offsets::FNameConstructor, "FName constructor");
+ #endif
+         InitializeProcessEventVft(addr);
+-#ifdef REBOOT_TARGET_2711
++#ifdef REBOOT_SEASONS_19_30
+         if (!Offsets::ProcessEventVft)
+             throw std::runtime_error("ProcessEvent was not located in the UObject virtual table.");
+ #endif
+diff --git a/SETUP.md b/SETUP.md
+index aa5393a..9648906 100644
+--- a/SETUP.md
++++ b/SETUP.md
+@@ -1,110 +1,63 @@
+-# Fortnite 27.11 setup with Reboot Launcher
++# Reboot Seasons 19-30 setup
+ 
+-This is an experimental **Erbium-based** server/client project for Reboot
+-Launcher on **Windows x64**. It has not been compiled on Windows or verified
+-in-game in this environment. A successful build is the first remaining gate;
+-a complete multiplayer match is the next. It is not an iOS application.
++Use the compiled Windows x64 package. Extract the entire ZIP to a writable
++folder, for example C:\Reboot-S19-S30. No copying into Fortnite's folders is
++required. Keep the prior 27.11 DLLs in their original folder for rollback.
+ 
+-## Build
++## Launcher selections
+ 
+-1. Install Visual Studio 2022 or Build Tools 2022 with **Desktop development
+-   with C++**, the **v143 x64 C++ tools**, and a **Windows 10/11 SDK**.
+-2. Extract the entire source ZIP, including the SDK and dependency directories.
+-3. Run `BUILD.cmd`. Alternatively run `scripts/Build.ps1` from PowerShell.
+-4. A successful build creates both DLLs in `dist` and checks their x64 PE/DLL
+-   headers. Keep the server and client from the same build together.
++Close both Fortnite instances before changing DLLs. In Settings > Internal files:
+ 
+-You can also open `Erbium.sln` in Visual Studio and select **Release | x64**.
+-Those outputs appear in `build/Release`; the script copies them into `dist`.
+-The repository includes a Windows GitHub Actions workflow if you prefer to
+-build in your own repository. It has not been run for this package.
+-
+-## Check your game installation
+-
+-Use your existing, complete Fortnite 27.11 Windows installation. Both the
+-hosting instance and every joining player need matching game content.
+-
+-Optional read-only preflight, in PowerShell from the source directory:
+-
+-```powershell
+-.\scripts\Check-Install.ps1 -FortniteDirectory 'D:\Games\Fortnite-27.11'
+-```
+-
+-When running from the built `dist` directory, use `./Check-Install.ps1` instead.
+-The check reads the executable's architecture and version metadata and checks
+-for the content directory. It does not verify every game file, launch the game,
+-or establish multiplayer compatibility. If metadata is missing, the script
+-reports that it cannot confirm the version.
+-
+-## Select the paired DLLs
+-
+-The labels below were checked against Reboot Launcher's source; their wording
+-may vary in a different release or language.
+-
+-| Reboot Launcher setting | Select |
+-| --- | --- |
+-| Settings → Game server type | Custom |
+-| Settings → Game server | `Reboot-27.11-Server.dll` |
+-| Settings → Unreal engine patcher | `Reboot-27.11-Client.dll` |
+-| Game server port | `7777`, matching the source configuration |
+-| Installed game version | Your 27.11 Windows installation |
+-
+-The custom Game server field is used for the host. The Unreal engine patcher
+-field is used for the playing client after login; this project's client DLL
+-also creates the Unreal console. Every joining player needs the matching client
+-DLL. Do not load both the embedded Reboot server DLL and this server DLL into
+-the same hosting process.
+-
+-These DLLs perform in-game server/client work. They do not implement backend
+-login, account storage, the launcher, or an authentication redirect. You need
+-an existing 27.11-capable local/private backend setup. The Reload Backend
+-README names 27.11 as its tested Caldera-service version, but that statement
+-does not validate this complete server/client combination. See PROVENANCE.md.
+-
+-## First local test
+-
+-1. Start your backend and confirm that a 27.11 client can reach the lobby.
+-2. Start the hosting instance through Reboot Launcher. Wait for the server
+-   window to report that players can join. The Season 27 path opens
+-   `Athena_Terrain`.
+-3. Start a separate playing instance with the paired client DLL.
+-4. Use backend matchmaking, or use the Unreal console to enter
+-   `open 127.0.0.1:7777` for a host on the same PC. For a separate host, use its
+-   address. Direct connection still needs a working client login and runtime.
+-5. Confirm the player spawns. Use the server window's **Start Bus Early**
+-   button if needed. Test jumping from the bus, moving, shooting, pickups,
+-   inventory changes, building, damage, eliminations, and storm progression.
+-6. Join with a second player and test replication in both directions before
+-   considering the combination playable.
+-
+-## If it fails
+-
+-| Where it stops | Information to collect |
++| Setting | Select |
+ | --- | --- |
+-| Compilation | First compiler error and the surrounding MSBuild output |
+-| Before lobby | Launcher/backend errors; the server DLL has not yet started |
+-| Startup message box | The full message and `%TEMP%\Reboot-27.11-Server-startup.log` or `%TEMP%\Reboot-27.11-Client-startup.log` |
+-| Map loading or joining | Exact 27.11 changelist, server output, launcher output, and the relevant game log excerpt |
+-| Gameplay | Action that triggered the problem and whether both players reproduce it |
+-
+-Game logs are normally under
+-`%LOCALAPPDATA%\FortniteGame\Saved\Logs`. Remove credentials and session tokens
+-from log excerpts before sharing them. SDK signature matches and a passed
+-preflight do not verify replication, maps, assets, or a full match.
+-
+-## Configuration and limits
+-
+-Edit `Erbium/Erbium/Public/Configuration.h` and rebuild **both** DLLs. Defaults:
+-solo playlist, port 7777, 30 ticks/second, Iris enabled, siphon disabled,
+-ordinary ammo/material consumption, late game disabled, join-in-progress
+-disabled, and automatic restart disabled.
+-
+-The project retains upstream's newer-engine movement workarounds, which can
+-disable some sprinting/sliding/mantling behavior. Do not interpret a successful
+-connection as full feature parity with the original game. Live events,
+-quests/XP, Creative, cosmetics, and persistence are not validated here.
+-
+-The version guard accepts the release label 27.11 and records the engine build
+-string. It does not whitelist a particular executable hash or assert that
+-every 27.11 hotfix/changelist works. Unknown core SDK bindings stop startup;
+-other unverified upstream paths can still fail during gameplay.
++| Authentication patcher | Reboot-S19-S30-Auth.dll |
++| Unreal engine patcher | Reboot-S19-S30-Client.dll |
++| Game server type | Custom |
++| Game server | Reboot-S19-S30-Server.dll |
++
++Select your installed Fortnite build between 19.xx and 30.xx. The host and
++playing client must use the **same exact game release/content**. Supporting
++several releases does not allow a Season 19 client to join a Season 30 host.
++This candidate expects Unreal Engine 5.0-5.5 in the engine build string.
++
++## Backend and first connection
++
++The earlier portable backend remains the intended local backend:
++[Download backend](https://github.com/EmilyUwU666/reboot-2711/actions/runs/34817850310/artifacts/10337212644).
++Its folder includes its own Node runtime and dependencies. Stop the embedded
++backend, run START-BACKEND.cmd from the extracted folder, and leave it open.
++Set Reboot Launcher's Backend type to Local, port 3551, and use Check server.
++
++Start the separate game-server instance and wait for it to listen on port 7777.
++Start your playing client using the same game version. From the client's
++console, use open 127.0.0.1:7777. The default playlist is Solo. The game server
++selects Artemis for Seasons 19-22, Asteria for 23-26, Athena for 27 and Helios
++for 28-30.
++
++If a host stops or crashes, a client can remain at CONNECTING even with a full
++loading bar. The earlier 27.11 crash/loading reports have not been proven fixed
++by this expansion. Test login, map loading, player spawn and a second player
++before testing bus travel, inventory, combat, building and storm progression.
++
++## Diagnostics and rollback
++
++SDK initialization records the actual release/engine/changelist, map and
++replication choice in %TEMP%\Reboot-S19-S30-Client-startup.log and the matching
++Server log. Authentication writes %TEMP%\Reboot-S19-S30-Auth-startup.log.
++These are diagnostic stages, not successful-match markers. Game logs remain
++under %LOCALAPPDATA%\FortniteGame\Saved\Logs.
++
++To roll back, close both game instances and select the prior three DLLs again.
++The backend selection can remain unchanged. For each failing version, retain
++the matching host/client logs and any crash report from that attempt.
++
++## Building from source
++
++On Windows, install Visual Studio 2022 or Build Tools with Desktop development
++with C++, the v143 x64 tools and a Windows SDK. Run BUILD.cmd in the server-client
++source folder. It produces the server and client in dist-S19-S30. The separate
++Tellurium source builds as Release|x64 with target name Reboot-S19-S30-Auth.
++The repository's build-seasons.yml workflow compiles all three and records
++checksums and provenance.
++
++See COMPATIBILITY.md for limits. The tests do not replace game-runtime testing.
+diff --git a/VALIDATION.md b/VALIDATION.md
+index 114ceb5..5653229 100644
+--- a/VALIDATION.md
++++ b/VALIDATION.md
+@@ -1,48 +1,16 @@
+-# Validation record
+-
+-Prepared on 2026-09-13 from the pinned Erbium commit in PROVENANCE.md.
+-
+-## Completed in this environment
+-
+-- Compiled and ran `tests/build_version_tests.cpp` with GCC, C++17,
+-  `-Wall -Wextra -Werror -pedantic`: **25 checks passed**.
+-- The tests exercise exact 27.11 acceptance, engine/changelist extraction,
+-  neighboring releases, misleading release prefixes, malformed strings,
+-  numeric overflow, and unsupported engine encodings. Test changelists are
+-  synthetic. This is a parser test, not a test against a Fortnite executable.
+-- Parsed both Visual Studio project XML files and the added build-target
+-  file; checked that their literal source-file references exist.
+-- Reviewed the shared target definition and paired server/client build paths.
+-- `git diff --check` passed after the code changes.
+-- Inspected the pinned Reboot Launcher code for custom server selection and
+-  client patcher loading after login.
+-
+-## Not completed
+-
+-| Gate | Status |
+-| --- | --- |
+-| Windows/MSVC compilation of both complete DLLs | Not run; Windows MSVC/SDK tooling is unavailable here |
+-| PowerShell script execution and syntax verification by PowerShell | Not run; PowerShell is unavailable here; download attempt timed out |
+-| Windows CI workflow | Added, not executed |
+-| Validation against the user's actual 27.11 executable/changelist | Not run; executable not provided |
+-| Backend login and client redirect | External requirements, not tested |
+-| Server startup, map load, and player connection | Not run |
+-| Two-player replication, combat, inventory, building, and storm | Not run |
+-| Complete match or long-running stability | Not run |
+-
+-No server/client DLL binary was built or supplied in this source ZIP. No
+-claim of a working or fully compatible 27.11 release is made. Upstream itself
+-describes support for newer seasons as partial.
+-
+-The added guards catch particular initialization failures; they do not verify
+-the correctness of a nonzero address or cover every upstream failure path.
+-Next, build on Windows using `BUILD.cmd` or run the provided workflow, then
+-follow the local multiplayer test in SETUP.md. Keep the build output and the
+-first failing runtime log if either stage fails.
+-
+-To rerun the portable parser tests:
+-
+-```sh
+-g++ -std=c++17 -Wall -Wextra -Werror -pedantic tests/build_version_tests.cpp -o /tmp/reboot-version-tests
+-/tmp/reboot-version-tests
+-```
++# Validation - Seasons 19-30 candidate 1
++
++The portable C++17 parser/profile suite passes 288 checks, including all twelve
++season identifiers, engine/game separation, reflection boundaries, map and
++replication choices, invalid ranges and malformed strings.
++
++The Windows workflow also runs the existing 23 ProcessEvent lookup checks,
++2,020 authentication scanner checks, and 42 authentication hook/URL checks.
++It builds all three DLLs, checks their x64 PE headers/entry points, and queries
++the pinned backend using the twelve season identifiers. Consult BUILD-INFO.txt
++in a successful binary artifact for that run's result and provenance.
++
++All executable-level test inputs are synthetic. No native Fortnite executable
++is available in the build environment. No complete match, cross-player
++replication or host-crash resolution is claimed. See COMPATIBILITY.md for
++observations from the earlier 27.11 session and the remaining runtime limits.
+diff --git a/scripts/Build.ps1 b/scripts/Build.ps1
+index 92494ba..4534449 100644
+--- a/scripts/Build.ps1
++++ b/scripts/Build.ps1
+@@ -26,18 +26,18 @@ try {
+     }
+     finally { Pop-Location }
+ 
+-    $dllNames = @('Reboot-27.11-Server.dll', 'Reboot-27.11-Client.dll')
++    $dllNames = @('Reboot-S19-S30-Server.dll', 'Reboot-S19-S30-Client.dll')
+     foreach ($name in $dllNames) {
+         $file = Join-Path $projectRoot "build\Release\$name"
+         $info = Get-PeFileInfo -Path $file
+         if (-not $info.IsX64 -or -not $info.IsDll) { throw "Expected an x64 DLL: $file" }
+     }
+-    $dist = Join-Path $projectRoot 'dist'
++    $dist = Join-Path $projectRoot 'dist-S19-S30'
+     $null = New-Item -ItemType Directory -Path $dist -Force
+     foreach ($name in $dllNames) {
+         Copy-Item -LiteralPath (Join-Path $projectRoot "build\Release\$name") -Destination $dist -Force
+     }
+-    foreach ($name in @('SETUP.md', 'LICENSE', 'PROVENANCE.md', 'REVISION-2.md')) {
++    foreach ($name in @('SETUP.md', 'LICENSE', 'PROVENANCE.md', 'COMPATIBILITY.md')) {
+         Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination $dist -Force
+     }
+     foreach ($name in @('Check-Install.ps1', 'PeFile.ps1')) {
+diff --git a/scripts/Check-Install.ps1 b/scripts/Check-Install.ps1
+index 48864bd..49644f3 100644
+--- a/scripts/Check-Install.ps1
++++ b/scripts/Check-Install.ps1
+@@ -7,7 +7,7 @@ Set-StrictMode -Version Latest
+ 
+ try {
+     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+-        throw 'Run this installation check on the Windows PC containing Fortnite 27.11.'
++        throw 'Run this installation check on the Windows PC containing Fortnite Season 19-30.'
+     }
+     $root = (Resolve-Path -LiteralPath $FortniteDirectory).Path
+     $exe = Join-Path $root 'FortniteGame\Binaries\Win64\FortniteClient-Win64-Shipping.exe'
+@@ -20,14 +20,14 @@ try {
+     $versionText = @($version.ProductVersion, $version.FileVersion) -join ' | '
+     Write-Output "Version metadata: $versionText"
+     # A metadata match is a preflight check, not a game-server compatibility test.
+-    if ($versionText -notmatch '(^|[^0-9.])27\.11(?=$|[^0-9.])') {
+-        throw 'Cannot confirm 27.11 from executable version metadata. Check the installation version before starting.'
++    if ($versionText -notmatch '(^|[^0-9.])(19|2[0-9]|30)\.[0-9]{2}(?=$|[^0-9.])') {
++        throw 'Cannot confirm a 19.xx-30.xx release from executable version metadata. Check the installation version before starting.'
+     }
+     $paks = Join-Path $root 'FortniteGame\Content\Paks'
+     if (-not (Test-Path -LiteralPath $paks -PathType Container)) { throw 'The Content\Paks directory is missing.' }
+     $content = @(Get-ChildItem -LiteralPath $paks -File | Where-Object { $_.Extension -in @('.pak', '.utoc') })
+     if ($content.Count -eq 0) { throw 'No .pak or .utoc content files were found.' }
+-    Write-Output 'Preflight passed: Windows x64, 27.11 metadata and content directory found.'
++    Write-Output 'Preflight passed: Windows x64, Season 19-30 metadata and content directory found.'
+     Write-Output 'File integrity, backend login and multiplayer gameplay still require testing.'
+ }
+ catch {
+diff --git a/tests/build_version_tests.cpp b/tests/build_version_tests.cpp
+index e58ea86..2c2c18f 100644
+--- a/tests/build_version_tests.cpp
++++ b/tests/build_version_tests.cpp
+@@ -1,5 +1,6 @@
+-#include "../Reboot2711/BuildVersion.h"
++#include "../Reboot2711/RuntimeProfile.h"
+ #include <cstdlib>
++#include <cmath>
+ #include <iostream>
+ #include <string>
+ 
+@@ -7,41 +8,78 @@ static int checks = 0;
+ static void Check(bool condition, const char* description)
+ {
+     ++checks;
+-    if (!condition)
+-    {
+-        std::cerr << "FAIL: " << description << '\n';
+-        std::exit(1);
+-    }
++    if (!condition) { std::cerr << "FAIL: " << description << '\n'; std::exit(1); }
+ }
+ 
+ int main()
+ {
+     using namespace Reboot2711;
+-    // Synthetic build strings exercise the parser; they are not game validation.
+-    const auto target = ParseBuildVersion(L"5.4.0-12345678+++Fortnite+Release-27.11");
+-    Check(target.has_value() && IsTarget(*target), "27.11 recognized");
+-    Check(target->EngineMajor == 5 && target->EngineMinor == 4, "engine components retained");
+-    Check(target->Changelist == 12345678, "changelist retained");
+-    for (const auto input : { L"5.3.0-1+++Fortnite+Release-27.11", L"5.4-999+++Fortnite+Release-27.11" })
++    // All CLs and combinations here are synthetic policy/parser inputs, not game dumps.
++    const auto target = ParseBuildVersion(L"5.4.0-29739262+++Fortnite+Release-27.11");
++    Check(target && IsTarget(*target), "existing 27.11 accepted");
++    Check(target->EngineMajor == 5 && target->EngineMinor == 4, "engine is 5.4, separate from game");
++    Check(target->Season == 27 && target->ReleaseMinor == 11, "game is 27.11");
++    Check(target->Changelist == 29739262, "changelist recorded without remapping");
++    const wchar_t* maps[] = {
++        L"open Artemis_Terrain", L"open Artemis_Terrain", L"open Artemis_Terrain", L"open Artemis_Terrain",
++        L"open Asteria_Terrain", L"open Asteria_Terrain", L"open Asteria_Terrain", L"open Asteria_Terrain",
++        L"open Athena_Terrain", L"open Helios_Terrain", L"open Helios_Terrain", L"open Helios_Terrain"
++    };
++    for (unsigned season = 19; season <= 30; ++season)
+     {
+-        const auto value = ParseBuildVersion(input);
+-        Check(value.has_value() && IsTarget(*value), "patch component optional; CL not hard-coded");
++        for (unsigned engineMinor : {0u, 2u, 3u, 4u, 5u})
++        {
++            const auto input = L"5." + std::to_wstring(engineMinor) + L".0-1+++Fortnite+Release-" + std::to_wstring(season) + L".00";
++            const auto build = ParseBuildVersion(input);
++            Check(build && IsTarget(*build), "each requested season is selectable");
++            const auto profile = SelectRuntimeProfile(*build);
++            Check(profile && std::wstring_view(profile->OpenMap) == maps[season - 19], "correct Battle Royale island");
++            Check(profile->UseIris == (engineMinor >= 3), "replication follows engine version");
++            Check(profile->NeedsInventoryFilter == (engineMinor >= 3 && season >= 29), "inventory workaround only for newer Iris path");
++        }
+     }
+-    for (const auto release : { L"27.10", L"27.00", L"27.110", L"27.011", L"28.00", L"20.40" })
++    struct LayoutCase { const wchar_t* release; unsigned field, mask, next, name, chain, nativeFn; };
++    const LayoutCase layouts[] = {
++        {L"19.00", 0x4c, 0x7b, 0x20, 0x28, 0x80, 0x88},
++        {L"19.40", 0x4c, 0x7b, 0x20, 0x28, 0x80, 0x88},
++        {L"20.00", 0x44, 0x73, 0x20, 0x28, 0x80, 0x88},
++        {L"20.19", 0x44, 0x73, 0x20, 0x28, 0x80, 0x88},
++        {L"20.20", 0x44, 0x73, 0x20, 0x28, 0x88, 0x90},
++        {L"24.29", 0x44, 0x73, 0x20, 0x28, 0x88, 0x90},
++        {L"24.30", 0x3c, 0x6b, 0x18, 0x20, 0x88, 0x90},
++        {L"27.11", 0x3c, 0x6b, 0x18, 0x20, 0x88, 0x90},
++        {L"30.40", 0x3c, 0x6b, 0x18, 0x20, 0x88, 0x90}
++    };
++    for (const auto& expected : layouts)
+     {
+-        const auto input = std::wstring(L"5.4.0-1+++Fortnite+Release-") + release;
+-        const auto value = ParseBuildVersion(input);
+-        Check(value.has_value() && !IsTarget(*value), "other releases rejected");
++        const auto build = ParseBuildVersion(std::wstring(L"5.4.0-1+++Fortnite+Release-") + expected.release);
++        Check(build && IsTarget(*build), "minor release accepted");
++        const auto profile = SelectRuntimeProfile(*build);
++        const auto& layout = profile->Reflection;
++        Check(layout.OffsetInternal == expected.field && layout.FieldMask == expected.mask
++            && layout.FieldNext == expected.next && layout.FieldName == expected.name
++            && layout.FramePropertyChain == expected.chain && layout.FrameNativeFunction == expected.nativeFn,
++            "reflection boundaries preserve pinned upstream layouts");
+     }
+-    for (const auto input : { L"", L"27.11", L"5.4.0-0+++Fortnite+Release-27.11", L"5.4.0-1+++Fortnite+Release-27.11extra",
+-                             L"5.4.0-1+++Fortnite+Release-27.11.1", L"5.4.0-1+++Other+Release-27.11", L"5.4.0-x+++Fortnite+Release-27.11",
+-                             L"5.4.0-18446744073709551616+++Fortnite+Release-27.11", L"5.4.0-1+++Fortnite+Release-27.",
+-                             L"-5.4.0-1+++Fortnite+Release-27.11", L"5..0-1+++Fortnite+Release-27.11" })
+-        Check(!ParseBuildVersion(input).has_value(), "malformed or overflowing string rejected");
+-    for (const auto input : { L"4.27.0-1+++Fortnite+Release-27.11", L"6.0.0-1+++Fortnite+Release-27.11", L"5.10.0-1+++Fortnite+Release-27.11" })
++    for (const auto input : {L"5.4-1+++Fortnite+Release-19.00", L"5.4.0-18446744073709551615+++Fortnite+Release-30.99"})
++        Check(ParseBuildVersion(input).has_value(), "optional engine patch and full changelist range");
++    for (const auto input : {L"", L"27.11", L"5.4.0-0+++Fortnite+Release-27.11", L"5.4.0-1+++Fortnite+Release-27.11extra",
++        L"5.4.0-1+++Fortnite+Release-27.11.1", L"5.4.0-1+++Other+Release-27.11", L"5.4.0-x+++Fortnite+Release-27.11",
++        L"5.4.0-18446744073709551616+++Fortnite+Release-27.11", L"5.4.0-1+++Fortnite+Release-27.",
++        L"5..0-1+++Fortnite+Release-27.11", L"5.4.0-1+++Fortnite+Release-27.110", L"5.4.0-1+++Fortnite+Release-27.011",
++        L"5.4.0-1+++Fortnite+Release-27.1", L"5.4.0-1+++Fortnite+Release-019.00", L"5.4.0-1+++Fortnite+Release-190.00",
++        L"5.4.0-1+++Fortnite+Release-18446744073709551616.00"})
++        Check(!ParseBuildVersion(input), "malformed or misleading release rejected");
++    for (const auto input : {L"5.4.0-1+++Fortnite+Release-18.40", L"5.4.0-1+++Fortnite+Release-31.00",
++        L"4.27.0-1+++Fortnite+Release-19.00", L"6.0.0-1+++Fortnite+Release-30.00", L"5.6.0-1+++Fortnite+Release-30.00",
++        L"5.10.0-1+++Fortnite+Release-27.11"})
+     {
+-        const auto value = ParseBuildVersion(input);
+-        Check(value.has_value() && !IsTarget(*value), "unsupported engine encoding rejected");
++        const auto build = ParseBuildVersion(input);
++        Check(build && !IsTarget(*build) && !SelectRuntimeProfile(*build), "out-of-range build has no native profile");
+     }
+-    std::cout << checks << " version-parser checks passed. Gameplay is not covered.\n";
++    const auto endpoint = ParseBuildVersion(L"5.5.0-1+++Fortnite+Release-30.00");
++    const auto later = ParseBuildVersion(L"5.5.0-1+++Fortnite+Release-30.10");
++    Check(!SelectRuntimeProfile(*endpoint)->BeyondUpstreamDocumentedRange, "upstream documented endpoint");
++    Check(SelectRuntimeProfile(*later)->BeyondUpstreamDocumentedRange, "later 30.xx carries extra unverified marker");
++    std::cout << checks << " version/profile checks passed. These are synthetic; gameplay is not covered.\n";
+ }
