@@ -1,4 +1,46 @@
-# Fortnite 27.11 build status
+# Fortnite Seasons 19-30 and 27.11 build status
+
+## Seasons 19-30 - experimental candidate 1
+
+The combined Windows package is compiled and available:
+
+- DLL download: https://github.com/EmilyUwU666/reboot-2711/actions/runs/34847063986/artifacts/10349075304
+- Corresponding source: https://github.com/EmilyUwU666/reboot-2711/actions/runs/34847063986/artifacts/10348805925
+- Successful build: https://github.com/EmilyUwU666/reboot-2711/actions/runs/34847063986
+- Workflow commit: 4aab950a0d518b0b13e5c545f49a0568d27341f8
+- Server/client: 0 errors, 2 existing wchar_t-to-char conversion warnings.
+- Authentication: 0 errors, 0 warnings.
+- Checks passed: 288 version/profile, 23 ProcessEvent lookup, 2,020 authentication scanner, 42 Windows authentication hook/URL.
+- Backend checks passed: 27 original HTTP/WebSocket and 157 cross-season HTTP/profile checks, covering all twelve seasons and switching back to Season 19.
+- DLL ZIP SHA256: 60f623829b8939eadb1d3a31f8f161ac5b7ade5a166d8b6d17a0aeade020b479
+
+| Launcher Internal files setting | DLL | SHA256 |
+| --- | --- | --- |
+| Authentication patcher | Reboot-S19-S30-Auth.dll | 878c3d6141e2ca9bf0b140f02f38d59393dbf15b6b954ab387c31387eac70ce3 |
+| Unreal engine patcher | Reboot-S19-S30-Client.dll | 246b36a8a49fa7681ae039d8bf9424edd63b82194f9a90e42ecd005a1d0c1dfa |
+| Custom game server | Reboot-S19-S30-Server.dll | 032ea3458f0a84fceeb158d20d03e7b97511e05004fd0087051421c43d9bced1 |
+
+Close both game instances, extract the package, then select these three DLLs.
+Keep the portable backend below running with Backend type Local and port 3551.
+Both game instances must use the same exact Fortnite version/content. This
+does not provide cross-version multiplayer.
+
+The server/client now accept canonical 19.xx-30.xx release labels with UE
+5.0-5.5, retain the actual release instead of forcing 27.11, select each chapter's
+Battle Royale map, and share the existing reflection/replication policy.
+Additional diagnostics record the selected build/map/replication. The Season
+29+ Iris inventory configuration and required FName constructor are checked
+before use. The authentication overlay changes its name and diagnostic paths;
+it retains the earlier candidate's hook/ABI assumptions.
+
+This enables existing code paths; it does not validate every native offset or
+gameplay feature. Upstream documents partial support from 20.00 through 30.00.
+Later 30.xx updates are accepted experimentally with an additional diagnostic,
+without new verified offsets. No Fortnite executable was run during this build.
+Full gameplay and the earlier 27.11 client loading stall/host crash remain
+unverified. SETUP.md and COMPATIBILITY.md inside the package explain the scope.
+
+The older 27.11 artifacts below remain available for rollback.
 
 ## Portable backend - candidate 1
 
