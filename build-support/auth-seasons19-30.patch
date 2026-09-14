@@ -1,0 +1,133 @@
+--- a/Tellurium/Startup.h
++++ b/Tellurium/Startup.h
+@@ -32,10 +32,10 @@
+         wchar_t temp[MAX_PATH] = {};
+         const DWORD length = GetTempPathW(MAX_PATH, temp);
+         if (length && length < MAX_PATH)
+-            swprintf_s(LogPath, L"%sReboot-27.11-Auth-startup.log", temp);
++            swprintf_s(LogPath, L"%sReboot-S19-S30-Auth-startup.log", temp);
+         FILE* file = nullptr;
+         if (*LogPath && _wfopen_s(&file, LogPath, L"wb") == 0 && file) fclose(file);
+-        Log("Reboot 27.11 Auth candidate 1; Tellurium 8750678312c011888b82878fb1d011b97b33fff5; PID=%lu", GetCurrentProcessId());
++        Log("Reboot S19-S30 Auth candidate 1; Tellurium 8750678312c011888b82878fb1d011b97b33fff5; PID=%lu", GetCurrentProcessId());
+         Log("Backend=http://127.0.0.1:3551; routing=Default; memory patch=off; push widget patch=off");
+     }
+ 
+@@ -45,9 +45,9 @@
+         char message[1024] = {};
+         sprintf_s(message,
+             "Authentication initialization stopped.\n\n%s\n\n"
+-            "Diagnostic log: %%TEMP%%\\Reboot-27.11-Auth-startup.log\n\n"
++            "Diagnostic log: %%TEMP%%\\Reboot-S19-S30-Auth-startup.log\n\n"
+             "Close this game instance before retrying. This is an experimental build.", reason);
+-        MessageBoxA(nullptr, message, "Reboot 27.11 - Tellurium Auth candidate 1", MB_OK | MB_ICONERROR);
++        MessageBoxA(nullptr, message, "Reboot S19-S30 - Tellurium Auth candidate 1", MB_OK | MB_ICONERROR);
+     }
+ 
+     inline bool Readable(uintptr_t address, size_t length)
+--- a/Tellurium/Options.h
++++ b/Tellurium/Options.h
+@@ -17,4 +17,4 @@
+ // misc options, don't change unless you know what you're doing
+ constexpr bool UseBackendParam = false; // for phoenix/paradise launcher
+ constexpr bool ManualMapping = false; // if you're using EAC & a manual mapper, then enable this for the dll to work
+-constexpr bool FixMemLeak = false; // Not used by this Fortnite 27.11 authentication build.
++constexpr bool FixMemLeak = false; // Not used by this Fortnite Seasons 19-30 authentication candidate.
+--- a/AUTH-SETUP.md
++++ b/AUTH-SETUP.md
+@@ -1,83 +1,15 @@
+-# Reboot 27.11 authentication DLL - candidate 1
++# Reboot Seasons 19-30 authentication candidate 1
+ 
+-This is a compiled Tellurium derivative for a backend running on the same PC
+-at `http://127.0.0.1:3551`. It is experimental: compilation and synthetic tests
+-do not establish compatibility with the Fortnite 27.11 executable or EOS SDK.
++Select Reboot-S19-S30-Auth.dll as Reboot Launcher's Authentication patcher.
++It redirects the existing private-backend flow to http://127.0.0.1:3551.
++Keep the backend running before starting either game instance.
+ 
+-## Install
++Based on Tellurium 8750678312c011888b82878fb1d011b97b33fff5 with the prior
++bounded initialization, scanner, pointer and URL handling fixes. The S19-S30
++overlay changes branding/diagnostic filenames, not game ABI assumptions.
++The earlier 27.11 candidate reached lobby login; other seasons are unverified.
+ 
+-1. Close both Fortnite instances before changing DLL selections.
+-2. Extract the downloaded artifact ZIP into a permanent folder, for example
+-   `C:\Reboot2711\Auth`.
+-3. Open Reboot Launcher -> Settings -> Internal files.
+-4. Beside **Authentication patcher**, click the folder button and select
+-   **Reboot-27.11-Auth.dll**. This replaces the selected Cobalt/Sinum auth DLL.
+-5. Start the existing local backend on port 3551, then launch Fortnite 27.11.
+-
+-| Launcher field | DLL |
+-| --- | --- |
+-| Authentication patcher | Reboot-27.11-Auth.dll from this package |
+-| Unreal engine patcher | Existing Reboot-27.11-Client.dll |
+-| Game server type | Custom |
+-| Game server | Existing Reboot-27.11-Server.dll |
+-
+-No copy into Fortnite's installation directory is necessary: select the extracted
+-DLL with the launcher's folder button. This package contains only the auth DLL;
+-the client and server DLLs are separate artifacts.
+-
+-## Diagnostics
+-
+-Press Win+R and open `%TEMP%\Reboot-27.11-Auth-startup.log` after a launch.
+-The file is replaced on each new initialization. Start one game instance at a
+-time while diagnosing a failure. The log records stages and relative addresses,
+-without request URLs, passwords, session tokens, or command-line arguments.
+-
+-- Allocator missing: the executable's allocator signature needs investigation.
+-- Stage 1: loaded PE sections could not be read.
+-- Stage 2: the request-function string reference was not found.
+-- Stage 3: the request function could not be identified.
+-- Stage 4: a pointer to that function was not found in the request table.
+-- READY: both hooks were installed, but login is not yet verified.
+-- First URL redirected: that request was rewritten; backend response and login
+-  still need to succeed.
+-
+-Each discovery stage has a 30-second retry budget with pauses. A failure displays
+-a message instead of proceeding through a missing pointer. The main and EOS
+-request locations are both discovered before either hook is installed.
+-
+-The earlier **Object class was not found in GObjects** error comes from the
+-separate Erbium client/server initialization. This auth build does not resolve
+-that SDK lookup. If that error returns after authentication succeeds, collect
+-`%TEMP%\Reboot-27.11-Client-startup.log` or the corresponding Server log.
+-
+-`5.4.0-29739262+++Fortnite+Release-27.11` contains the engine version (5.4.0),
+-changelist (29739262), and game release (27.11); those are different fields.
+-
+-## Build and provenance
+-
+-Based on Ploosh's Tellurium, commit
+-`8750678312c011888b82878fb1d011b97b33fff5`:
+-https://github.com/plooshi/Tellurium/tree/8750678312c011888b82878fb1d011b97b33fff5
+-
+-Upstream is BSD 3-Clause; the original LICENSE is included in the binary and
+-source packages. Changes add bounded scanners and startup waits, Windows unwind
+-function lookup with the upstream prologue fallback, checked request-table writes,
+-startup diagnostics, and bounded URL handling. The Release x64 build uses the
+-static C++ runtime. Optional memory and push-widget patches are disabled.
+-
+-This candidate retains upstream's request-object ABI assumptions, including the
+-EOS SetURL virtual index 10 and the game SetURL fallback index 10. Runtime logs
+-report the chosen index. These are not validated against the user's executable.
+-No claim of full Fortnite 27.11 support or a working multiplayer match is made.
+-
+-The matching source artifact includes this document and tests. On Windows with
+-Visual Studio 2022 C++ tools installed, run from a Developer Command Prompt:
+-
+-```
+-msbuild Tellurium.sln /m /t:Rebuild /p:Configuration=Release /p:Platform=x64 /p:TargetName=Reboot-27.11-Auth
+-```
+-
+-The reproducible GitHub workflow in EmilyUwU666/reboot-2711 pins the upstream
+-commit, applies `build-support/auth-candidate1.patch`, runs scanner and Windows
+-hook/URL tests, builds the DLL, validates its x64 PE headers, and records SHA256.
+-`BUILD-INFO.txt` in the binary artifact identifies the exact workflow commit.
++Diagnostic file: %TEMP%\Reboot-S19-S30-Auth-startup.log. READY reports installed
++hooks, not completed login or multiplayer compatibility. See the combined
++package's SETUP.md and COMPATIBILITY.md. The upstream BSD-3-Clause LICENSE is
++included as AUTH-LICENSE.txt in the compiled package and LICENSE in this source.
