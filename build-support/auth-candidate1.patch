@@ -1,0 +1,1480 @@
+diff --git a/AUTH-SETUP.md b/AUTH-SETUP.md
+new file mode 100644
+index 0000000..e7c84ee
+--- /dev/null
++++ b/AUTH-SETUP.md
+@@ -0,0 +1,83 @@
++# Reboot 27.11 authentication DLL - candidate 1
++
++This is a compiled Tellurium derivative for a backend running on the same PC
++at `http://127.0.0.1:3551`. It is experimental: compilation and synthetic tests
++do not establish compatibility with the Fortnite 27.11 executable or EOS SDK.
++
++## Install
++
++1. Close both Fortnite instances before changing DLL selections.
++2. Extract the downloaded artifact ZIP into a permanent folder, for example
++   `C:\Reboot2711\Auth`.
++3. Open Reboot Launcher -> Settings -> Internal files.
++4. Beside **Authentication patcher**, click the folder button and select
++   **Reboot-27.11-Auth.dll**. This replaces the selected Cobalt/Sinum auth DLL.
++5. Start the existing local backend on port 3551, then launch Fortnite 27.11.
++
++| Launcher field | DLL |
++| --- | --- |
++| Authentication patcher | Reboot-27.11-Auth.dll from this package |
++| Unreal engine patcher | Existing Reboot-27.11-Client.dll |
++| Game server type | Custom |
++| Game server | Existing Reboot-27.11-Server.dll |
++
++No copy into Fortnite's installation directory is necessary: select the extracted
++DLL with the launcher's folder button. This package contains only the auth DLL;
++the client and server DLLs are separate artifacts.
++
++## Diagnostics
++
++Press Win+R and open `%TEMP%\Reboot-27.11-Auth-startup.log` after a launch.
++The file is replaced on each new initialization. Start one game instance at a
++time while diagnosing a failure. The log records stages and relative addresses,
++without request URLs, passwords, session tokens, or command-line arguments.
++
++- Allocator missing: the executable's allocator signature needs investigation.
++- Stage 1: loaded PE sections could not be read.
++- Stage 2: the request-function string reference was not found.
++- Stage 3: the request function could not be identified.
++- Stage 4: a pointer to that function was not found in the request table.
++- READY: both hooks were installed, but login is not yet verified.
++- First URL redirected: that request was rewritten; backend response and login
++  still need to succeed.
++
++Each discovery stage has a 30-second retry budget with pauses. A failure displays
++a message instead of proceeding through a missing pointer. The main and EOS
++request locations are both discovered before either hook is installed.
++
++The earlier **Object class was not found in GObjects** error comes from the
++separate Erbium client/server initialization. This auth build does not resolve
++that SDK lookup. If that error returns after authentication succeeds, collect
++`%TEMP%\Reboot-27.11-Client-startup.log` or the corresponding Server log.
++
++`5.4.0-29739262+++Fortnite+Release-27.11` contains the engine version (5.4.0),
++changelist (29739262), and game release (27.11); those are different fields.
++
++## Build and provenance
++
++Based on Ploosh's Tellurium, commit
++`8750678312c011888b82878fb1d011b97b33fff5`:
++https://github.com/plooshi/Tellurium/tree/8750678312c011888b82878fb1d011b97b33fff5
++
++Upstream is BSD 3-Clause; the original LICENSE is included in the binary and
++source packages. Changes add bounded scanners and startup waits, Windows unwind
++function lookup with the upstream prologue fallback, checked request-table writes,
++startup diagnostics, and bounded URL handling. The Release x64 build uses the
++static C++ runtime. Optional memory and push-widget patches are disabled.
++
++This candidate retains upstream's request-object ABI assumptions, including the
++EOS SetURL virtual index 10 and the game SetURL fallback index 10. Runtime logs
++report the chosen index. These are not validated against the user's executable.
++No claim of full Fortnite 27.11 support or a working multiplayer match is made.
++
++The matching source artifact includes this document and tests. On Windows with
++Visual Studio 2022 C++ tools installed, run from a Developer Command Prompt:
++
++```
++msbuild Tellurium.sln /m /t:Rebuild /p:Configuration=Release /p:Platform=x64 /p:TargetName=Reboot-27.11-Auth
++```
++
++The reproducible GitHub workflow in EmilyUwU666/reboot-2711 pins the upstream
++commit, applies `build-support/auth-candidate1.patch`, runs scanner and Windows
++hook/URL tests, builds the DLL, validates its x64 PE headers, and records SHA256.
++`BUILD-INFO.txt` in the binary artifact identifies the exact workflow commit.
+diff --git a/Tellurium/Hooks.cpp b/Tellurium/Hooks.cpp
+index 2e21b32..8f9d9ba 100644
+--- a/Tellurium/Hooks.cpp
++++ b/Tellurium/Hooks.cpp
+@@ -2,230 +2,170 @@
+ #include "Hooks.h"
+ #include "Patchfinder.h"
+ #include "Options.h"
++#include "ScanRange.h"
++#include "Startup.h"
++#include "RequestHook.h"
+ 
+-bool InitializeForModule(uint64_t Module, void* Hook, void** OG, bool EOS)
++namespace
+ {
+-    Tellurium::PE::ImageBase = Module;
+-
+-    auto processRequestStr = Tellurium::Patchfinder::FindStringRef(L"STAT_FCurlHttpRequest_ProcessRequest");
+-
+-    if (!processRequestStr)
+-        processRequestStr = Tellurium::Patchfinder::FindStringRef(L"%p: request (easy handle:%p) has been added to threaded queue for processing");
+-
+-    if (!processRequestStr)
+-        processRequestStr = Tellurium::Patchfinder::FindStringRef("STAT_FCurlHttpRequest_ProcessRequest");
+-
+-    if (!processRequestStr)
+-        return false;
++    enum class Stage { Ready, Sections, Reference, Function, Table };
++    struct Discovery
++    {
++        Tellurium::RequestHook::Site site;
++        uintptr_t reference = 0;
++        bool unwind = false;
++    };
+ 
+-    uint64_t ProcessRequest = 0;
+-    for (int i = 0; i < 2048; i++)
++    Stage FindRequestHook(uintptr_t module, Discovery& result, bool eos)
+     {
+-        if (EOS)
++        using namespace Tellurium;
++        PE::ImageBase = module;
++        const auto text = PE::GetSection(".text");
++        const auto rdata = PE::GetSection(".rdata");
++        if (!text || !rdata) return Stage::Sections;
++        auto reference = Patchfinder::FindStringRef(L"STAT_FCurlHttpRequest_ProcessRequest");
++        if (!reference) reference = Patchfinder::FindStringRef(L"%p: request (easy handle:%p) has been added to threaded queue for processing");
++        if (!reference) reference = Patchfinder::FindStringRef("STAT_FCurlHttpRequest_ProcessRequest");
++        if (!reference) return Stage::Reference;
++        result.reference = reference;
++
++        const uintptr_t textStart = module + text->VirtualAddress;
++        const uintptr_t textEnd = textStart + text->Misc.VirtualSize;
++        const auto findSlot = [&](uintptr_t function) -> bool
+         {
+-            if (Tellurium::Patchfinder::CheckBytes<0x48, 0x89, 0x5C>(processRequestStr, i, true))
+-            {
+-                ProcessRequest = processRequestStr - i;
+-                break;
+-            }
++            if (function < textStart || function >= textEnd) return false;
++            const auto slot = ScanRange::PointerSlot(reinterpret_cast<const uint8_t*>(module + rdata->VirtualAddress),
++                rdata->Misc.VirtualSize, function);
++            if (!slot) return false;
++            result.site = {function, slot};
++            return true;
++        };
++
++        // Windows x64 unwind metadata gives a function boundary without guessing its prologue.
++        DWORD64 unwindBase = 0;
++        const auto entry = RtlLookupFunctionEntry(reference, &unwindBase, nullptr);
++        if (entry && findSlot(unwindBase + entry->BeginAddress))
++        {
++            result.unwind = true;
++            return Stage::Ready;
+         }
+-        else
++
++        // Retain the upstream fallback for functions without a matching unwind entry.
++        uintptr_t function = 0;
++        const auto check = [&](int distance, const uint8_t* bytes, size_t count) -> bool
+         {
+-            if (Tellurium::Patchfinder::CheckBytes<0x4C, 0x8B, 0xDC>(processRequestStr, i, true))
+-            {
+-                ProcessRequest = processRequestStr - i;
+-                break;
+-            }
+-            else if (Tellurium::Patchfinder::CheckBytes<0x48, 0x8B, 0xC4>(processRequestStr, i, true))
+-            {
+-                ProcessRequest = processRequestStr - i;
+-                break;
+-            }
+-            else if (Tellurium::Patchfinder::CheckBytes<0x48, 0x81, 0xEC>(processRequestStr, i, true) || Tellurium::Patchfinder::CheckBytes<0x48, 0x83, 0xEC>(processRequestStr, i, true))
++            if (distance < 0 || static_cast<uintptr_t>(distance) > reference - textStart) return false;
++            const uintptr_t address = reference - distance;
++            return count <= textEnd - address && std::memcmp(reinterpret_cast<const void*>(address), bytes, count) == 0;
++        };
++        const uint8_t movR11[] = {0x4c, 0x8b, 0xdc};
++        const uint8_t movRax[] = {0x48, 0x8b, 0xc4};
++        const uint8_t movStack[] = {0x48, 0x89, 0x5c};
++        const uint8_t subLong[] = {0x48, 0x81, 0xec};
++        const uint8_t subShort[] = {0x48, 0x83, 0xec};
++        const uint8_t rex[] = {0x40};
++        for (int i = 0; i < 2048; ++i)
++        {
++            if (eos ? check(i, movStack, 3) : (check(i, movR11, 3) || check(i, movRax, 3)))
++            { function = reference - i; break; }
++            if (!eos && (check(i, subLong, 3) || check(i, subShort, 3)))
+             {
+-                for (int x = 0; x < 50; x++)
++                for (int j = 0; j < 50; ++j)
+                 {
+-                    if (Tellurium::Patchfinder::CheckBytes<0x40>(processRequestStr, i + x, true))
+-                    {
+-                        ProcessRequest = processRequestStr - i - x;
+-                        goto _found;
+-                    }
+-                    else if (Tellurium::Patchfinder::CheckBytes<0x4C, 0x8B, 0xDC>(processRequestStr, i + x, true) || Tellurium::Patchfinder::CheckBytes<0x48, 0x8B, 0xC4>(processRequestStr, i + x, true) || Tellurium::Patchfinder::CheckBytes<0x48, 0x89, 0x5C>(processRequestStr, i + x, true))
+-                        break;
++                    if (check(i + j, rex, 1)) { function = reference - i - j; break; }
++                    if (check(i + j, movR11, 3) || check(i + j, movRax, 3) || check(i + j, movStack, 3)) break;
+                 }
++                if (function) break;
+             }
+         }
++        if (!function) return entry ? Stage::Table : Stage::Function;
++        return findSlot(function) ? Stage::Ready : Stage::Table;
+     }
+ 
+-    if (!ProcessRequest)
+-        return false;
+-_found:
+-    auto rdataSection = Tellurium::PE::GetSection(".rdata");
+-    const auto rdataStart = (uint8_t*)(Tellurium::PE::ImageBase + rdataSection->VirtualAddress);
+-    const auto rdataEnd = rdataStart + rdataSection->Misc.VirtualSize;
+-
+-    uint64_t ProcessRequestVFT = 0;
+-    __m128i t = _mm_set1_epi32((int)(ProcessRequest & 0xffffffff));
+-    for (uint32_t i = 0; i < rdataSection->Misc.VirtualSize - (rdataSection->Misc.VirtualSize % 16); i += 16)
++    bool DiscoverWithDeadline(uintptr_t module, Discovery& result, bool eos)
+     {
+-        auto bytes = _mm_load_si128((const __m128i*)(rdataStart + i));
+-        int offset = _mm_movemask_epi8(_mm_cmpeq_epi32(bytes, t));
+-
+-        if (offset == 0)
+-            continue;
+-
+-        for (int q = 0; q < 16; q += 4)
++        using namespace Tellurium;
++        const auto deadline = GetTickCount64() + 30000;
++        Stage previous = Stage::Ready;
++        do
+         {
+-            int c = offset & (1 << q);
+-            if (c)
++            const auto stage = FindRequestHook(module, result, eos);
++            if (stage == Stage::Ready)
+             {
+-                auto VFT = (uint64_t*)(rdataStart + i + q);
+-
+-                if (*VFT == ProcessRequest)
+-                {
+-                    ProcessRequestVFT = uint64_t(VFT);
+-                    goto _foundVFT;
+-                }
++                Startup::Log("%s request hook located: reference RVA=0x%llx, function RVA=0x%llx, table RVA=0x%llx, method=%s",
++                    eos ? "EOS" : "Game", result.reference - module, result.site.function - module,
++                    result.site.slot - module, result.unwind ? "Windows unwind metadata" : "upstream prologue fallback");
++                return true;
+             }
+-        }
+-    }
+-
+-    if (!ProcessRequest)
++            if (stage != previous)
++                Startup::Log("%s lookup waiting at stage %d (1=sections, 2=string reference, 3=function, 4=request table)",
++                    eos ? "EOS" : "Game", static_cast<int>(stage));
++            previous = stage;
++            Sleep(100);
++        } while (GetTickCount64() < deadline);
++        char reason[256] = {};
++        sprintf_s(reason, "%s request lookup timed out at stage %d. No request hooks have been installed.",
++            eos ? "EOS" : "Game", static_cast<int>(previous));
++        Startup::Fail(reason);
+         return false;
+-
+-_foundVFT:
+-    DWORD oldProt;
+-    VirtualProtect(LPVOID(ProcessRequestVFT), sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProt);
+-
+-    if (OG)
+-        *OG = (void*)ProcessRequest;
+-
+-    *(void**)ProcessRequestVFT = Hook;
+-
+-    VirtualProtect(LPVOID(ProcessRequestVFT), sizeof(void*), oldProt, &oldProt);
+-
+-    return true;
++    }
+ }
+ 
+-bool ProcessRequestHook(Tellurium::Unreal::FCurlHttpRequest* _this)
++bool ProcessRequestHook(Tellurium::Unreal::FCurlHttpRequest* request)
+ {
+-    _this->RedirectRequest(false);
+-    return Tellurium::Unreal::FCurlHttpRequest::ProcessRequestOG(_this);
++    request->RedirectRequest(false);
++    return Tellurium::Unreal::FCurlHttpRequest::ProcessRequestOG(request);
+ }
+ 
+-bool ProcessRequest__EOS(Tellurium::Unreal::FCurlHttpRequest* _this)
++bool ProcessRequestEOS(Tellurium::Unreal::FCurlHttpRequest* request)
+ {
+-    _this->RedirectRequest(true);
+-    return Tellurium::Unreal::FCurlHttpRequest::ProcessRequestOG__EOS(_this);
++    request->RedirectRequest(true);
++    return Tellurium::Unreal::FCurlHttpRequest::ProcessRequestOG__EOS(request);
+ }
+ 
+-bool bInit = false;
+ void Tellurium::Hooks::Init()
+ {
+-    if (Console)
++    Startup::Begin();
++    const auto game = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
++    PE::ImageBase = game;
++    constexpr auto allocator = Patchfinder::Pattern<"48 89 5C 24 08 48 89 74 24 10 57 48 83 EC ? 48 8B F1 41 8B D8 48 8B 0D ? ? ? ?">();
++    const auto deadline = GetTickCount64() + 30000;
++    do
+     {
+-        AllocConsole();
+-
+-        FILE* fptr;
+-        freopen_s(&fptr, "CONOUT$", "w+", stdout);
+-        SetConsoleTitleA("Tellurium (https://github.com/plooshi/Tellurium)");
++        Unreal::FMemory__Realloc = allocator.Scan();
++        if (Unreal::FMemory__Realloc) break;
++        Sleep(100);
++    } while (GetTickCount64() < deadline);
++    if (!Unreal::FMemory__Realloc)
++    {
++        Startup::Fail("Game allocator signature was not found within 30 seconds. No request hooks have been installed.");
++        return;
+     }
+-
+-    constexpr static auto ReallocSig = Tellurium::Patchfinder::Pattern<"48 89 5C 24 08 48 89 74 24 10 57 48 83 EC ? 48 8B F1 41 8B D8 48 8B 0D ? ? ? ?">();
+-    while (!Tellurium::Unreal::FMemory__Realloc)
+-        Tellurium::Unreal::FMemory__Realloc = ReallocSig.Scan();
+-
+-    if (UseBackendParam)
++    Startup::Log("Game allocator located: RVA=0x%llx", Unreal::FMemory__Realloc - game);
++    Discovery gameHook, eosHook;
++    if (!DiscoverWithDeadline(game, gameHook, false)) return;
++    auto eos = GetModuleHandleW(L"EOSSDK-Win64-Shipping.dll");
++    if (!eos) eos = LoadLibraryW(L"EOSSDK-Win64-Shipping.dll");
++    if (!eos)
+     {
+-        Tellurium::Unreal::FString cmd = GetCommandLineW();
+-        auto pos = cmd.find(L"-backend=");
+-        if (pos != Tellurium::Unreal::FString::npos)
+-            Tellurium::Unreal::backend = cmd.substr(pos + 9);
+-        else
+-            Tellurium::Unreal::backend = Backend;
++        Startup::Log("EOS module load failed: Windows error=%lu", GetLastError());
++        Startup::Fail("EOSSDK-Win64-Shipping.dll could not be loaded. No request hooks have been installed.");
++        return;
+     }
+-
+-    while (!InitializeForModule(Tellurium::PE::ImageBase, ProcessRequestHook, (void**)&Tellurium::Unreal::FCurlHttpRequest::ProcessRequestOG, false));
+-
+-    auto EOSBuf = LoadLibraryA("EOSSDK-Win64-Shipping");
+-
+-    if (EOSBuf)
++    if (!DiscoverWithDeadline(reinterpret_cast<uintptr_t>(eos), eosHook, true)) return;
++    PE::ImageBase = game;
++    if (!RequestHook::Install(gameHook.site, reinterpret_cast<void*>(ProcessRequestHook),
++        reinterpret_cast<void**>(&Unreal::FCurlHttpRequest::ProcessRequestOG)))
+     {
+-        InitializeForModule(uint64_t(EOSBuf), ProcessRequest__EOS, (void**)&Tellurium::Unreal::FCurlHttpRequest::ProcessRequestOG__EOS, true);
+-
+-        // pushwidget isnt on pre-EOS builds
+-        if (bHasPushWidget)
+-        {
+-            Tellurium::PE::ImageBase = *(uint64_t*)(__readgsqword(0x60) + 0x10);
+-            constexpr static auto PushWidget1 = Tellurium::Patchfinder::Pattern<"48 89 5C 24 ? 48 89 6C 24 ? 48 89 74 24 ? 57 48 83 EC 30 48 8B E9 49 8B D9 48 8D 0D ? ? ? ? 49 8B F8 48 8B F2 E8 ? ? ? ? 4C 8B CF 48 89 5C 24 ? 4C 8B C6 48 8B D5 48 8B 48 78">();
+-            constexpr static auto PushWidget2 = Tellurium::Patchfinder::Pattern<"48 8B C4 4C 89 40 18 48 89 50 10 48 89 48 08 55 53 56 57 41 54 41 55 41 56 41 57 48 8D 68 B8 48 81 EC ? ? ? ? 65 48 8B 04 25">();
+-            constexpr static auto PushWidget3 = Tellurium::Patchfinder::Pattern<"48 8B C4 48 89 58 ? 48 89 70 ? 48 89 78 ? 55 41 56 41 57 48 8D 68 A1 48 81 EC ? ? ? ? 65 48 8B 04 25 ? ? ? ? 48 8B F9 B9 ? ? ? ?">();
+-            constexpr static auto PushWidget4 = Tellurium::Patchfinder::Pattern<"48 89 5C 24 ? 48 89 74 24 ? 55 57 41 54 41 56 41 57 48 8D 6C 24 ? 48 81 EC ? ? ? ? 49 8B D9 49 8B F8 4C 8B E2 4C 8B F1">();
+-
+-            if (PushWidget1.Scan() || PushWidget2.Scan() || PushWidget3.Scan() || PushWidget4.Scan())
+-            {
+-                constexpr static auto RequestExitWithStatus1 = Tellurium::Patchfinder::Pattern<"48 89 5C 24 ? 57 48 83 EC 40 41 B9 ? ? ? ? 0F B6 F9 44 38 0D ? ? ? ? 0F B6 DA 72 24 89 5C 24 30 48 8D 05 ? ? ? ? 89 7C 24 28 4C 8D 05 ? ? ? ? 33 D2 48 89 44 24 ? 33 C9 E8 ? ? ? ?">();
+-                constexpr static auto RequestExitWithStatus2 = Tellurium::Patchfinder::Pattern<"48 8B C4 48 89 58 18 88 50 10 88 48 08 57 48 83 EC 30">();
+-                constexpr static auto RequestExitWithStatus3 = Tellurium::Patchfinder::Pattern<"4C 8B DC 49 89 5B 08 49 89 6B 10 49 89 73 18 49 89 7B 20 41 56 48 83 EC 30 80 3D ? ? ? ? ? 49 8B">();
+-
+-                auto RequestExitWithStatus = RequestExitWithStatus1.Scan();
+-
+-                if (!RequestExitWithStatus)
+-                    RequestExitWithStatus = RequestExitWithStatus2.Scan();
+-
+-                if (!RequestExitWithStatus)
+-                    RequestExitWithStatus = RequestExitWithStatus3.Scan();
+-
+-                constexpr static auto ShowAppEnvironmentSecurityMessage1 = Tellurium::Patchfinder::Pattern<"4C 8B DC 55 49 8D AB ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 49 89 73 F0 49 89 7B E8 48 8B F9 4D 89 63 E0 4D 8B E0 4D 89 6B D8">();
+-                constexpr static auto ShowAppEnvironmentSecurityMessage2 = Tellurium::Patchfinder::Pattern<"48 89 5C 24 ? 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 45 ? 41 0F B6 D8 48 89 55 ? 88 5C 24 ?">();
+-                constexpr static auto ShowAppEnvironmentSecurityMessage3 = Tellurium::Patchfinder::Pattern<"48 89 5C 24 ? 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 80 B9 ? ? ? ? ? 48 8B DA 48 8B F1">();
+-                constexpr static auto ShowAppEnvironmentSecurityMessage4 = Tellurium::Patchfinder::Pattern<"48 89 5C 24 ? 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? ? 0F B6 ? 44 88 44 24 ?">();
+-                constexpr static auto ShowAppEnvironmentSecurityMessage5 = Tellurium::Patchfinder::Pattern<"48 89 5C 24 ? 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 45 ? 45 0F B6 F8">();
+-                constexpr static auto ShowAppEnvironmentSecurityMessage6 = Tellurium::Patchfinder::Pattern<"40 55 53 56 57 41 54 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? ? 0F B6 ?">();
+-                constexpr static auto ShowAppEnvironmentSecurityMessage7 = Tellurium::Patchfinder::Pattern<"4C 8B DC 55 49 8D AB ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ?">();
+-
+-                auto ShowAppEnvironmentSecurityMessage = ShowAppEnvironmentSecurityMessage1.Scan();
+-
+-                if (!ShowAppEnvironmentSecurityMessage)
+-                    ShowAppEnvironmentSecurityMessage = ShowAppEnvironmentSecurityMessage2.Scan();
+-
+-                if (!ShowAppEnvironmentSecurityMessage)
+-                    ShowAppEnvironmentSecurityMessage = ShowAppEnvironmentSecurityMessage3.Scan();
+-
+-                if (!ShowAppEnvironmentSecurityMessage)
+-                    ShowAppEnvironmentSecurityMessage = ShowAppEnvironmentSecurityMessage4.Scan();
+-
+-                if (!ShowAppEnvironmentSecurityMessage)
+-                    ShowAppEnvironmentSecurityMessage = ShowAppEnvironmentSecurityMessage5.Scan();
+-
+-                if (!ShowAppEnvironmentSecurityMessage)
+-                    ShowAppEnvironmentSecurityMessage = ShowAppEnvironmentSecurityMessage6.Scan();
+-
+-                if (!ShowAppEnvironmentSecurityMessage)
+-                    ShowAppEnvironmentSecurityMessage = ShowAppEnvironmentSecurityMessage7.Scan();
+-
+-                if (RequestExitWithStatus)
+-                {
+-                    DWORD oldProt;
+-                    VirtualProtect(LPVOID(RequestExitWithStatus), 1, PAGE_EXECUTE_READWRITE, &oldProt);
+-
+-                    *(uint8_t*)RequestExitWithStatus = 0xC3;
+-
+-                    VirtualProtect(LPVOID(RequestExitWithStatus), 1, oldProt, &oldProt);
+-                }
+-
+-                if (ShowAppEnvironmentSecurityMessage)
+-                {
+-                    DWORD oldProt;
+-                    VirtualProtect(LPVOID(ShowAppEnvironmentSecurityMessage), 1, PAGE_EXECUTE_READWRITE, &oldProt);
+-
+-                    *(uint8_t*)ShowAppEnvironmentSecurityMessage = 0xC3;
+-
+-                    VirtualProtect(LPVOID(ShowAppEnvironmentSecurityMessage), 1, oldProt, &oldProt);
+-                }
+-            }
+-        }
++        Startup::Fail("The game request-table entry could not be updated. See the startup log.");
++        return;
+     }
+-
+-    bInit = true;
++    if (!RequestHook::Install(eosHook.site, reinterpret_cast<void*>(ProcessRequestEOS),
++        reinterpret_cast<void**>(&Unreal::FCurlHttpRequest::ProcessRequestOG__EOS)))
++    {
++        RequestHook::Remove(gameHook.site, reinterpret_cast<void*>(ProcessRequestHook));
++        Startup::Fail("The EOS request-table entry could not be updated. See the startup log.");
++        return;
++    }
++    Startup::Log("READY: game and EOS authentication hooks installed. Waiting for requests; login is not yet verified.");
+ }
+diff --git a/Tellurium/Options.h b/Tellurium/Options.h
+index b7c2a65..68de358 100644
+--- a/Tellurium/Options.h
++++ b/Tellurium/Options.h
+@@ -17,4 +17,4 @@ constexpr bool bHasPushWidget = false; // fortnite: enable if you have gs closin
+ // misc options, don't change unless you know what you're doing
+ constexpr bool UseBackendParam = false; // for phoenix/paradise launcher
+ constexpr bool ManualMapping = false; // if you're using EAC & a manual mapper, then enable this for the dll to work
+-constexpr bool FixMemLeak = true; // memory leak fix
++constexpr bool FixMemLeak = false; // Not used by this Fortnite 27.11 authentication build.
+diff --git a/Tellurium/Patchfinder.cpp b/Tellurium/Patchfinder.cpp
+index b3e3a39..52b2814 100644
+--- a/Tellurium/Patchfinder.cpp
++++ b/Tellurium/Patchfinder.cpp
+@@ -1,147 +1,56 @@
+ #include "pch.h"
+ #include "Patchfinder.h"
++#include "ScanRange.h"
++#include "Startup.h"
+ 
+ IMAGE_SECTION_HEADER* Tellurium::PE::GetSection(const char* name)
+ {
+-    IMAGE_DOS_HEADER* dos_hdr = (IMAGE_DOS_HEADER*)ImageBase;
+-    auto PEHeader = (IMAGE_NT_HEADERS*)(ImageBase + dos_hdr->e_lfanew);
+-    auto StartOfSects = IMAGE_FIRST_SECTION(PEHeader);
+-
+-    for (int i = 0; i < PEHeader->FileHeader.NumberOfSections; i++)
++    if (!Startup::Readable(ImageBase, sizeof(IMAGE_DOS_HEADER))) return nullptr;
++    const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(ImageBase);
++    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 0x100000) return nullptr;
++    const auto ntAddress = ImageBase + dos->e_lfanew;
++    if (!Startup::Readable(ntAddress, sizeof(IMAGE_NT_HEADERS64))) return nullptr;
++    const auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(ntAddress);
++    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
++        !nt->FileHeader.NumberOfSections || nt->FileHeader.NumberOfSections > 96) return nullptr;
++    const auto sections = IMAGE_FIRST_SECTION(nt);
++    if (!Startup::Readable(reinterpret_cast<uintptr_t>(sections),
++        nt->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER))) return nullptr;
++    for (unsigned int i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+     {
+-        IMAGE_SECTION_HEADER* Section = StartOfSects + i;
+-
+-        if (strncmp((const char*)Section->Name, name, 8) == 0)
+-            return Section;
++        const auto section = sections + i;
++        if (strncmp(reinterpret_cast<const char*>(section->Name), name, IMAGE_SIZEOF_SHORT_NAME) != 0) continue;
++        if (section->VirtualAddress >= nt->OptionalHeader.SizeOfImage ||
++            section->Misc.VirtualSize > nt->OptionalHeader.SizeOfImage - section->VirtualAddress ||
++            !Startup::Readable(ImageBase + section->VirtualAddress, section->Misc.VirtualSize)) return nullptr;
++        return section;
+     }
+-
+     return nullptr;
+ }
+ 
+-uint64_t Tellurium::Patchfinder::InternalFindPattern(const uint8_t* Bytes, const uint8_t* Enabled, uint32_t Size, bool bInRData)
++uint64_t Tellurium::Patchfinder::InternalFindPattern(const uint8_t* bytes, const uint8_t* enabled, uint32_t size, bool inRData)
+ {
+-    auto startingByte = Bytes[0];
+-    uint32_t h = 1;
+-    bool bIsEnabled = *Enabled & 1;
+-    while (!bIsEnabled && h < Size)
+-    {
+-        startingByte = Bytes[h];
+-        bIsEnabled = Enabled[h / 8] & (1 << (h % 8));
+-        h++;
+-    }
+-
+-    auto scanSect = bInRData ? PE::GetSection(".rdata") : PE::GetSection(".text");
+-    const auto scanBytes = (uint8_t*)(PE::ImageBase + scanSect->VirtualAddress);
+-    const auto sizeOfImage = scanSect->Misc.VirtualSize;
+-
+-    __m128i t = _mm_set1_epi8((char)startingByte);
+-
+-    size_t i = 0;
+-    for (; i < (sizeOfImage - Size) - ((sizeOfImage - Size) % 16); i += 16)
+-    {
+-        auto bytes = _mm_load_si128((const __m128i*)(scanBytes + i));
+-        int offset = _mm_movemask_epi8(_mm_cmpeq_epi8(bytes, t));
+-
+-        if (offset == 0)
+-            continue;
+-
+-        for (int q = 0; q < 16; q++)
+-        {
+-            int c = offset & (1 << q);
+-            if (c)
+-            {
+-                bool found = true;
+-                for (auto j = h; j < Size; ++j)
+-                {
+-                    if (Enabled[j / 8] & (1 << (j % 8)) && scanBytes[i + q + j] != Bytes[j])
+-                    {
+-                        found = false;
+-                        break;
+-                    }
+-                }
+-
+-                if (found)
+-                    return __int64(scanBytes + i + q);
+-            }
+-        }
+-    }
+-
+-    for (; i < sizeOfImage - Size; i++)
+-    {
+-        bool found = true;
+-        for (auto j = h; j < Size; ++j)
+-        {
+-            if (Enabled[j / 8] & (1 << (j % 8)) && scanBytes[i + j] != Bytes[j])
+-            {
+-                found = false;
+-                break;
+-            }
+-        }
+-
+-        if (found)
+-            return __int64(scanBytes + i);
+-    }
+-
+-    return 0;
++    const auto section = PE::GetSection(inRData ? ".rdata" : ".text");
++    if (!section) return 0;
++    return ScanRange::Pattern(reinterpret_cast<const uint8_t*>(PE::ImageBase + section->VirtualAddress),
++        section->Misc.VirtualSize, bytes, enabled, size);
+ }
+ 
+-uint64_t Tellurium::Patchfinder::InternalFindStringRef(const void* string, size_t sLen)
++uint64_t Tellurium::Patchfinder::InternalFindStringRef(const void* string, size_t length)
+ {
+-    auto textSection = PE::GetSection(".text");
+-    auto rdataSection = PE::GetSection(".rdata");
+-
+-    const auto scanBytes = (uint8_t*)(PE::ImageBase + textSection->VirtualAddress);
+-    const auto sizeOfImage = textSection->Misc.VirtualSize;
+-
+-    const auto rdataStart = (uint8_t*)(PE::ImageBase + rdataSection->VirtualAddress);
+-    const auto rdataEnd = rdataStart + rdataSection->Misc.VirtualSize;
+-
+-    DWORD i = 0x0;
+-
+-    //__m128i t = _mm_set1_epi8(0x48);
+-    //__m128i s = _mm_set1_epi8((char)0xfb);
+-    __m128i t = _mm_set1_epi8((char)0x8d);
+-
+-    for (; i < sizeOfImage - (sizeOfImage % 16); i += 16)
+-    {
+-        auto bytes = _mm_load_si128((const __m128i*)(scanBytes + i));
+-        //__m128i masked = _mm_and_si128(bytes, s);
+-        int offset = _mm_movemask_epi8(_mm_cmpeq_epi8(bytes, t));
+-
+-        if (offset == 0)
+-            continue;
+-
+-        for (int q = 0; q < 16; q++)
+-        {
+-            int c = offset & (1 << q);
+-
+-            if (c)
+-            {
+-                //if (scanBytes[i + q + 1] == 0x8D)
+-                if ((scanBytes[i + q - 1] & 0xfb) == 0x48)
+-                {
+-                    auto stringAdd = (&scanBytes[i + q] + 6) + *(int32_t*)(&scanBytes[i + q] + 2);
+-
+-                    if (stringAdd >= rdataStart && stringAdd < rdataEnd)
+-                    {
+-                        if (memcmp(string, stringAdd, sLen) == 0)
+-                            return uint64_t(&scanBytes[i + q - 1]);
+-                    }
+-                }
+-            }
+-        }
+-    }
+-
+-    return 0;
++    const auto code = PE::GetSection(".text");
++    const auto data = PE::GetSection(".rdata");
++    if (!code || !data) return 0;
++    return ScanRange::StringReference(
++        reinterpret_cast<const uint8_t*>(PE::ImageBase + code->VirtualAddress), code->Misc.VirtualSize,
++        reinterpret_cast<const uint8_t*>(PE::ImageBase + data->VirtualAddress), data->Misc.VirtualSize,
++        string, length);
+ }
+ 
+-__declspec(noinline) bool Tellurium::Patchfinder::InternalCheckBytes(uint64_t base, int ind, const uint8_t* bytes, size_t sz, bool upwards)
++__declspec(noinline) bool Tellurium::Patchfinder::InternalCheckBytes(uint64_t base, int index,
++    const uint8_t* bytes, size_t length, bool upwards)
+ {
+-    auto offBase = (uint8_t*)(upwards ? base - ind : base + ind);
+-
+-    for (int i = 0; i < sz; i++)
+-        if (*(offBase + i) != bytes[i]) 
+-            return false;
+-
+-    return true;
++    if (index < 0 || (upwards && static_cast<uint64_t>(index) > base)) return false;
++    const uintptr_t address = upwards ? base - index : base + index;
++    return Startup::Readable(address, length) && std::memcmp(reinterpret_cast<const void*>(address), bytes, length) == 0;
+ }
+diff --git a/Tellurium/Redirection.cpp b/Tellurium/Redirection.cpp
+index c62bb90..d3095ec 100644
+--- a/Tellurium/Redirection.cpp
++++ b/Tellurium/Redirection.cpp
+@@ -7,7 +7,7 @@ namespace Tellurium
+ {
+     namespace Redirection
+     {
+-        bool ShouldRedirect(URL& uri) 
++        bool ShouldRedirect(URL& uri)
+         {
+             constexpr static const wchar_t* redirectedPaths[] =
+             {
+@@ -40,11 +40,11 @@ namespace Tellurium
+             };
+ 
+ 
+-            switch (URLSet) 
++            switch (URLSet)
+             {
+             case Hybrid:
+                 for (int i = 0; i < sizeof(redirectedPaths) / sizeof(wchar_t*); i++)
+-                    if (uri.Path.starts_with(redirectedPaths[i])) 
++                    if (uri.Path.starts_with(redirectedPaths[i]))
+                         return true;
+ 
+                 break;
+@@ -56,7 +56,9 @@ namespace Tellurium
+                 break;
+             case Default:
+                 for (int i = 0; i < sizeof(redirectedUrls) / sizeof(wchar_t*); i++)
+-                    if (uri.Domain.ends_with(redirectedUrls[i])) 
++                    if (uri.Domain.ends_with(redirectedUrls[i]) &&
++                        (uri.Domain.Length - 1 == wcslen(redirectedUrls[i]) ||
++                            uri.Domain.String[uri.Domain.Length - 2 - wcslen(redirectedUrls[i])] == L'.'))
+                         return true;
+ 
+                 break;
+diff --git a/Tellurium/RequestHook.h b/Tellurium/RequestHook.h
+new file mode 100644
+index 0000000..f7b9f6d
+--- /dev/null
++++ b/Tellurium/RequestHook.h
+@@ -0,0 +1,44 @@
++#pragma once
++#include "Startup.h"
++
++namespace Tellurium::RequestHook
++{
++    struct Site { uintptr_t function = 0; uintptr_t slot = 0; };
++
++    inline bool Install(const Site& site, void* hook, void** original)
++    {
++        if (!site.function || !site.slot || !hook || !original ||
++            site.slot % alignof(void*) || !Startup::Readable(site.slot, sizeof(void*)))
++        { Startup::Log("Refusing an invalid or missing request-table entry."); return false; }
++        DWORD protection = 0;
++        auto slot = reinterpret_cast<void* volatile*>(site.slot);
++        if (!VirtualProtect(reinterpret_cast<void*>(site.slot), sizeof(void*), PAGE_READWRITE, &protection))
++        { Startup::Log("Request-table VirtualProtect failed: Windows error=%lu", GetLastError()); return false; }
++        *original = reinterpret_cast<void*>(site.function);
++        const auto previous = InterlockedCompareExchangePointer(slot, hook, *original);
++        DWORD ignored = 0;
++        const bool restored = VirtualProtect(reinterpret_cast<void*>(site.slot), sizeof(void*), protection, &ignored) != FALSE;
++        if (previous != *original)
++        { Startup::Log("Request-table entry changed during initialization; installation skipped."); return false; }
++        if (!restored)
++        {
++            InterlockedCompareExchangePointer(slot, *original, hook);
++            VirtualProtect(reinterpret_cast<void*>(site.slot), sizeof(void*), protection, &ignored);
++            Startup::Log("Request-table protection restore failed; hook rolled back.");
++            return false;
++        }
++        return true;
++    }
++
++    inline void Remove(const Site& site, void* hook)
++    {
++        DWORD protection = 0;
++        if (!VirtualProtect(reinterpret_cast<void*>(site.slot), sizeof(void*), PAGE_READWRITE, &protection))
++        { Startup::Log("Hook rollback could not change page protection: Windows error=%lu", GetLastError()); return; }
++        InterlockedCompareExchangePointer(reinterpret_cast<void* volatile*>(site.slot),
++            reinterpret_cast<void*>(site.function), hook);
++        DWORD ignored = 0;
++        if (!VirtualProtect(reinterpret_cast<void*>(site.slot), sizeof(void*), protection, &ignored))
++            Startup::Log("Hook rollback could not restore page protection: Windows error=%lu", GetLastError());
++    }
++}
+diff --git a/Tellurium/ScanRange.h b/Tellurium/ScanRange.h
+new file mode 100644
+index 0000000..e6f5e40
+--- /dev/null
++++ b/Tellurium/ScanRange.h
+@@ -0,0 +1,79 @@
++#pragma once
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++
++// Range-only helpers keep scanners inside the supplied PE section.
++namespace Tellurium::ScanRange
++{
++    inline uintptr_t Pattern(const uint8_t* data, size_t length,
++        const uint8_t* bytes, const uint8_t* enabled, size_t count)
++    {
++        if (!data || !bytes || !enabled || !count || count > length) return 0;
++        size_t anchor = 0;
++        while (anchor < count && !(enabled[anchor / 8] & (1u << (anchor % 8)))) ++anchor;
++        if (anchor == count) return 0; // A pattern must identify at least one byte.
++        const size_t last = length - count;
++        size_t i = 0;
++        while (i <= last)
++        {
++            const auto match = static_cast<const uint8_t*>(
++                std::memchr(data + i + anchor, bytes[anchor], last - i + 1));
++            if (!match) break;
++            i = static_cast<size_t>(match - data) - anchor;
++            bool found = true;
++            for (size_t j = 0; j < count; ++j)
++                if ((enabled[j / 8] & (1u << (j % 8))) && data[i + j] != bytes[j])
++                { found = false; break; }
++            if (found) return reinterpret_cast<uintptr_t>(data + i);
++            ++i;
++        }
++        return 0;
++    }
++
++    inline uintptr_t StringReference(const uint8_t* code, size_t codeSize,
++        const uint8_t* rdata, size_t rdataSize, const void* string, size_t stringSize)
++    {
++        if (!code || !rdata || !string || codeSize < 7 || !stringSize || stringSize > rdataSize)
++            return 0;
++        const uintptr_t dataStart = reinterpret_cast<uintptr_t>(rdata);
++        const uintptr_t lastString = dataStart + rdataSize - stringSize;
++        size_t i = 0;
++        while (i <= codeSize - 7)
++        {
++            const auto opcode = static_cast<const uint8_t*>(
++                std::memchr(code + i + 1, 0x8d, codeSize - 7 - i + 1));
++            if (!opcode) break;
++            i = static_cast<size_t>(opcode - code) - 1;
++            // REX.W LEA reg,[RIP+disp32], including REX.R for r8-r15.
++            if ((code[i] & 0xfb) == 0x48 && (code[i + 2] & 0xc7) == 0x05)
++            {
++                int32_t displacement = 0;
++                std::memcpy(&displacement, code + i + 3, sizeof(displacement));
++                const uintptr_t next = reinterpret_cast<uintptr_t>(code + i + 7);
++                const uintptr_t target = displacement >= 0
++                    ? next + static_cast<uint32_t>(displacement)
++                    : next - static_cast<uintptr_t>(-static_cast<int64_t>(displacement));
++                if (target >= dataStart && target <= lastString &&
++                    std::memcmp(reinterpret_cast<const void*>(target), string, stringSize) == 0)
++                    return reinterpret_cast<uintptr_t>(code + i);
++            }
++            ++i;
++        }
++        return 0;
++    }
++
++    inline uintptr_t PointerSlot(const uint8_t* data, size_t length, uintptr_t target)
++    {
++        if (!data || !target || length < sizeof(uintptr_t)) return 0;
++        const size_t skip = (alignof(uintptr_t) -
++            reinterpret_cast<uintptr_t>(data) % alignof(uintptr_t)) % alignof(uintptr_t);
++        for (size_t i = skip; i <= length - sizeof(uintptr_t); i += alignof(uintptr_t))
++        {
++            uintptr_t value = 0;
++            std::memcpy(&value, data + i, sizeof(value));
++            if (value == target) return reinterpret_cast<uintptr_t>(data + i);
++        }
++        return 0;
++    }
++}
+diff --git a/Tellurium/Startup.h b/Tellurium/Startup.h
+new file mode 100644
+index 0000000..3c67962
+--- /dev/null
++++ b/Tellurium/Startup.h
+@@ -0,0 +1,72 @@
++#pragma once
++#include <windows.h>
++#include <cstdio>
++#include <cstdarg>
++#include <cstdint>
++
++namespace Tellurium::Startup
++{
++    inline wchar_t LogPath[MAX_PATH] = {};
++    inline SRWLOCK LogLock = SRWLOCK_INIT;
++
++    inline void Log(const char* format, ...)
++    {
++        char line[768] = {};
++        va_list args;
++        va_start(args, format);
++        vsnprintf_s(line, sizeof(line), _TRUNCATE, format, args);
++        va_end(args);
++        AcquireSRWLockExclusive(&LogLock);
++        FILE* file = nullptr;
++        if (*LogPath && _wfopen_s(&file, LogPath, L"ab") == 0 && file)
++        {
++            fprintf(file, "[%llu] %s\r\n", static_cast<unsigned long long>(GetTickCount64()), line);
++            fclose(file);
++        }
++        ReleaseSRWLockExclusive(&LogLock);
++        OutputDebugStringA(line);
++    }
++
++    inline void Begin()
++    {
++        wchar_t temp[MAX_PATH] = {};
++        const DWORD length = GetTempPathW(MAX_PATH, temp);
++        if (length && length < MAX_PATH)
++            swprintf_s(LogPath, L"%sReboot-27.11-Auth-startup.log", temp);
++        FILE* file = nullptr;
++        if (*LogPath && _wfopen_s(&file, LogPath, L"wb") == 0 && file) fclose(file);
++        Log("Reboot 27.11 Auth candidate 1; Tellurium 8750678312c011888b82878fb1d011b97b33fff5; PID=%lu", GetCurrentProcessId());
++        Log("Backend=http://127.0.0.1:3551; routing=Default; memory patch=off; push widget patch=off");
++    }
++
++    inline void Fail(const char* reason)
++    {
++        Log("ERROR: %s", reason);
++        char message[1024] = {};
++        sprintf_s(message,
++            "Authentication initialization stopped.\n\n%s\n\n"
++            "Diagnostic log: %%TEMP%%\\Reboot-27.11-Auth-startup.log\n\n"
++            "Close this game instance before retrying. This is an experimental build.", reason);
++        MessageBoxA(nullptr, message, "Reboot 27.11 - Tellurium Auth candidate 1", MB_OK | MB_ICONERROR);
++    }
++
++    inline bool Readable(uintptr_t address, size_t length)
++    {
++        if (!address || !length || address + length < address) return false;
++        const uintptr_t end = address + length;
++        while (address < end)
++        {
++            MEMORY_BASIC_INFORMATION info = {};
++            if (!VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) ||
++                info.State != MEM_COMMIT || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS))) return false;
++            const DWORD access = info.Protect & 0xff;
++            if (access != PAGE_READONLY && access != PAGE_READWRITE && access != PAGE_WRITECOPY &&
++                access != PAGE_EXECUTE_READ && access != PAGE_EXECUTE_READWRITE && access != PAGE_EXECUTE_WRITECOPY)
++                return false;
++            const uintptr_t next = reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize;
++            if (next <= address) return false;
++            address = next;
++        }
++        return true;
++    }
++}
+diff --git a/Tellurium/Tellurium.vcxproj b/Tellurium/Tellurium.vcxproj
+index 0e85bf8..844b6f1 100644
+--- a/Tellurium/Tellurium.vcxproj
++++ b/Tellurium/Tellurium.vcxproj
+@@ -121,6 +121,7 @@
+   </ItemDefinitionGroup>
+   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+     <ClCompile>
++      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+       <WarningLevel>Level3</WarningLevel>
+       <FunctionLevelLinking>true</FunctionLevelLinking>
+       <IntrinsicFunctions>true</IntrinsicFunctions>
+@@ -140,6 +141,9 @@
+   </ItemDefinitionGroup>
+   <ItemGroup>
+     <ClInclude Include="framework.h" />
++    <ClInclude Include="ScanRange.h" />
++    <ClInclude Include="Startup.h" />
++    <ClInclude Include="RequestHook.h" />
+     <ClInclude Include="Options.h" />
+     <ClInclude Include="Patchfinder.h" />
+     <ClInclude Include="pch.h" />
+diff --git a/Tellurium/URL.h b/Tellurium/URL.h
+index 6244d49..c2eef9a 100644
+--- a/Tellurium/URL.h
++++ b/Tellurium/URL.h
+@@ -9,36 +9,36 @@ namespace Tellurium
+     public:
+         using StrType = Unreal::FString;
+         StrType Protocol, Seperator, Domain, Port, Path, Query;
++        bool Valid = false;
+ 
+         __forceinline URL(StrType& url)
+         {
+-            __stosb((uint8_t*)this, 0, sizeof(URL));
+-
+-            auto ProtoEnd = url.find(':');
+-            Protocol = url.substr(0, ProtoEnd);
+-
+-            auto ProtoSize = (url[ProtoEnd + 1] == '/' && url[ProtoEnd + 2] == '/') ? 3 : 1;
+-            Seperator = url.substr(ProtoEnd, ProtoSize);
+-
+-            auto DomainAndPortStart = url.substr(ProtoEnd + ProtoSize);
+-            auto PathEnd = DomainAndPortStart.find_first_of('/');
+-            auto DomainAndPort = DomainAndPortStart.substr(0, PathEnd);
+-            auto PathStart = DomainAndPortStart.substr(PathEnd);
+-            DomainAndPortStart.Dealloc();
+-
+-            auto PortOff = DomainAndPort.find_first_of(':');
+-
+-            Domain = DomainAndPort.substr(0, PortOff);
+-            if (PortOff != StrType::npos) Port = DomainAndPort.substr(PortOff);
+-            DomainAndPort.Dealloc();
+-
+-            auto QueryOff = PathStart.find_first_of('?');
+-            Path = PathStart.substr(0, QueryOff);
+-
+-            if (QueryOff != StrType::npos) 
+-                Query = PathStart.substr(QueryOff);
+-
+-            PathStart.Dealloc();
++            if (!url.String || !url.Length) return;
++            const std::wstring_view view(url.String, url.Length - 1);
++            const size_t proto = view.find(L"://");
++            if (proto == std::wstring_view::npos || (view.substr(0, proto) != L"http" && view.substr(0, proto) != L"https")) return;
++            const size_t authorityStart = proto + 3;
++            const size_t delimiter = view.find_first_of(L"/?#", authorityStart);
++            const size_t authorityEnd = delimiter == std::wstring_view::npos ? view.size() : delimiter;
++            const auto authority = view.substr(authorityStart, authorityEnd - authorityStart);
++            if (authority.empty() || authority.find_first_of(L"@[]") != std::wstring_view::npos) return;
++            const size_t portOffset = authority.find(L':');
++            if (portOffset == 0) return;
++            Protocol = url.substr(0, proto);
++            Seperator = url.substr(proto, 3);
++            Domain = url.substr(authorityStart, portOffset == std::wstring_view::npos ? authority.size() : portOffset);
++            if (portOffset != std::wstring_view::npos) Port = url.substr(authorityStart + portOffset, authority.size() - portOffset);
++            const size_t query = view.find_first_of(L"?#", authorityEnd);
++            if (authorityEnd < view.size() && view[authorityEnd] == L'/')
++                Path = url.substr(authorityEnd, query == std::wstring_view::npos ? view.size() - authorityEnd : query - authorityEnd);
++            else
++            {
++                Path = StrType(1u);
++                Path.String[0] = L'/';
++                Path.String[1] = 0;
++            }
++            if (query != std::wstring_view::npos) Query = url.substr(query);
++            Valid = true;
+         }
+ 
+         __forceinline URL& SetHost(StrType host)
+diff --git a/Tellurium/Unreal.cpp b/Tellurium/Unreal.cpp
+index 5d237f2..47f3282 100644
+--- a/Tellurium/Unreal.cpp
++++ b/Tellurium/Unreal.cpp
+@@ -2,6 +2,8 @@
+ #include "Unreal.h"
+ #include "Redirection.h"
+ #include "Options.h"
++#include "Startup.h"
++#include <atomic>
+ 
+ namespace Tellurium
+ {
+@@ -13,7 +15,7 @@ namespace Tellurium
+             Length = MaxSize = 0;
+         }
+ 
+-        FString::FString(const char* Other)
++        FString::FString(const char* Other) : FString()
+         {
+             if (Other)
+             {
+@@ -26,7 +28,7 @@ namespace Tellurium
+             }
+         }
+ 
+-        FString::FString(wchar_t* Other)
++        FString::FString(wchar_t* Other) : FString()
+         {
+             if (Other) {
+                 MaxSize = Length = (int)wcslen(Other) + 1;
+@@ -74,8 +76,9 @@ namespace Tellurium
+ 
+         __declspec(noinline) FString FString::substr(size_t off, size_t count) 
+         {
+-            if (count == -1) count = Length - off - 1;
+-            else if (count > Length) return *this;
++            if (!String || !Length || off > Length - 1) return FString();
++            const size_t remaining = Length - 1 - off;
++            if (count == npos || count > remaining) count = remaining;
+             FString nStr((uint32_t)count);
+ 
+             __movsb((PBYTE)nStr.String, (const PBYTE)(String + off), count * sizeof(wchar_t));
+@@ -100,72 +103,35 @@ namespace Tellurium
+ 
+         size_t FString::find(const wchar_t* c) 
+         {
+-            for (uint32_t i = 0; i < Length; i++) 
+-            {
+-                bool found = true;
+-                for (int x = 0; x < wcslen(c); x++) 
+-                {
+-                    if (String[i + x] != c[x]) 
+-                    {
+-                        found = false;
+-                        break;
+-                    }
+-                }
+-
+-                if (found) 
+-                    return i;
+-            }
+-
+-            return -1;
++            if (!c) return npos;
++            const std::wstring_view view = String && Length ? std::wstring_view(String, Length - 1) : std::wstring_view();
++            return view.find(c);
+         }
+ 
+-        bool FString::contains(wchar_t c) 
++        bool FString::contains(wchar_t c)
+         {
+-            for (uint32_t i = 0; i < Length; i++)
+-                if (String[i] == c)
+-                    return true;
+-
+-            return false;
++            return find(c) != npos;
+         }
+ 
+-        bool FString::contains(const wchar_t* c) 
++        bool FString::contains(const wchar_t* c)
+         {
+-            for (uint32_t i = 0; i < Length; i++) 
+-            {
+-                bool found = true;
+-                for (int x = 0; x < wcslen(c); x++) 
+-                {
+-                    if (String[i + x] != c[x])
+-                    {
+-                        found = false;
+-                        break;
+-                    }
+-                }
+-
+-                if (found) 
+-                    return true;
+-            }
+-            return false;
++            return find(c) != npos;
+         }
+ 
+         bool FString::starts_with(const wchar_t* c)
+         {
+-            for (int x = 0; x < wcslen(c); x++)
+-                if (String[x] != c[x])
+-                    return false;
+-
+-            return true;
++            if (!c) return false;
++            const std::wstring_view view = String && Length ? std::wstring_view(String, Length - 1) : std::wstring_view();
++            const std::wstring_view prefix(c);
++            return prefix.size() <= view.size() && view.substr(0, prefix.size()) == prefix;
+         }
+ 
+-        bool FString::ends_with(const wchar_t* c) {
+-            auto cLen = wcslen(c);
+-            auto start = ((size_t)Length - 1) - cLen;
+-
+-            for (size_t x = 0; x < cLen; x++)
+-                if (String[start + x] != c[x])
+-                    return false;
+-
+-            return true;
++        bool FString::ends_with(const wchar_t* c)
++        {
++            if (!c) return false;
++            const std::wstring_view view = String && Length ? std::wstring_view(String, Length - 1) : std::wstring_view();
++            const std::wstring_view suffix(c);
++            return suffix.size() <= view.size() && view.substr(view.size() - suffix.size()) == suffix;
+         }
+ 
+         size_t FString::find_first_of(char c) 
+@@ -190,7 +156,9 @@ namespace Tellurium
+ 
+         void FString::Dealloc() 
+         {
+-            FMemory::Free(String);
++            if (String) FMemory::Free(String);
++            String = nullptr;
++            Length = MaxSize = 0;
+         }
+ 
+         inline void FString::AllocString() 
+@@ -203,34 +171,25 @@ namespace Tellurium
+             return ((FString & (*&)(FCurlHttpRequest*, FString)) VTable[0])(this, FString());
+         }
+ 
+-        int setupMemLeak = 0;
+         void FCurlHttpRequest::RedirectRequest(bool bEOS)
+         {
++            static std::atomic<bool> seen[2] = {};
++            const bool first = !seen[bEOS ? 1 : 0].exchange(true);
++            if (first) Startup::Log("%s: first request received; reading URL.", bEOS ? "EOS" : "Game");
+             if (!FCurlHttpRequest::SetURLIdx && !bEOS)
+                 InitializeURLIndex();
+-            else if (++setupMemLeak == 5 && FixMemLeak)
+-            {
+-                constexpr static auto pattern = Tellurium::Patchfinder::Pattern<"48 89 5C 24 ?? 57 48 83 EC ?? 48 8B 01 4C 8B C2 48 8D 54 24 ? 48 8B D9 FF 50 30">();
+-                constexpr static auto pattern2 = Tellurium::Patchfinder::Pattern<"48 8B 01 4C 8D 41 08 48 FF 60 20">();
+-
+-                auto MemLeakPatch = pattern.Scan();
+-
+-                if (!MemLeakPatch)
+-                    MemLeakPatch = pattern2.Scan();
+-
+-                if (MemLeakPatch)
+-                {
+-                    DWORD oldProt;
+-                    VirtualProtect(LPVOID(MemLeakPatch), 1, PAGE_EXECUTE_READWRITE, &oldProt);
+-
+-                    *(uint8_t*)MemLeakPatch = 0xC3;
+-
+-                    VirtualProtect(LPVOID(MemLeakPatch), 1, oldProt, &oldProt);
+-                }
+-            }
++            if (first) Startup::Log("%s: SetURL virtual index=%lld (upstream ABI; runtime validation required).",
++                bEOS ? "EOS" : "Game", bEOS ? 10LL : static_cast<long long>(FCurlHttpRequest::SetURLIdx.load()));
+ 
+             auto URL = GetURL();
+             Tellurium::URL TelluriumURL = URL;
++            if (!TelluriumURL.Valid)
++            {
++                if (first) Startup::Log("%s: empty or non-HTTP URL left unchanged.", bEOS ? "EOS" : "Game");
++                TelluriumURL.Dealloc();
++                URL.Dealloc();
++                return;
++            }
+ 
+             if (Tellurium::Redirection::ShouldRedirect(TelluriumURL))
+             {
+@@ -240,7 +199,10 @@ namespace Tellurium
+                     TelluriumURL.SetHost<Backend>(); // idk why this shows an error, it compiles fine
+ 
+                 Tellurium::Unreal::FString str = TelluriumURL;
+-                ((void (*&)(Tellurium::Unreal::FCurlHttpRequest*, Tellurium::Unreal::FString)) VTable[bEOS ? 10 : FCurlHttpRequest::SetURLIdx])(this, str);
++                ((void (*&)(Tellurium::Unreal::FCurlHttpRequest*, Tellurium::Unreal::FString)) VTable[bEOS ? 10 : FCurlHttpRequest::SetURLIdx.load()])(this, str);
++                static std::atomic<bool> redirected[2] = {};
++                if (!redirected[bEOS ? 1 : 0].exchange(true))
++                    Startup::Log("%s: first URL redirected to the local backend.", bEOS ? "EOS" : "Game");
+                 str.Dealloc();
+ 
+                 UseBackendParam ? TelluriumURL.Dealloc() : TelluriumURL.DeallocPathQuery();
+diff --git a/Tellurium/Unreal.h b/Tellurium/Unreal.h
+index d73db2b..950f626 100644
+--- a/Tellurium/Unreal.h
++++ b/Tellurium/Unreal.h
+@@ -1,6 +1,8 @@
+ #pragma once
+ #include "pch.h"
+ #include "Patchfinder.h"
++#include "Startup.h"
++#include <atomic>
+ 
+ namespace Tellurium
+ {
+@@ -174,7 +176,7 @@ namespace Tellurium
+         {
+         public:
+             void** VTable;
+-            static inline int64_t SetURLIdx;
++            static inline std::atomic<int64_t> SetURLIdx{0};
+ 
+             void InitializeURLIndex()
+             {
+@@ -182,7 +184,7 @@ namespace Tellurium
+                 uint32_t URLOffset = 0;
+ 
+                 for (int i = 0; i < 100; i++)
+-                    if (Tellurium::Patchfinder::CheckBytes<0x48, 0x8D, 0x91>(GetFunc, i))
++                    if (Tellurium::Patchfinder::CheckBytes<0x48, 0x8D, 0x91>(GetFunc, i) && Startup::Readable(GetFunc + i, 7))
+                     {
+                         URLOffset = *(uint32_t*)(__int64(GetFunc) + i + 3);
+                         break;
+@@ -196,7 +198,7 @@ namespace Tellurium
+                     auto func = uint64_t(VTable[i]);
+ 
+                     for (int j = 0; j < 0x20; j++)
+-                        if (Tellurium::Patchfinder::CheckBytes<0x48, 0x81, 0xC1>(func, j))
++                        if (Tellurium::Patchfinder::CheckBytes<0x48, 0x81, 0xC1>(func, j) && Startup::Readable(func + j, 7))
+                             if (*(uint32_t*)(func + j + 3) == URLOffset)
+                             {
+                                 FCurlHttpRequest::SetURLIdx = i;
+diff --git a/Tellurium/dllmain.cpp b/Tellurium/dllmain.cpp
+index 5264884..77b20ef 100644
+--- a/Tellurium/dllmain.cpp
++++ b/Tellurium/dllmain.cpp
+@@ -2,6 +2,12 @@
+ #include "Hooks.h"
+ #include "Options.h"
+ 
++static DWORD WINAPI InitializeOnWorker(LPVOID)
++{
++    Tellurium::Hooks::Init();
++    return 0;
++}
++
+ BOOL APIENTRY DllMain( HMODULE hModule,
+                        DWORD  ul_reason_for_call,
+                        LPVOID lpReserved
+@@ -10,9 +16,12 @@ BOOL APIENTRY DllMain( HMODULE hModule,
+     switch (ul_reason_for_call)
+     {
+     case DLL_PROCESS_ATTACH:
+-        ManualMapping ? Tellurium::Hooks::Init() : (void)CreateThread(0, 0, (LPTHREAD_START_ROUTINE)Tellurium::Hooks::Init, 0, 0, 0);
++    {
++        const auto worker = CreateThread(nullptr, 0, InitializeOnWorker, nullptr, 0, nullptr);
++        if (!worker) return FALSE;
++        CloseHandle(worker);
+         break;
+     }
++    }
+     return TRUE;
+ }
+-
+diff --git a/tests/auth_scan_tests.cpp b/tests/auth_scan_tests.cpp
+new file mode 100644
+index 0000000..a7702e7
+--- /dev/null
++++ b/tests/auth_scan_tests.cpp
+@@ -0,0 +1,99 @@
++#include "../Tellurium/ScanRange.h"
++#include <array>
++#include <cstdlib>
++#include <iostream>
++#include <random>
++
++static unsigned checks = 0;
++static void require(bool pass, const char* description)
++{
++    ++checks;
++    if (!pass) { std::cerr << "FAIL: " << description << '\n'; std::exit(1); }
++}
++
++int main()
++{
++    using namespace Tellurium::ScanRange;
++    const uint8_t signature[] = {0x48, 0x89, 0x5c};
++    const uint8_t mask[] = {7};
++    std::array<uint8_t, 32> bytes{};
++    auto address = reinterpret_cast<uintptr_t>(bytes.data());
++    bytes[29] = 0x48; bytes[30] = 0x89; bytes[31] = 0x5c;
++    require(Pattern(bytes.data(), bytes.size(), signature, mask, 3) == address + 29, "last possible pattern position");
++    bytes[29] = 0;
++    require(!Pattern(bytes.data(), bytes.size(), signature, mask, 3), "tail must check first signature byte");
++    require(!Pattern(bytes.data(), 2, signature, mask, 3), "short section");
++    require(Pattern(signature, 3, signature, mask, 3) == reinterpret_cast<uintptr_t>(signature), "exact-sized section");
++    require(!Pattern(nullptr, 3, signature, mask, 3), "null section");
++    const uint8_t wildcard[] = {6};
++    require(Pattern(bytes.data(), bytes.size(), signature, wildcard, 3) == address + 29, "leading wildcard returns pattern start");
++    const uint8_t empty[] = {0};
++    require(!Pattern(bytes.data(), bytes.size(), signature, empty, 3), "all-wildcard signature rejected");
++
++    // Compare against a separate brute-force oracle, including section tails and bit-mask boundaries.
++    std::mt19937 random(2711);
++    for (unsigned trial = 0; trial < 2000; ++trial)
++    {
++        std::array<uint8_t, 80> hay{};
++        std::array<uint8_t, 20> needle{};
++        std::array<uint8_t, 3> enabled{};
++        const size_t n = 1 + random() % hay.size();
++        const size_t m = 1 + random() % needle.size();
++        for (auto& byte : hay) byte = static_cast<uint8_t>(random() % 5);
++        for (size_t j = 0; j < m; ++j)
++        {
++            needle[j] = static_cast<uint8_t>(random() % 5);
++            if (random() % 2) enabled[j / 8] |= static_cast<uint8_t>(1u << (j % 8));
++        }
++        enabled[(m - 1) / 8] |= static_cast<uint8_t>(1u << ((m - 1) % 8));
++        uintptr_t expected = 0;
++        for (size_t i = 0; i + m <= n; ++i)
++        {
++            bool match = true;
++            for (size_t j = 0; j < m; ++j)
++                if ((enabled[j / 8] & (1u << (j % 8))) && hay[i + j] != needle[j]) match = false;
++            if (match) { expected = reinterpret_cast<uintptr_t>(hay.data() + i); break; }
++        }
++        require(Pattern(hay.data(), n, needle.data(), enabled.data(), m) == expected, "pattern oracle");
++    }
++
++    std::array<uint8_t, 256> image{};
++    auto code = image.data() + 64;
++    auto data = image.data() + 160;
++    const char text[] = "request";
++    std::memcpy(data, text, sizeof(text));
++    const auto lea = [&](size_t index, const uint8_t* target)
++    {
++        code[index] = 0x48; code[index + 1] = 0x8d; code[index + 2] = 0x0d;
++        const auto displacement = static_cast<int32_t>(target - (code + index + 7));
++        std::memcpy(code + index + 3, &displacement, sizeof(displacement));
++    };
++    lea(0, data);
++    require(StringReference(code, 7, data, sizeof(text), text, sizeof(text)) == reinterpret_cast<uintptr_t>(code), "LEA at first and final position");
++    require(!StringReference(code, 6, data, sizeof(text), text, sizeof(text)), "truncated LEA");
++    code[2] = 0x09;
++    require(!StringReference(code, 7, data, sizeof(text), text, sizeof(text)), "non-RIP LEA rejected");
++    code[2] = 0x0d; code[0] = 0x4c;
++    require(StringReference(code, 7, data, sizeof(text), text, sizeof(text)) != 0, "REX.R LEA");
++    require(!StringReference(code, 7, data, sizeof(text) - 1, text, sizeof(text)), "string cannot cross data boundary");
++    std::memset(code, 0, 32);
++    lea(25, data);
++    require(StringReference(code, 32, data, sizeof(text), text, sizeof(text)) == reinterpret_cast<uintptr_t>(code + 25), "non-SIMD tail LEA");
++    std::memcpy(image.data(), text, sizeof(text));
++    std::memset(code, 0, 32);
++    lea(0, image.data());
++    require(StringReference(code, 7, image.data(), sizeof(text), text, sizeof(text)) != 0, "negative RIP displacement");
++    std::memset(code, 0, 32); code[0] = 0x8d;
++    require(!StringReference(code, 32, data, sizeof(text), text, sizeof(text)), "opcode without preceding prefix");
++
++    alignas(uintptr_t) std::array<uint8_t, 32> pointers{};
++    constexpr uintptr_t target = 0x123456789abcdef0ull;
++    std::memcpy(pointers.data() + 24, &target, sizeof(target));
++    require(PointerSlot(pointers.data(), 32, target) == reinterpret_cast<uintptr_t>(pointers.data() + 24), "last pointer slot");
++    require(!PointerSlot(pointers.data(), 31, target), "partial pointer not read");
++    require(PointerSlot(pointers.data() + 1, 31, target) == reinterpret_cast<uintptr_t>(pointers.data() + 24), "unaligned range start");
++    require(!PointerSlot(pointers.data(), 32, 0), "missing function rejected");
++    const uintptr_t sameLow = target ^ (uintptr_t(1) << 48);
++    require(!PointerSlot(pointers.data(), 32, sameLow), "compare full 64-bit pointer");
++    std::cout << checks << " scanner checks passed\n";
++}
+diff --git a/tests/auth_windows_tests.cpp b/tests/auth_windows_tests.cpp
+new file mode 100644
+index 0000000..4591591
+--- /dev/null
++++ b/tests/auth_windows_tests.cpp
+@@ -0,0 +1,98 @@
++#include "../Tellurium/RequestHook.h"
++#include "../Tellurium/ScanRange.h"
++#include "../Tellurium/Unreal.h"
++#include "../Tellurium/URL.h"
++#include "../Tellurium/Options.h"
++#include "../Tellurium/Redirection.h"
++#include <cstdlib>
++#include <iostream>
++
++static unsigned checks = 0;
++static void require(bool pass, const char* description)
++{
++    ++checks;
++    if (!pass) { std::cerr << "FAIL: " << description << '\n'; std::exit(1); }
++}
++static void Original() {}
++static void Replacement() {}
++static void Other() {}
++static void* GameAllocator(void* pointer, __int64 size, unsigned int)
++{
++    if (!size) { std::free(pointer); return nullptr; }
++    return std::realloc(pointer, static_cast<size_t>(size));
++}
++int main()
++{
++    using namespace Tellurium;
++    const auto page = static_cast<uint8_t*>(VirtualAlloc(nullptr, 8192, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
++    require(page != nullptr, "allocate test pages");
++    auto slot = reinterpret_cast<void**>(page);
++    *slot = reinterpret_cast<void*>(Original);
++    DWORD old = 0;
++    require(VirtualProtect(page, 4096, PAGE_READONLY, &old) != FALSE, "read-only request table");
++    RequestHook::Site site{reinterpret_cast<uintptr_t>(Original), reinterpret_cast<uintptr_t>(slot)};
++    void* original = nullptr;
++    require(!RequestHook::Install({site.function, 0}, reinterpret_cast<void*>(Replacement), &original), "no slot must fail without a null write");
++    require(!original, "missing slot leaves original untouched");
++    require(RequestHook::Install(site, reinterpret_cast<void*>(Replacement), &original), "install read-only table hook");
++    require(*slot == reinterpret_cast<void*>(Replacement) && original == reinterpret_cast<void*>(Original), "hook and original both set");
++    MEMORY_BASIC_INFORMATION info{};
++    VirtualQuery(page, &info, sizeof(info));
++    require(info.Protect == PAGE_READONLY, "table protection restored");
++    require(!RequestHook::Install(site, reinterpret_cast<void*>(Other), &original), "do not replace a changed table slot");
++    require(*slot == reinterpret_cast<void*>(Replacement), "existing hook preserved after rejected write");
++    RequestHook::Remove(site, reinterpret_cast<void*>(Replacement));
++    require(*slot == reinterpret_cast<void*>(Original), "rollback restores original");
++    require(VirtualProtect(page + 4096, 4096, PAGE_NOACCESS, &old) != FALSE, "guard next page");
++    require(!Startup::Readable(reinterpret_cast<uintptr_t>(page + 4092), 8), "cross-page read rejected");
++    require(!RequestHook::Install({site.function, reinterpret_cast<uintptr_t>(page + 4096)}, reinterpret_cast<void*>(Replacement), &original), "inaccessible slot rejected");
++    const uint8_t signature[] = {0x48, 0x89};
++    const uint8_t enabled[] = {3};
++    require(!ScanRange::Pattern(page + 4095, 1, signature, enabled, 2), "scanner stops before no-access page");
++    VirtualFree(page, 0, MEM_RELEASE);
++
++    Unreal::FMemory__Realloc = reinterpret_cast<uintptr_t>(GameAllocator);
++    Unreal::FString shortHost = L"x";
++    require(!shortHost.ends_with(L"ol.epicgames.com"), "short domain suffix does not underflow");
++    require(!shortHost.starts_with(L"longer"), "short prefix bounded");
++    require(!shortHost.contains(L"longer"), "substring search bounded");
++    auto invalid = shortHost.substr(Unreal::FString::npos);
++    require(!invalid.String, "invalid substring offset");
++    auto clipped = shortHost.substr(0, 100);
++    require(clipped.Length == 2 && clipped.String[0] == L'x', "substring clipped to available characters");
++    clipped.Dealloc();
++    const auto route = [&](const wchar_t* input, bool valid, bool redirects, const wchar_t* expected)
++    {
++        Unreal::FString value(const_cast<wchar_t*>(input));
++        URL parsed(value);
++        require(parsed.Valid == valid, "URL validity");
++        if (valid)
++        {
++            require(Redirection::ShouldRedirect(parsed) == redirects, "domain routing");
++            auto reconstructed = parsed.GetUrl();
++            require(std::wstring_view(reconstructed.String) == expected, "URL roundtrip");
++            reconstructed.Dealloc();
++        }
++        parsed.Dealloc();
++        value.Dealloc();
++    };
++    route(L"https://fortnite-public-service-prod11.ol.epicgames.com/fortnite/api/test?x=1", true, true,
++        L"https://fortnite-public-service-prod11.ol.epicgames.com/fortnite/api/test?x=1");
++    route(L"http://127.0.0.1:3551/", true, false, L"http://127.0.0.1:3551/");
++    route(L"https://x/", true, false, L"https://x/");
++    route(L"https://notol.epicgames.com/", true, false, L"https://notol.epicgames.com/");
++    route(L"https://ol.epicgames.com", true, true, L"https://ol.epicgames.com/");
++    route(L"https://ol.epicgames.com?x=1", true, true, L"https://ol.epicgames.com/?x=1");
++    route(L"", false, false, L"");
++    route(L"garbage", false, false, L"");
++    route(L"https:///", false, false, L"");
++    route(L"https://user:pass@ol.epicgames.com/", false, false, L"");
++    Unreal::FString source = L"https://ol.epicgames.com/api?x=1";
++    URL redirected(source);
++    redirected.SetHost<Backend>();
++    auto rewritten = redirected.GetUrl();
++    require(std::wstring_view(rewritten.String) == L"http://127.0.0.1:3551/api?x=1", "backend rewrite preserves path and query");
++    rewritten.Dealloc();
++    redirected.DeallocPathQuery();
++    std::cout << checks << " Windows hook and URL checks passed\n";
++}
