@@ -1,0 +1,100 @@
+name: Package Fortnite 27.11 local backend
+on:
+  push:
+    paths:
+      - build-support/backend-candidate1.patch
+      - .github/workflows/build-backend.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-backend:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned backend source
+        shell: bash
+        run: |
+          git -c core.autocrlf=false clone https://github.com/Lawin0129/LawinServer.git backend-source
+          git -C backend-source -c core.autocrlf=false checkout 7f0f26d7a772c6122c42b1783fd75f497e86d3a9
+          test "$(git -C backend-source rev-parse HEAD)" = 7f0f26d7a772c6122c42b1783fd75f497e86d3a9
+      - name: Apply portable backend changes
+        shell: bash
+        run: |
+          git show HEAD:build-support/backend-candidate1.patch > backend-candidate1.patch
+          git apply --check --directory=backend-source backend-candidate1.patch
+          git apply --directory=backend-source backend-candidate1.patch
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+      - name: Install locked dependencies
+        working-directory: backend-source
+        run: npm ci --ignore-scripts --omit=dev --no-audit --no-fund
+      - name: Stage backend and verified official Windows runtime
+        shell: python
+        run: |
+          from pathlib import Path
+          import hashlib, json, shutil, struct, urllib.request, zipfile
+          version = '24.21.0'
+          archive = f'node-v{version}-win-x64.zip'
+          base = f'https://nodejs.org/dist/v{version}/'
+          sums = urllib.request.urlopen(base + 'SHASUMS256.txt', timeout=60).read().decode('ascii')
+          expected = next(line.split()[0] for line in sums.splitlines() if line.split()[-1].lstrip('*') == archive)
+          urllib.request.urlretrieve(base + archive, archive)
+          actual = hashlib.sha256(Path(archive).read_bytes()).hexdigest()
+          assert actual == expected, 'Official Node archive SHA256 mismatch'
+          out = Path('backend-dist')
+          shutil.copytree('backend-source', out, ignore=shutil.ignore_patterns('.git', '.github', 'backend-startup.log', 'ClientSettings'))
+          runtime = out / 'runtime'
+          runtime.mkdir()
+          with zipfile.ZipFile(archive) as z:
+              for name in ('node.exe', 'LICENSE'):
+                  (runtime / name).write_bytes(z.read(f'node-v{version}-win-x64/{name}'))
+          data = (runtime / 'node.exe').read_bytes()
+          assert data[:2] == b'MZ'
+          pe = struct.unpack_from('<I', data, 0x3c)[0]
+          assert data[pe:pe+4] == b'PE\0\0'
+          assert struct.unpack_from('<H', data, pe+4)[0] == 0x8664, 'Node runtime must be AMD64'
+          Path('runtime-provenance.json').write_text(json.dumps({'version': version, 'archive_sha256': actual, 'runtime_sha256': hashlib.sha256(data).hexdigest()}))
+          print(f'Official Windows x64 runtime verified: Node {version}, archive SHA256 {actual}')
+      - name: Test packaged backend on Windows
+        shell: pwsh
+        run: |
+          & .\backend-dist\runtime\node.exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\backend-dist\runtime\node.exe .\backend-dist\tests\backend-smoke-tests.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Record provenance and package checksums
+        shell: python
+        run: |
+          from pathlib import Path
+          import hashlib, json, os
+          root = Path('backend-dist')
+          (root/'backend-startup.log').unlink(missing_ok=True)
+          p = json.loads(Path('runtime-provenance.json').read_text())
+          (root/'BUILD-INFO.txt').write_text(
+              'Reboot 27.11 local backend candidate 1\n'
+              'Upstream: Lawin0129/LawinServer 7f0f26d7a772c6122c42b1783fd75f497e86d3a9\n'
+              f'Workflow commit: {os.environ["GITHUB_SHA"]}\n'
+              f'Workflow run: https://github.com/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}\n'
+              f'Bundled runtime: official Node.js {p["version"]} Windows x64\n'
+              f'Node archive SHA256: {p["archive_sha256"]}\n'
+              f'Node runtime SHA256: {p["runtime_sha256"]}\n'
+              'Dependencies: npm ci --ignore-scripts --omit=dev, committed package-lock.json\n'
+              'Validation: Windows HTTP/discovery/content/matchmaking/XMPP and duplicate-launch checks passed.\n'
+              'Bindings: loopback HTTP 3551, XMPP 80, compatibility alias 8080\n'
+              'Game destination: 127.0.0.1:7777; host process must run separately.\n'
+              'Full Fortnite gameplay and host-crash resolution are not verified.\n', encoding='utf-8')
+          entries = []
+          for file in sorted(root.rglob('*')):
+              if file.is_file():
+                  entries.append(f'{hashlib.sha256(file.read_bytes()).hexdigest()}  {file.relative_to(root).as_posix()}')
+          (root/'SHA256SUMS.txt').write_text('\n'.join(entries) + '\n', encoding='utf-8')
+          print(f'Prepared {len(entries)} files plus checksum inventory; complete JavaScript source and licenses included.')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Reboot-27.11-Backend-Candidate1-Windows-x64
+          path: backend-dist/
+          if-no-files-found: error
+          compression-level: 6
