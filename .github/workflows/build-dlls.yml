@@ -1,6 +1,10 @@
 name: Compile Fortnite 27.11 DLLs
 on:
   push:
+    paths:
+      - Reboot-27.11-Source.zip
+      - build-support/revision2.patch
+      - .github/workflows/build-dlls.yml
   workflow_dispatch:
 permissions:
   contents: read
