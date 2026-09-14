@@ -1,0 +1,107 @@
+name: Compile Fortnite 27.11 authentication DLL
+on:
+  push:
+    paths:
+      - build-support/auth-candidate1.patch
+      - .github/workflows/build-auth.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-auth:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned Tellurium source
+        shell: bash
+        run: |
+          git -c core.autocrlf=false clone https://github.com/plooshi/Tellurium.git auth-source
+          git -C auth-source -c core.autocrlf=false checkout 8750678312c011888b82878fb1d011b97b33fff5
+          test "$(git -C auth-source rev-parse HEAD)" = 8750678312c011888b82878fb1d011b97b33fff5
+      - name: Normalize source and patch line endings
+        shell: python
+        run: |
+          from pathlib import Path
+          import subprocess
+          for name in subprocess.check_output(['git', '-C', 'auth-source', 'ls-files'], text=True).splitlines():
+              p = Path('auth-source') / name
+              if p.suffix in ('.h', '.cpp', '.vcxproj', '.md'):
+                  p.write_bytes(p.read_bytes().replace(b'\r\n', b'\n'))
+          p = Path('build-support/auth-candidate1.patch')
+          p.write_bytes(p.read_bytes().replace(b'\r\n', b'\n'))
+      - name: Apply authentication candidate 1
+        shell: bash
+        run: |
+          git apply --check --directory=auth-source build-support/auth-candidate1.patch
+          git apply --directory=auth-source build-support/auth-candidate1.patch
+      - name: Package corresponding source
+        shell: python
+        run: |
+          from pathlib import Path
+          import zipfile
+          root = Path('auth-source')
+          with zipfile.ZipFile('Reboot-27.11-Auth-Candidate1-Source.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+              for f in root.rglob('*'):
+                  if f.is_file() and '.git' not in f.parts:
+                      z.write(f, Path('Reboot-27.11-Auth-Source') / f.relative_to(root))
+      - name: Test scanners, hook installation, and URL handling
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++latest /EHsc /W4 /WX auth-source\tests\auth_scan_tests.cpp /Fe:auth-scan-tests.exe
+          if errorlevel 1 exit /b 1
+          auth-scan-tests.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++latest /EHsc /W3 auth-source\tests\auth_windows_tests.cpp auth-source\Tellurium\Unreal.cpp auth-source\Tellurium\Patchfinder.cpp auth-source\Tellurium\Redirection.cpp /Fe:auth-windows-tests.exe /link user32.lib
+          if errorlevel 1 exit /b 1
+          auth-windows-tests.exe
+          if errorlevel 1 exit /b 1
+      - name: Compile authentication DLL
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          msbuild auth-source\Tellurium.sln /m /t:Rebuild /p:Configuration=Release /p:Platform=x64 /p:TargetName=Reboot-27.11-Auth /nologo
+          if errorlevel 1 exit /b 1
+      - name: Validate and package the x64 DLL
+        shell: python
+        run: |
+          from pathlib import Path
+          import hashlib, os, shutil, struct
+          root = Path('auth-source')
+          dll = root / 'x64/Release/Reboot-27.11-Auth.dll'
+          data = dll.read_bytes()
+          assert data[:2] == b'MZ', 'Missing DOS header'
+          pe = struct.unpack_from('<I', data, 0x3c)[0]
+          assert data[pe:pe+4] == b'PE\0\0', 'Missing PE header'
+          assert struct.unpack_from('<H', data, pe+4)[0] == 0x8664, 'DLL is not AMD64'
+          assert struct.unpack_from('<H', data, pe+24)[0] == 0x20b, 'DLL is not PE32+'
+          assert struct.unpack_from('<H', data, pe+22)[0] & 0x2000, 'Image is not a DLL'
+          assert struct.unpack_from('<I', data, pe+40)[0] != 0, 'DLL has no entry point'
+          out = Path('auth-dist')
+          out.mkdir()
+          for f in (dll, root/'LICENSE', root/'AUTH-SETUP.md'):
+              shutil.copy2(f, out/f.name)
+          digest = hashlib.sha256(data).hexdigest()
+          (out/'SHA256SUMS.txt').write_text(f'{digest}  {dll.name}\n', encoding='ascii')
+          (out/'BUILD-INFO.txt').write_text(
+              'Reboot 27.11 Auth candidate 1\n'
+              'Upstream: plooshi/Tellurium 8750678312c011888b82878fb1d011b97b33fff5\n'
+              f'Workflow commit: {os.environ["GITHUB_SHA"]}\n'
+              f'Workflow run: https://github.com/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}\n'
+              'Configuration: Release x64, MSVC v143, static C++ runtime\n'
+              'Backend: http://127.0.0.1:3551\n'
+              'Runtime compatibility with Fortnite 27.11 remains unverified.\n', encoding='utf-8')
+          print(f'Validated AMD64 PE32+ DLL: {dll.name}; bytes={len(data)}; SHA256={digest}')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Reboot-27.11-Auth-Candidate1-Windows-x64
+          path: auth-dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Reboot-27.11-Auth-Candidate1-Source
+          path: Reboot-27.11-Auth-Candidate1-Source.zip
+          if-no-files-found: error
