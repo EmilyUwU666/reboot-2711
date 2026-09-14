@@ -1,0 +1,175 @@
+name: Compile experimental Fortnite Seasons 19-30 DLLs
+on:
+  push:
+    paths:
+      - build-support/seasons19-30.patch
+      - build-support/auth-seasons19-30.patch
+      - build-support/seasons-backend-tests.cjs
+      - .github/workflows/build-seasons.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract pinned server and client source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = 'Reboot-27.11-Source.zip'
+          $expected = 'c456b97c0a224866e017467949bf53799490760412628c01f85c531f20ab8a96'
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $expected) { throw 'Source ZIP hash mismatch' }
+          Expand-Archive -LiteralPath $archive -DestinationPath source
+      - name: Fetch pinned authentication and backend source
+        shell: bash
+        run: |
+          git -c core.autocrlf=false clone https://github.com/plooshi/Tellurium.git auth-source
+          git -C auth-source -c core.autocrlf=false checkout 8750678312c011888b82878fb1d011b97b33fff5
+          test "$(git -C auth-source rev-parse HEAD)" = 8750678312c011888b82878fb1d011b97b33fff5
+          git -c core.autocrlf=false clone https://github.com/Lawin0129/LawinServer.git backend-source
+          git -C backend-source -c core.autocrlf=false checkout 7f0f26d7a772c6122c42b1783fd75f497e86d3a9
+          test "$(git -C backend-source rev-parse HEAD)" = 7f0f26d7a772c6122c42b1783fd75f497e86d3a9
+      - name: Normalize authentication source and retrieve exact patch bytes
+        shell: python
+        run: |
+          from pathlib import Path
+          import subprocess
+          for name in subprocess.check_output(['git', '-C', 'auth-source', 'ls-files'], text=True).splitlines():
+              p = Path('auth-source') / name
+              if p.suffix in ('.h', '.cpp', '.vcxproj', '.md'):
+                  p.write_bytes(p.read_bytes().replace(b'\r\n', b'\n'))
+          for name in ('revision2.patch', 'seasons19-30.patch', 'auth-candidate1.patch', 'auth-seasons19-30.patch', 'backend-candidate1.patch'):
+              data = subprocess.check_output(['git', 'show', 'HEAD:build-support/' + name])
+              if name != 'backend-candidate1.patch':
+                  data = data.replace(b'\r\n', b'\n')
+              Path(name).write_bytes(data)
+      - name: Apply compatibility changes
+        shell: bash
+        run: |
+          git apply --check --directory=source/Reboot-27.11-Source revision2.patch
+          git apply --directory=source/Reboot-27.11-Source revision2.patch
+          git apply --check --directory=source/Reboot-27.11-Source seasons19-30.patch
+          git apply --directory=source/Reboot-27.11-Source seasons19-30.patch
+          git apply --check --directory=auth-source auth-candidate1.patch
+          git apply --directory=auth-source auth-candidate1.patch
+          git apply --check --directory=auth-source auth-seasons19-30.patch
+          git apply --directory=auth-source auth-seasons19-30.patch
+          git apply --check --directory=backend-source backend-candidate1.patch
+          git apply --directory=backend-source backend-candidate1.patch
+      - name: Package corresponding source
+        shell: python
+        run: |
+          from pathlib import Path
+          import zipfile
+          with zipfile.ZipFile('Reboot-S19-S30-Candidate1-Source.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+              for root, label in ((Path('source/Reboot-27.11-Source'), 'server-client'), (Path('auth-source'), 'authentication')):
+                  for f in root.rglob('*'):
+                      if f.is_file() and '.git' not in f.parts:
+                          z.write(f, Path('Reboot-S19-S30-Source') / label / f.relative_to(root))
+              z.write('build-support/seasons-backend-tests.cjs', 'Reboot-S19-S30-Source/backend-tests/seasons-backend-tests.cjs')
+      - name: Test version profiles, ProcessEvent lookup, and authentication
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /WX source\Reboot-27.11-Source\tests\build_version_tests.cpp /Fe:version-tests.exe
+          if errorlevel 1 exit /b 1
+          version-tests.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /WX source\Reboot-27.11-Source\tests\process_event_lookup_tests.cpp /Fe:lookup-tests.exe
+          if errorlevel 1 exit /b 1
+          lookup-tests.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++latest /EHsc /W4 /WX auth-source\tests\auth_scan_tests.cpp /Fe:auth-scan-tests.exe
+          if errorlevel 1 exit /b 1
+          auth-scan-tests.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++latest /EHsc /W3 auth-source\tests\auth_windows_tests.cpp auth-source\Tellurium\Unreal.cpp auth-source\Tellurium\Patchfinder.cpp auth-source\Tellurium\Redirection.cpp /Fe:auth-windows-tests.exe /link user32.lib
+          if errorlevel 1 exit /b 1
+          auth-windows-tests.exe
+          if errorlevel 1 exit /b 1
+      - name: Check PowerShell scripts and compile server and client
+        shell: pwsh
+        run: |
+          Get-ChildItem source/Reboot-27.11-Source/scripts -Filter '*.ps1' | ForEach-Object {
+            $null = [scriptblock]::Create((Get-Content -LiteralPath $_.FullName -Raw))
+          }
+          ./source/Reboot-27.11-Source/scripts/Build.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compile matching authentication DLL
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          msbuild auth-source\Tellurium.sln /m /t:Rebuild /p:Configuration=Release /p:Platform=x64 /p:TargetName=Reboot-S19-S30-Auth /nologo
+          if errorlevel 1 exit /b 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+      - name: Install locked backend dependencies
+        working-directory: backend-source
+        run: npm ci --ignore-scripts --omit=dev --no-audit --no-fund
+      - name: Release the ephemeral runner's IIS test port
+        shell: pwsh
+        run: |
+          $iisServices = Get-Service -Name W3SVC,WAS -ErrorAction SilentlyContinue
+          foreach ($service in $iisServices) {
+            if ($service.Status -eq 'Running') { Stop-Service -Name $service.Name -Force -ErrorAction Stop }
+          }
+      - name: Test existing backend across all twelve seasons
+        shell: pwsh
+        run: |
+          node backend-source/tests/backend-smoke-tests.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node build-support/seasons-backend-tests.cjs backend-source
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Validate and package all three DLLs
+        shell: python
+        run: |
+          from pathlib import Path
+          import hashlib, os, shutil, struct
+          source = Path('source/Reboot-27.11-Source')
+          out = Path('seasons-dist')
+          shutil.copytree(source/'dist-S19-S30', out)
+          shutil.copy2('auth-source/x64/Release/Reboot-S19-S30-Auth.dll', out)
+          shutil.copy2('auth-source/LICENSE', out/'AUTH-LICENSE.txt')
+          shutil.copy2('auth-source/AUTH-SETUP.md', out)
+          hashes = []
+          for name in ('Reboot-S19-S30-Server.dll', 'Reboot-S19-S30-Client.dll', 'Reboot-S19-S30-Auth.dll'):
+              data = (out/name).read_bytes()
+              assert data[:2] == b'MZ', name + ': missing DOS header'
+              pe = struct.unpack_from('<I', data, 0x3c)[0]
+              assert data[pe:pe+4] == b'PE\0\0', name + ': missing PE header'
+              assert struct.unpack_from('<H', data, pe+4)[0] == 0x8664, name + ': must be AMD64'
+              assert struct.unpack_from('<H', data, pe+24)[0] == 0x20b, name + ': must be PE32+'
+              assert struct.unpack_from('<H', data, pe+22)[0] & 0x2000, name + ': must be DLL'
+              assert struct.unpack_from('<I', data, pe+40)[0], name + ': must have entry point'
+              digest = hashlib.sha256(data).hexdigest()
+              hashes.append(f'{digest}  {name}')
+              print(f'Validated {name}; bytes={len(data)}; SHA256={digest}')
+          (out/'SHA256SUMS.txt').write_text('\n'.join(hashes)+'\n', encoding='ascii')
+          (out/'BUILD-INFO.txt').write_text(
+              'Reboot Seasons 19-30 experimental candidate 1\n'
+              f'Workflow commit: {os.environ["GITHUB_SHA"]}\n'
+              f'Workflow run: https://github.com/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}\n'
+              'Server/client: Erbium 44568e08cbe411ba197d3e0e900685750d46afdc + prepared source + revision2 + seasons19-30\n'
+              'Authentication: Tellurium 8750678312c011888b82878fb1d011b97b33fff5 + auth-candidate1 + season-range branding\n'
+              'Configuration: Release x64, MSVC v143, shared Solo profile, port 7777\n'
+              'Target: Fortnite 19.xx-30.xx, Unreal Engine 5.0-5.5; exact game versions must match across host/client.\n'
+              'Checks passed: 288 version/profile, 23 ProcessEvent, 2020 scanner, 42 auth Windows hook/URL.\n'
+              'Backend: 27 original HTTP/WebSocket checks plus cross-season HTTP/profile/matchmaking checks passed.\n'
+              'Backend remains the previously packaged LawinServer 7f0f26d7a772c6122c42b1783fd75f497e86d3a9 candidate on localhost:3551.\n'
+              'No Fortnite executable was run; gameplay compatibility and prior loading/host-crash failures remain unverified.\n', encoding='utf-8')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Reboot-S19-S30-Candidate1-Windows-x64
+          path: seasons-dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Reboot-S19-S30-Candidate1-Source
+          path: Reboot-S19-S30-Candidate1-Source.zip
+          if-no-files-found: error
