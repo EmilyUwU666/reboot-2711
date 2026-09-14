@@ -58,6 +58,15 @@ jobs:
           assert struct.unpack_from('<H', data, pe+4)[0] == 0x8664, 'Node runtime must be AMD64'
           Path('runtime-provenance.json').write_text(json.dumps({'version': version, 'archive_sha256': actual, 'runtime_sha256': hashlib.sha256(data).hexdigest()}))
           print(f'Official Windows x64 runtime verified: Node {version}, archive SHA256 {actual}')
+      - name: Release the runner's IIS test port
+        shell: pwsh
+        run: |
+          Get-NetTCPConnection -LocalPort 80 -ErrorAction SilentlyContinue | Select-Object LocalAddress, LocalPort, State, OwningProcess
+          $iisServices = Get-Service -Name W3SVC,WAS -ErrorAction SilentlyContinue
+          $iisServices | Select-Object Name,Status
+          foreach ($service in $iisServices) {
+            if ($service.Status -eq 'Running') { Stop-Service -Name $service.Name -Force -ErrorAction Stop }
+          }
       - name: Test packaged backend on Windows
         shell: pwsh
         run: |
