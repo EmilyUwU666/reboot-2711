@@ -15,10 +15,10 @@ index 0000000..3881743
 +</Project>
 diff --git a/launcher/Emilyfn.Tests/Program.cs b/launcher/Emilyfn.Tests/Program.cs
 new file mode 100644
-index 0000000..bd5978f
+index 0000000..3098513
 --- /dev/null
 +++ b/launcher/Emilyfn.Tests/Program.cs
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,151 @@
 +using Emilyfn.Core;
 +using System.Collections.Concurrent;
 +using System.Diagnostics;
@@ -102,7 +102,8 @@ index 0000000..bd5978f
 +        {
 +            using var connection = await listener.AcceptTcpClientAsync(backendCancellation.Token);
 +            using var stream = connection.GetStream();
-+            var buffer = new byte[4096]; await stream.ReadAsync(buffer, backendCancellation.Token);
++            using var request = new StreamReader(stream, Encoding.ASCII, false, 1024, leaveOpen: true);
++            while (await request.ReadLineAsync(backendCancellation.Token) is { Length: > 0 }) { }
 +            var json = "{\"appId\":\"Fortnite\",\"token\":\"synthetic\"}";
 +            var response = Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {json.Length}\r\nConnection: close\r\n\r\n{json}");
 +            await stream.WriteAsync(response, backendCancellation.Token);
@@ -205,7 +206,7 @@ index 0000000..a53c48b
 +}
 diff --git a/launcher/Emilyfn.Tests/native/module.cpp b/launcher/Emilyfn.Tests/native/module.cpp
 new file mode 100644
-index 0000000..4b2e8c1
+index 0000000..8a9bcbc
 --- /dev/null
 +++ b/launcher/Emilyfn.Tests/native/module.cpp
 @@ -0,0 +1,43 @@
@@ -228,7 +229,7 @@ index 0000000..4b2e8c1
 +    _wfopen_s(&file, path.c_str(), MODULE_ROLE == 0 ? L"wb" : L"ab");
 +    if (file)
 +    {
-+        if (MODULE_ROLE == 0)
++        if constexpr (MODULE_ROLE == 0)
 +        {
 +            fprintf(file, "Synthetic auth fixture; PID=%lu\n", GetCurrentProcessId());
 +            if (GetEnvironmentVariableW(L"EMILYFN_TEST_FAIL_AUTH", nullptr, 0)) fputs("ERROR: intentional authentication fixture failure\n", file);
@@ -237,7 +238,7 @@ index 0000000..4b2e8c1
 +        else fprintf(file, "[PID %lu] S19-S30 candidate 1 SDK initialized; synthetic fixture\n", GetCurrentProcessId());
 +        fclose(file);
 +    }
-+    if (MODULE_ROLE == 1)
++    if constexpr (MODULE_ROLE == 1)
 +    {
 +        WSADATA data{}; WSAStartup(MAKEWORD(2,2), &data);
 +        auto socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
