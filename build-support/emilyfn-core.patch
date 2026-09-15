@@ -1,0 +1,1565 @@
+diff --git a/launcher/.gitignore b/launcher/.gitignore
+new file mode 100644
+index 0000000..e71452e
+--- /dev/null
++++ b/launcher/.gitignore
+@@ -0,0 +1,4 @@
++**/bin/
++**/obj/
++assets/Emilyfn.ico
++*.started-*
+diff --git a/launcher/Emilyfn.Core/BackendManager.cs b/launcher/Emilyfn.Core/BackendManager.cs
+new file mode 100644
+index 0000000..153ee6a
+--- /dev/null
++++ b/launcher/Emilyfn.Core/BackendManager.cs
+@@ -0,0 +1,108 @@
++using System.Diagnostics;
++using System.Net.Sockets;
++using System.Text.Json;
++
++namespace Emilyfn.Core;
++
++public sealed class BackendManager(string resources, string dataRoot, Action<string> log)
++{
++    private readonly SemaphoreSlim gate = new(1, 1);
++    private Process? owned;
++    public string Status { get; private set; } = "Not started";
++    public event Action<string>? Changed;
++    private void Set(string status) { Status = status; Changed?.Invoke(status); log("Backend: " + status); }
++    public async Task<bool> HealthyAsync(CancellationToken cancellation)
++    {
++        try
++        {
++            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
++            var json = await http.GetStringAsync("http://127.0.0.1:3551/fortnite/api/discovery/accessToken/Emilyfn", cancellation);
++            using var doc = JsonDocument.Parse(json);
++            return doc.RootElement.TryGetProperty("appId", out var app) && app.GetString() == "Fortnite"
++                && doc.RootElement.TryGetProperty("token", out var token) && !string.IsNullOrWhiteSpace(token.GetString());
++        }
++        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException) { return false; }
++    }
++    public async Task EnsureAsync(CancellationToken cancellation)
++    {
++        await gate.WaitAsync(cancellation);
++        try
++        {
++            if (await HealthyAsync(cancellation)) { Set(owned is { HasExited: false } ? "Running · bundled" : "Running · existing"); return; }
++            using (var connection = new TcpClient())
++            {
++                try
++                {
++                    await connection.ConnectAsync("127.0.0.1", 3551, cancellation).AsTask().WaitAsync(TimeSpan.FromSeconds(2), cancellation);
++                    throw new InvalidOperationException("Port 3551 is occupied by an incompatible backend. Stop the old backend and try again.");
++                }
++                catch (SocketException) { }
++                catch (TimeoutException) { }
++            }
++            Set("Preparing");
++            var source = Path.Combine(resources, "backend");
++            var destination = Path.Combine(dataRoot, "backend-candidate1");
++            if (!Directory.Exists(destination))
++            {
++                if (!File.Exists(Path.Combine(source, "runtime", "node.exe"))) throw new FileNotFoundException("The bundled backend is missing. Extract the entire Emilyfn ZIP.");
++                var temporary = destination + ".staging-" + Guid.NewGuid().ToString("N");
++                try
++                {
++                    await Task.Run(() =>
++                    {
++                        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
++                        {
++                            cancellation.ThrowIfCancellationRequested();
++                            var target = Path.Combine(temporary, Path.GetRelativePath(source, file));
++                            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
++                            File.Copy(file, target);
++                        }
++                    }, cancellation);
++                    Directory.Move(temporary, destination);
++                }
++                finally { if (Directory.Exists(temporary)) Directory.Delete(temporary, true); }
++            }
++            var node = Path.Combine(destination, "runtime", "node.exe");
++            PeImage.RequireX64(node, false);
++            var info = new ProcessStartInfo(node) { WorkingDirectory = destination, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
++            info.ArgumentList.Add("start-backend.cjs");
++            var process = new Process { StartInfo = info, EnableRaisingEvents = true };
++            process.OutputDataReceived += (_, e) => { if (e.Data is { Length: > 0 }) log("Backend: " + LaunchProtocol.Redact(e.Data)); };
++            process.ErrorDataReceived += (_, e) => { if (e.Data is { Length: > 0 }) log("Backend: " + LaunchProtocol.Redact(e.Data)); };
++            process.Exited += (_, _) =>
++            {
++                try { Set($"Stopped · exit 0x{unchecked((uint)process.ExitCode):X8}"); }
++                catch (InvalidOperationException) { }
++            };
++            process.Start(); owned = process;
++            process.BeginOutputReadLine(); process.BeginErrorReadLine();
++            Set("Starting");
++            var deadline = Stopwatch.StartNew();
++            while (deadline.Elapsed < TimeSpan.FromSeconds(20))
++            {
++                cancellation.ThrowIfCancellationRequested();
++                if (process.HasExited) throw new InvalidOperationException($"Backend exited with code {process.ExitCode}. Open Logs for the port or startup error.");
++                if (await HealthyAsync(cancellation)) { Set("Running · bundled"); return; }
++                await Task.Delay(250, cancellation);
++            }
++            throw new TimeoutException("The bundled backend did not respond within 20 seconds. Open Logs for details.");
++        }
++        catch
++        {
++            if (owned is { HasExited: false }) owned.Kill(true);
++            Set("Needs attention");
++            throw;
++        }
++        finally { gate.Release(); }
++    }
++    public async Task StopOwnedAsync()
++    {
++        await gate.WaitAsync();
++        try
++        {
++            if (owned is { HasExited: false }) { owned.Kill(true); await owned.WaitForExitAsync(); }
++            owned?.Dispose(); owned = null;
++        }
++        finally { gate.Release(); }
++    }
++}
+diff --git a/launcher/Emilyfn.Core/Emilyfn.Core.csproj b/launcher/Emilyfn.Core/Emilyfn.Core.csproj
+new file mode 100644
+index 0000000..9a6c00c
+--- /dev/null
++++ b/launcher/Emilyfn.Core/Emilyfn.Core.csproj
+@@ -0,0 +1,8 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup>
++    <TargetFramework>net10.0</TargetFramework>
++    <ImplicitUsings>enable</ImplicitUsings>
++    <Nullable>enable</Nullable>
++    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
++  </PropertyGroup>
++</Project>
+diff --git a/launcher/Emilyfn.Core/LaunchProtocol.cs b/launcher/Emilyfn.Core/LaunchProtocol.cs
+new file mode 100644
+index 0000000..6891e1e
+--- /dev/null
++++ b/launcher/Emilyfn.Core/LaunchProtocol.cs
+@@ -0,0 +1,48 @@
++using System.Text.RegularExpressions;
++
++namespace Emilyfn.Core;
++
++public static partial class LaunchProtocol
++{
++    [GeneratedRegex(@"^[A-Za-z0-9_-]{1,24}$", RegexOptions.CultureInvariant)] private static partial Regex NameRegex();
++    [GeneratedRegex(@"(?i)(-?AUTH_(?:LOGIN|PASSWORD)|(?:access|refresh|id)_token|authorization|password|caldera|fltoken)([""']?\s*[=:]\s*)(""[^""]*""|[^\s,;]+)")] private static partial Regex SecretsRegex();
++    [GeneratedRegex(@"(?i)bearer\s+[^\s"",;]+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")]
++    private static partial Regex TokensRegex();
++    public static string Redact(string line) => TokensRegex().Replace(SecretsRegex().Replace(line, "$1$2[redacted]"), "[redacted]");
++    public static bool LoginCompleted(string line) => line.Contains("[UOnlineAccountCommon::ContinueLoggingIn]", StringComparison.Ordinal) && line.Contains("(Completed)", StringComparison.Ordinal);
++    public static bool Fatal(string line) => line.Contains("Fatal error!", StringComparison.OrdinalIgnoreCase) || line.Contains("Unhandled Exception:", StringComparison.OrdinalIgnoreCase);
++    public static string ValidateName(string name) => NameRegex().IsMatch(name) ? name : throw new ArgumentException("Use 1-24 letters, numbers, underscores or hyphens for your local name.");
++    public static IReadOnlyList<string> Arguments(string name, GameRole role, bool headless, string logFile, IReadOnlyList<string> compatibility)
++    {
++        ValidateName(name);
++        var args = new List<string>(compatibility);
++        var account = role == GameRole.Host ? name + "_host" : name;
++        // Local backend profile identifiers; no real Epic account credentials are used.
++        args.Add("-AUTH_LOGIN=" + account + (role == GameRole.Host ? "@host.emilyfn.local" : "@player.emilyfn.local"));
++        args.Add("-AUTH_PASSWORD=EmilyfnLocal");
++        args.Add("-AUTH_TYPE=epic");
++        args.AddRange(["-stdout", "-FullStdOutLogOutput", "-FORCELOGFLUSH", "-abslog=" + logFile]);
++        if (role == GameRole.Host)
++        {
++            args.AddRange(["-nosplash", "-nosound"]);
++            if (headless) args.Add("-nullrhi");
++        }
++        return args;
++    }
++    public static void RequireMatching(GameInstall selected, GameInstall? other)
++    {
++        if (other is not null && (!string.Equals(selected.Release, other.Release, StringComparison.Ordinal) || !string.Equals(Path.GetFullPath(selected.Directory), Path.GetFullPath(other.Directory), StringComparison.OrdinalIgnoreCase)))
++            throw new InvalidOperationException("Stop the other game instance before switching installations. Host and client must use the same build.");
++    }
++}
++public sealed class LogSignals
++{
++    public TaskCompletionSource Login { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
++    public TaskCompletionSource FatalError { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
++    public string? Error { get; private set; }
++    public void Observe(string line)
++    {
++        if (LaunchProtocol.LoginCompleted(line)) Login.TrySetResult();
++        if (LaunchProtocol.Fatal(line)) { Error = LaunchProtocol.Redact(line); FatalError.TrySetResult(); }
++    }
++}
+diff --git a/launcher/Emilyfn.Core/LauncherEngine.cs b/launcher/Emilyfn.Core/LauncherEngine.cs
+new file mode 100644
+index 0000000..5a6a95c
+--- /dev/null
++++ b/launcher/Emilyfn.Core/LauncherEngine.cs
+@@ -0,0 +1,265 @@
++using System.Collections.Concurrent;
++using System.Diagnostics;
++using System.IO.Compression;
++using System.Text;
++using System.Text.Json;
++
++namespace Emilyfn.Core;
++
++public sealed class LauncherEngine
++{
++    private sealed class Session(GameRole role, GameInstall install)
++    {
++        public GameRole Role = role;
++        public GameInstall Install = install;
++        public CancellationTokenSource Cancellation = new();
++        public TaskCompletionSource Ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
++        public Task Work = Task.CompletedTask;
++        public Process? Process;
++        public List<Process> Companions = [];
++        public LogSignals Signals = new();
++        public string LogFile = "";
++    }
++    private readonly ConcurrentDictionary<GameRole, Session> sessions = new();
++    private readonly SemaphoreSlim launchGate = new(1, 1);
++    private readonly object logLock = new();
++    private readonly string resources;
++    private readonly string[] compatibility;
++    private int stopGeneration;
++    public string DataRoot { get; }
++    public string LogsRoot => Path.Combine(DataRoot, "logs");
++    public BackendManager Backend { get; }
++    public event Action<SessionStatus>? StatusChanged;
++    public event Action<string>? Logged;
++    public bool HasSession(GameRole role) => sessions.ContainsKey(role);
++    public LauncherEngine(string packageRoot, string dataRoot)
++    {
++        DataRoot = dataRoot;
++        Directory.CreateDirectory(LogsRoot);
++        resources = Path.Combine(packageRoot, "resources");
++        var file = Path.Combine(packageRoot, "compatibility-args.json");
++        compatibility = File.Exists(file) ? JsonSerializer.Deserialize<string[]>(File.ReadAllText(file)) ?? [] : [];
++        Backend = new BackendManager(resources, dataRoot, Log);
++    }
++    public void Log(string message)
++    {
++        var line = $"[{DateTime.Now:HH:mm:ss}] {LaunchProtocol.Redact(message)}";
++        lock (logLock)
++        {
++            try { File.AppendAllText(Path.Combine(LogsRoot, "Emilyfn.log"), line + Environment.NewLine); } catch (IOException) { }
++        }
++        Logged?.Invoke(line);
++    }
++    private void State(Session session, LaunchStage stage, string detail)
++    {
++        if (!sessions.TryGetValue(session.Role, out var current) || !ReferenceEquals(current, session)) return;
++        StatusChanged?.Invoke(new(session.Role, stage, detail, session.Process?.Id));
++        Log($"{session.Role}: {detail}");
++    }
++    public async Task PlayAsync(GameInstall install, LauncherSettings settings)
++    {
++        var generation = Volatile.Read(ref stopGeneration);
++        if (settings.AutoHost) await StartAsync(GameRole.Host, install, settings);
++        if (generation != Volatile.Read(ref stopGeneration)) throw new OperationCanceledException("Launch was stopped.");
++        await StartAsync(GameRole.Client, install, settings);
++    }
++    public async Task StartAsync(GameRole role, GameInstall install, LauncherSettings settings)
++    {
++        if (sessions.TryGetValue(role, out var existing)) { LaunchProtocol.RequireMatching(install, existing.Install); await existing.Ready.Task; return; }
++        LaunchProtocol.ValidateName(settings.DisplayName);
++        if (!Releases.Valid(install.Release)) throw new InvalidOperationException("Choose an installed 19.xx-30.xx build.");
++        foreach (var other in sessions.Values) LaunchProtocol.RequireMatching(install, other.Install);
++        var session = new Session(role, install);
++        if (!sessions.TryAdd(role, session)) throw new InvalidOperationException("That instance is already starting.");
++        State(session, LaunchStage.Checking, "Checking installation");
++        session.Work = RunAsync(session, settings.DisplayName, settings.HeadlessHost);
++        await session.Ready.Task;
++    }
++    private async Task RunAsync(Session session, string displayName, bool headless)
++    {
++        var token = session.Cancellation.Token;
++        Task? tail = null;
++        var gateHeld = false;
++        try
++        {
++            await launchGate.WaitAsync(token); gateHeld = true;
++            foreach (var other in sessions.Values) LaunchProtocol.RequireMatching(session.Install, other.Install);
++            var inspected = Releases.Inspect(session.Install.Directory);
++            if (inspected.Release is not null && inspected.Release != session.Install.Release) throw new InvalidOperationException("The executable metadata differs from the saved release. Remove and add this installation again.");
++            if (compatibility.Length == 0) throw new FileNotFoundException("Compatibility settings are missing. Extract the full Emilyfn package.");
++            var dllRoot = Path.Combine(resources, "dlls");
++            var auth = Path.Combine(dllRoot, "Reboot-S19-S30-Auth.dll");
++            var module = Path.Combine(dllRoot, session.Role == GameRole.Host ? "Reboot-S19-S30-Server.dll" : "Reboot-S19-S30-Client.dll");
++            PeImage.RequireX64(auth, true); PeImage.RequireX64(module, true);
++            State(session, LaunchStage.Checking, "Starting local backend");
++            await Backend.EnsureAsync(token);
++            token.ThrowIfCancellationRequested();
++            var binaryDirectory = Path.GetDirectoryName(session.Install.Executable)!;
++            // Compatibility companions belong to this session and are never resumed.
++            foreach (var companion in new[] { "FortniteLauncher.exe", "FortniteClient-Win64-Shipping_EAC.exe" })
++            {
++                var path = Path.Combine(binaryDirectory, companion);
++                if (File.Exists(path)) session.Companions.Add(NativeWindows.StartSuspendedCompanion(path));
++            }
++            session.LogFile = Path.Combine(LogsRoot, $"{DateTime.UtcNow:yyyyMMdd-HHmmssfff}-{session.Role}-{session.Install.Release}.log");
++            var info = new ProcessStartInfo(session.Install.Executable) { WorkingDirectory = binaryDirectory, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
++            foreach (var argument in LaunchProtocol.Arguments(displayName, session.Role, headless, session.LogFile, compatibility)) info.ArgumentList.Add(argument);
++            info.Environment["OPENSSL_ia32cap"] = "~0x20000000";
++            session.Process = new Process { StartInfo = info };
++            session.Process.OutputDataReceived += (_, e) => { if (e.Data is not null) session.Signals.Observe(e.Data); };
++            session.Process.ErrorDataReceived += (_, e) => { if (e.Data is not null) session.Signals.Observe(e.Data); };
++            session.Process.Start();
++            session.Process.BeginOutputReadLine(); session.Process.BeginErrorReadLine();
++            State(session, LaunchStage.Starting, $"Process started · PID {session.Process.Id}");
++            tail = TailAsync(session, token);
++            State(session, LaunchStage.Authentication, "Loading local authentication");
++            await Task.Run(() => NativeWindows.Inject(session.Process, auth, token), token);
++            var authLog = Path.Combine(Path.GetTempPath(), "Reboot-S19-S30-Auth-startup.log");
++            await WaitAsync(session, () =>
++            {
++                var text = ReadLog(authLog);
++                if (!System.Text.RegularExpressions.Regex.IsMatch(text, $@"\bPID={session.Process.Id}(?!\d)")) return false;
++                if (text.Contains("ERROR:", StringComparison.Ordinal)) throw new InvalidOperationException("Authentication initialization failed. See the authentication diagnostic log.");
++                return text.Contains("READY: game and EOS authentication hooks installed", StringComparison.Ordinal);
++            }, TimeSpan.FromSeconds(70), "Authentication did not become ready within 70 seconds.");
++            State(session, LaunchStage.Login, "Signing in to local profile · up to 5 minutes");
++            await WaitAsync(session, () => session.Signals.Login.Task.IsCompletedSuccessfully, TimeSpan.FromMinutes(5), "Login did not complete within five minutes. Open Logs for backend or game errors.");
++            State(session, LaunchStage.LoadingModule, "Login complete · loading game module");
++            var roleName = session.Role == GameRole.Host ? "Server" : "Client";
++            var moduleLog = Path.Combine(Path.GetTempPath(), $"Reboot-S19-S30-{roleName}-startup.log");
++            var previousLength = File.Exists(moduleLog) ? new FileInfo(moduleLog).Length : 0;
++            await Task.Run(() => NativeWindows.Inject(session.Process, module, token), token);
++            await WaitAsync(session, () =>
++            {
++                var text = ReadLog(moduleLog, previousLength);
++                if (!text.Contains($"[PID {session.Process.Id}]", StringComparison.Ordinal)) return false;
++                if (text.Contains("initialization stopped", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The game module stopped during SDK initialization. Open Logs for the detected build and missing binding.");
++                return text.Contains("SDK initialized", StringComparison.Ordinal);
++            }, TimeSpan.FromMinutes(2), "The game module did not finish SDK initialization within two minutes.");
++            if (session.Role == GameRole.Host)
++            {
++                State(session, LaunchStage.LoadingMap, $"Loading {session.Install.Island} · waiting for host port");
++                await WaitAsync(session, () =>
++                {
++                    var text = ReadLog(moduleLog, previousLength);
++                    if (text.Contains("initialization stopped", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Host initialization stopped. Open the server diagnostic log.");
++                    return NativeWindows.OwnsUdpPort(session.Process.Id, 7777);
++                }, TimeSpan.FromMinutes(10), "The host did not open port 7777 within ten minutes. The server log contains the last completed stage.");
++                State(session, LaunchStage.Listening, "Listening on 127.0.0.1:7777");
++            }
++            else State(session, LaunchStage.Active, "Client active · ready up in the lobby");
++            session.Ready.TrySetResult();
++            launchGate.Release(); gateHeld = false;
++            await session.Process.WaitForExitAsync(token);
++            var exit = session.Process.ExitCode;
++            State(session, exit == 0 ? LaunchStage.Idle : LaunchStage.Failed, $"Exited · code 0x{unchecked((uint)exit):X8}");
++        }
++        catch (OperationCanceledException)
++        {
++            session.Ready.TrySetCanceled();
++            State(session, LaunchStage.Idle, "Stopped");
++        }
++        catch (Exception error)
++        {
++            session.Ready.TrySetException(error);
++            State(session, LaunchStage.Failed, error.Message);
++        }
++        finally
++        {
++            if (gateHeld) launchGate.Release();
++            session.Cancellation.Cancel();
++            await EndProcessAsync(session.Process);
++            foreach (var companion in session.Companions) await EndProcessAsync(companion);
++            if (tail is not null) { try { await tail; } catch (OperationCanceledException) { } }
++            sessions.TryRemove(new KeyValuePair<GameRole, Session>(session.Role, session));
++        }
++    }
++    private static async Task WaitAsync(Session session, Func<bool> condition, TimeSpan timeout, string failure)
++    {
++        var watch = Stopwatch.StartNew();
++        while (watch.Elapsed < timeout)
++        {
++            session.Cancellation.Token.ThrowIfCancellationRequested();
++            if (session.Process!.HasExited) throw new InvalidOperationException($"Game exited during startup · code 0x{unchecked((uint)session.Process.ExitCode):X8}.");
++            if (session.Signals.FatalError.Task.IsCompleted) throw new InvalidOperationException(session.Signals.Error ?? "The game reported a fatal error.");
++            if (condition()) return;
++            await Task.Delay(250, session.Cancellation.Token);
++        }
++        throw new TimeoutException(failure);
++    }
++    private static async Task TailAsync(Session session, CancellationToken token)
++    {
++        while (!File.Exists(session.LogFile)) await Task.Delay(200, token);
++        try
++        {
++            using var file = new FileStream(session.LogFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
++            using var reader = new StreamReader(file, Encoding.UTF8, true);
++            var pending = new StringBuilder();
++            var buffer = new char[8192];
++            while (!token.IsCancellationRequested)
++            {
++                var count = await reader.ReadAsync(buffer.AsMemory(), token);
++                if (count == 0) { await Task.Delay(150, token); continue; }
++                foreach (var value in buffer.AsSpan(0, count))
++                {
++                    if (value == '\n') { session.Signals.Observe(pending.ToString()); pending.Clear(); }
++                    else if (pending.Length < 65536) pending.Append(value);
++                }
++            }
++        }
++        catch (IOException) { /* stdout remains an independent source of game status. */ }
++    }
++    public static string ReadLog(string file, long offset = 0)
++    {
++        try
++        {
++            using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
++            stream.Position = Math.Max(0, Math.Max(Math.Min(offset, stream.Length), stream.Length - 262144));
++            using var reader = new StreamReader(stream);
++            return reader.ReadToEnd();
++        }
++        catch (IOException) { return ""; }
++        catch (UnauthorizedAccessException) { return ""; }
++    }
++    private static async Task EndProcessAsync(Process? process)
++    {
++        if (process is null) return;
++        try { if (!process.HasExited) { process.Kill(true); await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); } }
++        catch (Exception e) when (e is InvalidOperationException or System.ComponentModel.Win32Exception or TimeoutException) { }
++        finally { process.Dispose(); }
++    }
++    public async Task StopAsync(GameRole role)
++    {
++        Interlocked.Increment(ref stopGeneration);
++        if (!sessions.TryGetValue(role, out var session)) return;
++        State(session, LaunchStage.Stopping, "Stopping instance");
++        session.Cancellation.Cancel();
++        await session.Work;
++    }
++    public async Task StopAllAsync()
++    {
++        Interlocked.Increment(ref stopGeneration);
++        foreach (var session in sessions.Values) session.Cancellation.Cancel();
++        await Task.WhenAll(sessions.Values.Select(s => s.Work));
++        await Backend.StopOwnedAsync();
++    }
++    public async Task ExportLogsAsync(string destination)
++    {
++        var files = Directory.EnumerateFiles(LogsRoot, "*.log").Select(f => (File: f, Name: "launcher/" + Path.GetFileName(f))).ToList();
++        foreach (var role in new[] { "Auth", "Client", "Server" })
++        {
++            var path = Path.Combine(Path.GetTempPath(), $"Reboot-S19-S30-{role}-startup.log");
++            if (File.Exists(path)) files.Add((path, "modules/" + Path.GetFileName(path)));
++        }
++        var backendLog = Path.Combine(DataRoot, "backend-candidate1", "backend-startup.log");
++        if (File.Exists(backendLog)) files.Add((backendLog, "backend/backend-startup.log"));
++        using var zip = ZipFile.Open(destination, ZipArchiveMode.Create);
++        foreach (var (file, name) in files)
++        {
++            using var input = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
++            using var reader = new StreamReader(input, Encoding.UTF8, true);
++            using var writer = new StreamWriter(zip.CreateEntry(name, CompressionLevel.Fastest).Open());
++            while (await reader.ReadLineAsync() is { } line) await writer.WriteLineAsync(LaunchProtocol.Redact(line));
++        }
++    }
++}
+diff --git a/launcher/Emilyfn.Core/Models.cs b/launcher/Emilyfn.Core/Models.cs
+new file mode 100644
+index 0000000..96892f6
+--- /dev/null
++++ b/launcher/Emilyfn.Core/Models.cs
+@@ -0,0 +1,109 @@
++using System.Diagnostics;
++using System.Text.Json;
++using System.Text.RegularExpressions;
++
++namespace Emilyfn.Core;
++
++public enum GameRole { Client, Host }
++public enum LaunchStage { Idle, Checking, Starting, Authentication, Login, LoadingModule, LoadingMap, Active, Listening, Failed, Stopping }
++public sealed record GameInstall(string Id, string Directory, string Release)
++{
++    public string Label => $"Fortnite {Release}";
++    public string Island => Releases.Island(Release);
++    public string Executable => Path.Combine(Directory, "FortniteGame", "Binaries", "Win64", "FortniteClient-Win64-Shipping.exe");
++}
++public sealed record SessionStatus(GameRole Role, LaunchStage Stage, string Detail, int? Pid = null)
++{
++    public bool Running => Pid is not null && Stage is not LaunchStage.Idle;
++}
++public sealed class LauncherSettings
++{
++    public List<GameInstall> Installations { get; set; } = [];
++    public string? SelectedId { get; set; }
++    public string DisplayName { get; set; } = "Emily";
++    public bool AutoHost { get; set; } = true;
++    public bool HeadlessHost { get; set; } = true;
++}
++public static partial class Releases
++{
++    [GeneratedRegex(@"^(19|2\d|30)\.\d{2}$", RegexOptions.CultureInvariant)] private static partial Regex ReleaseRegex();
++    [GeneratedRegex(@"\+{2,3}Fortnite\+Release-(\d{2}\.\d{2})(?=$|[^\d.])", RegexOptions.CultureInvariant)] private static partial Regex BuildRegex();
++    public static bool Valid(string release) => ReleaseRegex().IsMatch(release);
++    public static string? FromMetadata(params string?[] values)
++    {
++        foreach (var value in values)
++        {
++            if (string.IsNullOrWhiteSpace(value)) continue;
++            var match = BuildRegex().Match(value);
++            if (match.Success) return match.Groups[1].Value;
++            if (Regex.IsMatch(value.Trim(), @"^\d{2}\.\d{2}$")) return value.Trim();
++        }
++        return null;
++    }
++    public static string Island(string release)
++    {
++        if (!Valid(release)) return "Choose a build";
++        var season = int.Parse(release[..2], System.Globalization.CultureInfo.InvariantCulture);
++        return season <= 22 ? "Artemis" : season <= 26 ? "Asteria" : season == 27 ? "Athena" : "Helios";
++    }
++    public static (string Root, string? Release) Inspect(string directory)
++    {
++        var root = Path.GetFullPath(directory);
++        var exe = Path.Combine(root, "FortniteGame", "Binaries", "Win64", "FortniteClient-Win64-Shipping.exe");
++        if (!File.Exists(exe)) throw new IOException("Choose the Fortnite folder containing FortniteGame and Engine.");
++        PeImage.RequireX64(exe, false);
++        var paks = Path.Combine(root, "FortniteGame", "Content", "Paks");
++        if (!System.IO.Directory.Exists(paks) || !System.IO.Directory.EnumerateFiles(paks).Any(p => Path.GetExtension(p) is ".pak" or ".utoc"))
++            throw new IOException("The selected installation has no .pak or .utoc game content.");
++        var info = FileVersionInfo.GetVersionInfo(exe);
++        var release = FromMetadata(info.ProductVersion, info.FileVersion);
++        if (release is not null && !Valid(release)) throw new InvalidOperationException($"Fortnite {release} is outside the experimental 19.xx-30.xx range.");
++        return (root, release);
++    }
++}
++public static class PeImage
++{
++    public static void RequireX64(string file, bool dll)
++    {
++        using var stream = File.OpenRead(file);
++        using var reader = new BinaryReader(stream);
++        if (stream.Length < 0x40 || reader.ReadUInt16() != 0x5a4d) throw new InvalidDataException($"Invalid Windows file: {Path.GetFileName(file)}");
++        stream.Position = 0x3c;
++        var pe = reader.ReadInt32();
++        if (pe < 0x40 || (long)pe + 26 > stream.Length) throw new InvalidDataException("Invalid PE header bounds.");
++        stream.Position = pe;
++        if (reader.ReadUInt32() != 0x00004550 || reader.ReadUInt16() != 0x8664) throw new InvalidDataException("A Windows x64 build is required.");
++        stream.Position = pe + 22;
++        var flags = reader.ReadUInt16();
++        if (((flags & 0x2000) != 0) != dll || reader.ReadUInt16() != 0x20b) throw new InvalidDataException("Unexpected executable/DLL architecture.");
++    }
++}
++public sealed class SettingsStore(string directory)
++{
++    public string DirectoryPath { get; } = directory;
++    public LauncherSettings Load()
++    {
++        var file = Path.Combine(DirectoryPath, "settings.json");
++        if (!File.Exists(file)) return new();
++        try
++        {
++            var settings = JsonSerializer.Deserialize<LauncherSettings>(File.ReadAllText(file)) ?? new();
++            settings.Installations ??= [];
++            settings.Installations.RemoveAll(i => !Releases.Valid(i.Release) || string.IsNullOrWhiteSpace(i.Directory));
++            return settings;
++        }
++        catch (JsonException)
++        {
++            File.Copy(file, file + ".invalid-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss"), true);
++            return new();
++        }
++    }
++    public void Save(LauncherSettings settings)
++    {
++        Directory.CreateDirectory(DirectoryPath);
++        var file = Path.Combine(DirectoryPath, "settings.json");
++        var temporary = file + ".tmp";
++        File.WriteAllText(temporary, JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true }));
++        File.Move(temporary, file, true);
++    }
++}
+diff --git a/launcher/Emilyfn.Core/NativeWindows.cs b/launcher/Emilyfn.Core/NativeWindows.cs
+new file mode 100644
+index 0000000..f83e31e
+--- /dev/null
++++ b/launcher/Emilyfn.Core/NativeWindows.cs
+@@ -0,0 +1,130 @@
++using System.ComponentModel;
++using System.Diagnostics;
++using System.Runtime.InteropServices;
++using System.Text;
++
++namespace Emilyfn.Core;
++
++public static class NativeWindows
++{
++    public static Process StartSuspendedCompanion(string executable)
++    {
++        PeImage.RequireX64(executable, false);
++        var startup = new StartupInfo { cb = Marshal.SizeOf<StartupInfo>() };
++        if (!CreateProcessW(executable, new StringBuilder('"' + executable + '"'), IntPtr.Zero, IntPtr.Zero, false,
++            0x00000004 | 0x08000000, IntPtr.Zero, Path.GetDirectoryName(executable), ref startup, out var information))
++            throw Error("Could not create a launcher companion");
++        try { return Process.GetProcessById(information.dwProcessId); }
++        finally { CloseHandle(information.hThread); CloseHandle(information.hProcess); }
++    }
++
++    public static void Inject(Process process, string dll, CancellationToken cancellation, int timeoutMilliseconds = 20000)
++    {
++        if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess) throw new PlatformNotSupportedException("Emilyfn requires Windows x64.");
++        dll = Path.GetFullPath(dll);
++        PeImage.RequireX64(dll, true);
++        if (process.HasExited) throw new InvalidOperationException("The game exited before its module could load.");
++        var handle = OpenProcess(0x043a, false, process.Id);
++        if (handle == IntPtr.Zero) throw Error("Cannot open the game process");
++        IntPtr remoteMemory = IntPtr.Zero, thread = IntPtr.Zero;
++        var completed = false;
++        try
++        {
++            var localLoadLibrary = GetProcAddress(GetModuleHandleW("kernel32.dll"), "LoadLibraryW");
++            if (localLoadLibrary == IntPtr.Zero || !GetModuleHandleExW(0x6, localLoadLibrary, out var localOwner)) throw Error("Cannot locate the Windows module loader");
++            var ownerPath = new StringBuilder(1024);
++            if (GetModuleFileNameW(localOwner, ownerPath, ownerPath.Capacity) == 0) throw Error("Cannot identify the Windows module loader");
++            var ownerName = Path.GetFileName(ownerPath.ToString());
++            var clock = Stopwatch.StartNew();
++            ProcessModule? remoteOwner = null;
++            while (clock.ElapsedMilliseconds < timeoutMilliseconds)
++            {
++                cancellation.ThrowIfCancellationRequested();
++                process.Refresh();
++                if (process.HasExited) throw new InvalidOperationException("The game exited while loading Windows modules.");
++                try { remoteOwner = process.Modules.Cast<ProcessModule>().FirstOrDefault(m => string.Equals(m.ModuleName, ownerName, StringComparison.OrdinalIgnoreCase)); }
++                catch (Win32Exception) { }
++                if (remoteOwner is not null) break;
++                Thread.Sleep(50);
++            }
++            if (remoteOwner is null) throw new TimeoutException("The game's Windows module loader did not become available.");
++            // Resolve the function relative to its actual owning DLL, including forwarded exports.
++            var offset = localLoadLibrary.ToInt64() - localOwner.ToInt64();
++            if (offset < 0 || offset >= remoteOwner.ModuleMemorySize) throw new InvalidOperationException("Unexpected Windows loader address.");
++            var remoteLoader = new IntPtr(remoteOwner.BaseAddress.ToInt64() + offset);
++            var bytes = Encoding.Unicode.GetBytes(dll + '\0');
++            remoteMemory = VirtualAllocEx(handle, IntPtr.Zero, (nuint)bytes.Length, 0x3000, 0x04);
++            if (remoteMemory == IntPtr.Zero) throw Error("Cannot allocate the module path");
++            if (!WriteProcessMemory(handle, remoteMemory, bytes, (nuint)bytes.Length, out var written) || written != (nuint)bytes.Length) throw Error("Cannot write the module path");
++            thread = CreateRemoteThread(handle, IntPtr.Zero, 0, remoteLoader, remoteMemory, 0, out _);
++            if (thread == IntPtr.Zero) throw Error("Cannot start the game's module loader");
++            while (clock.ElapsedMilliseconds < timeoutMilliseconds)
++            {
++                cancellation.ThrowIfCancellationRequested();
++                var status = WaitForSingleObject(thread, 50);
++                if (status == 0) { completed = true; break; }
++                if (status != 258) throw Error("The module loader wait failed");
++            }
++            if (!completed) throw new TimeoutException("The game's module loader timed out. Close this instance before retrying.");
++            process.Refresh();
++            if (process.HasExited) throw new InvalidOperationException("The game exited while loading its module.");
++            // Thread exit codes are 32-bit; confirm the full module path instead of truncating HMODULE.
++            var found = process.Modules.Cast<ProcessModule>().Any(m => string.Equals(Path.GetFullPath(m.FileName), dll, StringComparison.OrdinalIgnoreCase));
++            if (!found) throw new InvalidOperationException($"Windows could not load {Path.GetFileName(dll)}. Check that the full package was extracted.");
++        }
++        finally
++        {
++            if (thread != IntPtr.Zero) CloseHandle(thread);
++            // Do not free a path still in use by a loader thread on cancellation/timeout.
++            if (completed && remoteMemory != IntPtr.Zero) VirtualFreeEx(handle, remoteMemory, 0, 0x8000);
++            CloseHandle(handle);
++        }
++    }
++
++    public static bool OwnsUdpPort(int pid, int port)
++    {
++        var size = 0;
++        var result = GetExtendedUdpTable(IntPtr.Zero, ref size, true, 2, 1, 0);
++        if (result != 0 && result != 122) throw new Win32Exception((int)result);
++        if (size < 4 || size > 16 * 1024 * 1024) return false;
++        var buffer = Marshal.AllocHGlobal(size);
++        try
++        {
++            result = GetExtendedUdpTable(buffer, ref size, true, 2, 1, 0);
++            if (result != 0) return false;
++            var count = Marshal.ReadInt32(buffer);
++            if (count < 0 || 4L + count * 12L > size) return false;
++            for (var index = 0; index < count; index++)
++            {
++                var row = IntPtr.Add(buffer, 4 + index * 12);
++                var networkPort = (ushort)Marshal.ReadInt32(row, 4);
++                var localPort = (ushort)((networkPort >> 8) | (networkPort << 8));
++                if (localPort == port && Marshal.ReadInt32(row, 8) == pid) return true;
++            }
++            return false;
++        }
++        finally { Marshal.FreeHGlobal(buffer); }
++    }
++
++    private static Win32Exception Error(string message) => new(Marshal.GetLastWin32Error(), message);
++    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] private struct StartupInfo
++    {
++        public int cb; public string? reserved, desktop, title;
++        public int x, y, xSize, ySize, xCountChars, yCountChars, fillAttribute, flags;
++        public short showWindow, reserved2; public IntPtr reservedPointer, stdInput, stdOutput, stdError;
++    }
++    [StructLayout(LayoutKind.Sequential)] private struct ProcessInformation { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
++    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool CreateProcessW(string application, StringBuilder command, IntPtr processAttributes, IntPtr threadAttributes, bool inherit, uint flags, IntPtr environment, string? directory, ref StartupInfo startup, out ProcessInformation information);
++    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
++    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr VirtualAllocEx(IntPtr process, IntPtr address, nuint size, uint allocation, uint protection);
++    [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool VirtualFreeEx(IntPtr process, IntPtr address, nuint size, uint type);
++    [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool WriteProcessMemory(IntPtr process, IntPtr address, byte[] buffer, nuint size, out nuint written);
++    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr CreateRemoteThread(IntPtr process, IntPtr attributes, nuint stackSize, IntPtr start, IntPtr argument, uint flags, out uint id);
++    [DllImport("kernel32.dll", SetLastError = true)] private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
++    [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool CloseHandle(IntPtr handle);
++    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandleW(string name);
++    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true)] private static extern IntPtr GetProcAddress(IntPtr module, string name);
++    [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetModuleHandleExW(uint flags, IntPtr address, out IntPtr module);
++    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern uint GetModuleFileNameW(IntPtr module, StringBuilder path, int size);
++    [DllImport("iphlpapi.dll", SetLastError = true)] private static extern uint GetExtendedUdpTable(IntPtr table, ref int size, bool order, uint family, uint tableClass, uint reserved);
++}
+diff --git a/launcher/LICENSE b/launcher/LICENSE
+new file mode 100644
+index 0000000..f288702
+--- /dev/null
++++ b/launcher/LICENSE
+@@ -0,0 +1,674 @@
++                    GNU GENERAL PUBLIC LICENSE
++                       Version 3, 29 June 2007
++
++ Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
++ Everyone is permitted to copy and distribute verbatim copies
++ of this license document, but changing it is not allowed.
++
++                            Preamble
++
++  The GNU General Public License is a free, copyleft license for
++software and other kinds of works.
++
++  The licenses for most software and other practical works are designed
++to take away your freedom to share and change the works.  By contrast,
++the GNU General Public License is intended to guarantee your freedom to
++share and change all versions of a program--to make sure it remains free
++software for all its users.  We, the Free Software Foundation, use the
++GNU General Public License for most of our software; it applies also to
++any other work released this way by its authors.  You can apply it to
++your programs, too.
++
++  When we speak of free software, we are referring to freedom, not
++price.  Our General Public Licenses are designed to make sure that you
++have the freedom to distribute copies of free software (and charge for
++them if you wish), that you receive source code or can get it if you
++want it, that you can change the software or use pieces of it in new
++free programs, and that you know you can do these things.
++
++  To protect your rights, we need to prevent others from denying you
++these rights or asking you to surrender the rights.  Therefore, you have
++certain responsibilities if you distribute copies of the software, or if
++you modify it: responsibilities to respect the freedom of others.
++
++  For example, if you distribute copies of such a program, whether
++gratis or for a fee, you must pass on to the recipients the same
++freedoms that you received.  You must make sure that they, too, receive
++or can get the source code.  And you must show them these terms so they
++know their rights.
++
++  Developers that use the GNU GPL protect your rights with two steps:
++(1) assert copyright on the software, and (2) offer you this License
++giving you legal permission to copy, distribute and/or modify it.
++
++  For the developers' and authors' protection, the GPL clearly explains
++that there is no warranty for this free software.  For both users' and
++authors' sake, the GPL requires that modified versions be marked as
++changed, so that their problems will not be attributed erroneously to
++authors of previous versions.
++
++  Some devices are designed to deny users access to install or run
++modified versions of the software inside them, although the manufacturer
++can do so.  This is fundamentally incompatible with the aim of
++protecting users' freedom to change the software.  The systematic
++pattern of such abuse occurs in the area of products for individuals to
++use, which is precisely where it is most unacceptable.  Therefore, we
++have designed this version of the GPL to prohibit the practice for those
++products.  If such problems arise substantially in other domains, we
++stand ready to extend this provision to those domains in future versions
++of the GPL, as needed to protect the freedom of users.
++
++  Finally, every program is threatened constantly by software patents.
++States should not allow patents to restrict development and use of
++software on general-purpose computers, but in those that do, we wish to
++avoid the special danger that patents applied to a free program could
++make it effectively proprietary.  To prevent this, the GPL assures that
++patents cannot be used to render the program non-free.
++
++  The precise terms and conditions for copying, distribution and
++modification follow.
++
++                       TERMS AND CONDITIONS
++
++  0. Definitions.
++
++  "This License" refers to version 3 of the GNU General Public License.
++
++  "Copyright" also means copyright-like laws that apply to other kinds of
++works, such as semiconductor masks.
++
++  "The Program" refers to any copyrightable work licensed under this
++License.  Each licensee is addressed as "you".  "Licensees" and
++"recipients" may be individuals or organizations.
++
++  To "modify" a work means to copy from or adapt all or part of the work
++in a fashion requiring copyright permission, other than the making of an
++exact copy.  The resulting work is called a "modified version" of the
++earlier work or a work "based on" the earlier work.
++
++  A "covered work" means either the unmodified Program or a work based
++on the Program.
++
++  To "propagate" a work means to do anything with it that, without
++permission, would make you directly or secondarily liable for
++infringement under applicable copyright law, except executing it on a
++computer or modifying a private copy.  Propagation includes copying,
++distribution (with or without modification), making available to the
++public, and in some countries other activities as well.
++
++  To "convey" a work means any kind of propagation that enables other
++parties to make or receive copies.  Mere interaction with a user through
++a computer network, with no transfer of a copy, is not conveying.
++
++  An interactive user interface displays "Appropriate Legal Notices"
++to the extent that it includes a convenient and prominently visible
++feature that (1) displays an appropriate copyright notice, and (2)
++tells the user that there is no warranty for the work (except to the
++extent that warranties are provided), that licensees may convey the
++work under this License, and how to view a copy of this License.  If
++the interface presents a list of user commands or options, such as a
++menu, a prominent item in the list meets this criterion.
++
++  1. Source Code.
++
++  The "source code" for a work means the preferred form of the work
++for making modifications to it.  "Object code" means any non-source
++form of a work.
++
++  A "Standard Interface" means an interface that either is an official
++standard defined by a recognized standards body, or, in the case of
++interfaces specified for a particular programming language, one that
++is widely used among developers working in that language.
++
++  The "System Libraries" of an executable work include anything, other
++than the work as a whole, that (a) is included in the normal form of
++packaging a Major Component, but which is not part of that Major
++Component, and (b) serves only to enable use of the work with that
++Major Component, or to implement a Standard Interface for which an
++implementation is available to the public in source code form.  A
++"Major Component", in this context, means a major essential component
++(kernel, window system, and so on) of the specific operating system
++(if any) on which the executable work runs, or a compiler used to
++produce the work, or an object code interpreter used to run it.
++
++  The "Corresponding Source" for a work in object code form means all
++the source code needed to generate, install, and (for an executable
++work) run the object code and to modify the work, including scripts to
++control those activities.  However, it does not include the work's
++System Libraries, or general-purpose tools or generally available free
++programs which are used unmodified in performing those activities but
++which are not part of the work.  For example, Corresponding Source
++includes interface definition files associated with source files for
++the work, and the source code for shared libraries and dynamically
++linked subprograms that the work is specifically designed to require,
++such as by intimate data communication or control flow between those
++subprograms and other parts of the work.
++
++  The Corresponding Source need not include anything that users
++can regenerate automatically from other parts of the Corresponding
++Source.
++
++  The Corresponding Source for a work in source code form is that
++same work.
++
++  2. Basic Permissions.
++
++  All rights granted under this License are granted for the term of
++copyright on the Program, and are irrevocable provided the stated
++conditions are met.  This License explicitly affirms your unlimited
++permission to run the unmodified Program.  The output from running a
++covered work is covered by this License only if the output, given its
++content, constitutes a covered work.  This License acknowledges your
++rights of fair use or other equivalent, as provided by copyright law.
++
++  You may make, run and propagate covered works that you do not
++convey, without conditions so long as your license otherwise remains
++in force.  You may convey covered works to others for the sole purpose
++of having them make modifications exclusively for you, or provide you
++with facilities for running those works, provided that you comply with
++the terms of this License in conveying all material for which you do
++not control copyright.  Those thus making or running the covered works
++for you must do so exclusively on your behalf, under your direction
++and control, on terms that prohibit them from making any copies of
++your copyrighted material outside their relationship with you.
++
++  Conveying under any other circumstances is permitted solely under
++the conditions stated below.  Sublicensing is not allowed; section 10
++makes it unnecessary.
++
++  3. Protecting Users' Legal Rights From Anti-Circumvention Law.
++
++  No covered work shall be deemed part of an effective technological
++measure under any applicable law fulfilling obligations under article
++11 of the WIPO copyright treaty adopted on 20 December 1996, or
++similar laws prohibiting or restricting circumvention of such
++measures.
++
++  When you convey a covered work, you waive any legal power to forbid
++circumvention of technological measures to the extent such circumvention
++is effected by exercising rights under this License with respect to
++the covered work, and you disclaim any intention to limit operation or
++modification of the work as a means of enforcing, against the work's
++users, your or third parties' legal rights to forbid circumvention of
++technological measures.
++
++  4. Conveying Verbatim Copies.
++
++  You may convey verbatim copies of the Program's source code as you
++receive it, in any medium, provided that you conspicuously and
++appropriately publish on each copy an appropriate copyright notice;
++keep intact all notices stating that this License and any
++non-permissive terms added in accord with section 7 apply to the code;
++keep intact all notices of the absence of any warranty; and give all
++recipients a copy of this License along with the Program.
++
++  You may charge any price or no price for each copy that you convey,
++and you may offer support or warranty protection for a fee.
++
++  5. Conveying Modified Source Versions.
++
++  You may convey a work based on the Program, or the modifications to
++produce it from the Program, in the form of source code under the
++terms of section 4, provided that you also meet all of these conditions:
++
++    a) The work must carry prominent notices stating that you modified
++    it, and giving a relevant date.
++
++    b) The work must carry prominent notices stating that it is
++    released under this License and any conditions added under section
++    7.  This requirement modifies the requirement in section 4 to
++    "keep intact all notices".
++
++    c) You must license the entire work, as a whole, under this
++    License to anyone who comes into possession of a copy.  This
++    License will therefore apply, along with any applicable section 7
++    additional terms, to the whole of the work, and all its parts,
++    regardless of how they are packaged.  This License gives no
++    permission to license the work in any other way, but it does not
++    invalidate such permission if you have separately received it.
++
++    d) If the work has interactive user interfaces, each must display
++    Appropriate Legal Notices; however, if the Program has interactive
++    interfaces that do not display Appropriate Legal Notices, your
++    work need not make them do so.
++
++  A compilation of a covered work with other separate and independent
++works, which are not by their nature extensions of the covered work,
++and which are not combined with it such as to form a larger program,
++in or on a volume of a storage or distribution medium, is called an
++"aggregate" if the compilation and its resulting copyright are not
++used to limit the access or legal rights of the compilation's users
++beyond what the individual works permit.  Inclusion of a covered work
++in an aggregate does not cause this License to apply to the other
++parts of the aggregate.
++
++  6. Conveying Non-Source Forms.
++
++  You may convey a covered work in object code form under the terms
++of sections 4 and 5, provided that you also convey the
++machine-readable Corresponding Source under the terms of this License,
++in one of these ways:
++
++    a) Convey the object code in, or embodied in, a physical product
++    (including a physical distribution medium), accompanied by the
++    Corresponding Source fixed on a durable physical medium
++    customarily used for software interchange.
++
++    b) Convey the object code in, or embodied in, a physical product
++    (including a physical distribution medium), accompanied by a
++    written offer, valid for at least three years and valid for as
++    long as you offer spare parts or customer support for that product
++    model, to give anyone who possesses the object code either (1) a
++    copy of the Corresponding Source for all the software in the
++    product that is covered by this License, on a durable physical
++    medium customarily used for software interchange, for a price no
++    more than your reasonable cost of physically performing this
++    conveying of source, or (2) access to copy the
++    Corresponding Source from a network server at no charge.
++
++    c) Convey individual copies of the object code with a copy of the
++    written offer to provide the Corresponding Source.  This
++    alternative is allowed only occasionally and noncommercially, and
++    only if you received the object code with such an offer, in accord
++    with subsection 6b.
++
++    d) Convey the object code by offering access from a designated
++    place (gratis or for a charge), and offer equivalent access to the
++    Corresponding Source in the same way through the same place at no
++    further charge.  You need not require recipients to copy the
++    Corresponding Source along with the object code.  If the place to
++    copy the object code is a network server, the Corresponding Source
++    may be on a different server (operated by you or a third party)
++    that supports equivalent copying facilities, provided you maintain
++    clear directions next to the object code saying where to find the
++    Corresponding Source.  Regardless of what server hosts the
++    Corresponding Source, you remain obligated to ensure that it is
++    available for as long as needed to satisfy these requirements.
++
++    e) Convey the object code using peer-to-peer transmission, provided
++    you inform other peers where the object code and Corresponding
++    Source of the work are being offered to the general public at no
++    charge under subsection 6d.
++
++  A separable portion of the object code, whose source code is excluded
++from the Corresponding Source as a System Library, need not be
++included in conveying the object code work.
++
++  A "User Product" is either (1) a "consumer product", which means any
++tangible personal property which is normally used for personal, family,
++or household purposes, or (2) anything designed or sold for incorporation
++into a dwelling.  In determining whether a product is a consumer product,
++doubtful cases shall be resolved in favor of coverage.  For a particular
++product received by a particular user, "normally used" refers to a
++typical or common use of that class of product, regardless of the status
++of the particular user or of the way in which the particular user
++actually uses, or expects or is expected to use, the product.  A product
++is a consumer product regardless of whether the product has substantial
++commercial, industrial or non-consumer uses, unless such uses represent
++the only significant mode of use of the product.
++
++  "Installation Information" for a User Product means any methods,
++procedures, authorization keys, or other information required to install
++and execute modified versions of a covered work in that User Product from
++a modified version of its Corresponding Source.  The information must
++suffice to ensure that the continued functioning of the modified object
++code is in no case prevented or interfered with solely because
++modification has been made.
++
++  If you convey an object code work under this section in, or with, or
++specifically for use in, a User Product, and the conveying occurs as
++part of a transaction in which the right of possession and use of the
++User Product is transferred to the recipient in perpetuity or for a
++fixed term (regardless of how the transaction is characterized), the
++Corresponding Source conveyed under this section must be accompanied
++by the Installation Information.  But this requirement does not apply
++if neither you nor any third party retains the ability to install
++modified object code on the User Product (for example, the work has
++been installed in ROM).
++
++  The requirement to provide Installation Information does not include a
++requirement to continue to provide support service, warranty, or updates
++for a work that has been modified or installed by the recipient, or for
++the User Product in which it has been modified or installed.  Access to a
++network may be denied when the modification itself materially and
++adversely affects the operation of the network or violates the rules and
++protocols for communication across the network.
++
++  Corresponding Source conveyed, and Installation Information provided,
++in accord with this section must be in a format that is publicly
++documented (and with an implementation available to the public in
++source code form), and must require no special password or key for
++unpacking, reading or copying.
++
++  7. Additional Terms.
++
++  "Additional permissions" are terms that supplement the terms of this
++License by making exceptions from one or more of its conditions.
++Additional permissions that are applicable to the entire Program shall
++be treated as though they were included in this License, to the extent
++that they are valid under applicable law.  If additional permissions
++apply only to part of the Program, that part may be used separately
++under those permissions, but the entire Program remains governed by
++this License without regard to the additional permissions.
++
++  When you convey a copy of a covered work, you may at your option
++remove any additional permissions from that copy, or from any part of
++it.  (Additional permissions may be written to require their own
++removal in certain cases when you modify the work.)  You may place
++additional permissions on material, added by you to a covered work,
++for which you have or can give appropriate copyright permission.
++
++  Notwithstanding any other provision of this License, for material you
++add to a covered work, you may (if authorized by the copyright holders of
++that material) supplement the terms of this License with terms:
++
++    a) Disclaiming warranty or limiting liability differently from the
++    terms of sections 15 and 16 of this License; or
++
++    b) Requiring preservation of specified reasonable legal notices or
++    author attributions in that material or in the Appropriate Legal
++    Notices displayed by works containing it; or
++
++    c) Prohibiting misrepresentation of the origin of that material, or
++    requiring that modified versions of such material be marked in
++    reasonable ways as different from the original version; or
++
++    d) Limiting the use for publicity purposes of names of licensors or
++    authors of the material; or
++
++    e) Declining to grant rights under trademark law for use of some
++    trade names, trademarks, or service marks; or
++
++    f) Requiring indemnification of licensors and authors of that
++    material by anyone who conveys the material (or modified versions of
++    it) with contractual assumptions of liability to the recipient, for
++    any liability that these contractual assumptions directly impose on
++    those licensors and authors.
++
++  All other non-permissive additional terms are considered "further
++restrictions" within the meaning of section 10.  If the Program as you
++received it, or any part of it, contains a notice stating that it is
++governed by this License along with a term that is a further
++restriction, you may remove that term.  If a license document contains
++a further restriction but permits relicensing or conveying under this
++License, you may add to a covered work material governed by the terms
++of that license document, provided that the further restriction does
++not survive such relicensing or conveying.
++
++  If you add terms to a covered work in accord with this section, you
++must place, in the relevant source files, a statement of the
++additional terms that apply to those files, or a notice indicating
++where to find the applicable terms.
++
++  Additional terms, permissive or non-permissive, may be stated in the
++form of a separately written license, or stated as exceptions;
++the above requirements apply either way.
++
++  8. Termination.
++
++  You may not propagate or modify a covered work except as expressly
++provided under this License.  Any attempt otherwise to propagate or
++modify it is void, and will automatically terminate your rights under
++this License (including any patent licenses granted under the third
++paragraph of section 11).
++
++  However, if you cease all violation of this License, then your
++license from a particular copyright holder is reinstated (a)
++provisionally, unless and until the copyright holder explicitly and
++finally terminates your license, and (b) permanently, if the copyright
++holder fails to notify you of the violation by some reasonable means
++prior to 60 days after the cessation.
++
++  Moreover, your license from a particular copyright holder is
++reinstated permanently if the copyright holder notifies you of the
++violation by some reasonable means, this is the first time you have
++received notice of violation of this License (for any work) from that
++copyright holder, and you cure the violation prior to 30 days after
++your receipt of the notice.
++
++  Termination of your rights under this section does not terminate the
++licenses of parties who have received copies or rights from you under
++this License.  If your rights have been terminated and not permanently
++reinstated, you do not qualify to receive new licenses for the same
++material under section 10.
++
++  9. Acceptance Not Required for Having Copies.
++
++  You are not required to accept this License in order to receive or
++run a copy of the Program.  Ancillary propagation of a covered work
++occurring solely as a consequence of using peer-to-peer transmission
++to receive a copy likewise does not require acceptance.  However,
++nothing other than this License grants you permission to propagate or
++modify any covered work.  These actions infringe copyright if you do
++not accept this License.  Therefore, by modifying or propagating a
++covered work, you indicate your acceptance of this License to do so.
++
++  10. Automatic Licensing of Downstream Recipients.
++
++  Each time you convey a covered work, the recipient automatically
++receives a license from the original licensors, to run, modify and
++propagate that work, subject to this License.  You are not responsible
++for enforcing compliance by third parties with this License.
++
++  An "entity transaction" is a transaction transferring control of an
++organization, or substantially all assets of one, or subdividing an
++organization, or merging organizations.  If propagation of a covered
++work results from an entity transaction, each party to that
++transaction who receives a copy of the work also receives whatever
++licenses to the work the party's predecessor in interest had or could
++give under the previous paragraph, plus a right to possession of the
++Corresponding Source of the work from the predecessor in interest, if
++the predecessor has it or can get it with reasonable efforts.
++
++  You may not impose any further restrictions on the exercise of the
++rights granted or affirmed under this License.  For example, you may
++not impose a license fee, royalty, or other charge for exercise of
++rights granted under this License, and you may not initiate litigation
++(including a cross-claim or counterclaim in a lawsuit) alleging that
++any patent claim is infringed by making, using, selling, offering for
++sale, or importing the Program or any portion of it.
++
++  11. Patents.
++
++  A "contributor" is a copyright holder who authorizes use under this
++License of the Program or a work on which the Program is based.  The
++work thus licensed is called the contributor's "contributor version".
++
++  A contributor's "essential patent claims" are all patent claims
++owned or controlled by the contributor, whether already acquired or
++hereafter acquired, that would be infringed by some manner, permitted
++by this License, of making, using, or selling its contributor version,
++but do not include claims that would be infringed only as a
++consequence of further modification of the contributor version.  For
++purposes of this definition, "control" includes the right to grant
++patent sublicenses in a manner consistent with the requirements of
++this License.
++
++  Each contributor grants you a non-exclusive, worldwide, royalty-free
++patent license under the contributor's essential patent claims, to
++make, use, sell, offer for sale, import and otherwise run, modify and
++propagate the contents of its contributor version.
++
++  In the following three paragraphs, a "patent license" is any express
++agreement or commitment, however denominated, not to enforce a patent
++(such as an express permission to practice a patent or covenant not to
++sue for patent infringement).  To "grant" such a patent license to a
++party means to make such an agreement or commitment not to enforce a
++patent against the party.
++
++  If you convey a covered work, knowingly relying on a patent license,
++and the Corresponding Source of the work is not available for anyone
++to copy, free of charge and under the terms of this License, through a
++publicly available network server or other readily accessible means,
++then you must either (1) cause the Corresponding Source to be so
++available, or (2) arrange to deprive yourself of the benefit of the
++patent license for this particular work, or (3) arrange, in a manner
++consistent with the requirements of this License, to extend the patent
++license to downstream recipients.  "Knowingly relying" means you have
++actual knowledge that, but for the patent license, your conveying the
++covered work in a country, or your recipient's use of the covered work
++in a country, would infringe one or more identifiable patents in that
++country that you have reason to believe are valid.
++
++  If, pursuant to or in connection with a single transaction or
++arrangement, you convey, or propagate by procuring conveyance of, a
++covered work, and grant a patent license to some of the parties
++receiving the covered work authorizing them to use, propagate, modify
++or convey a specific copy of the covered work, then the patent license
++you grant is automatically extended to all recipients of the covered
++work and works based on it.
++
++  A patent license is "discriminatory" if it does not include within
++the scope of its coverage, prohibits the exercise of, or is
++conditioned on the non-exercise of one or more of the rights that are
++specifically granted under this License.  You may not convey a covered
++work if you are a party to an arrangement with a third party that is
++in the business of distributing software, under which you make payment
++to the third party based on the extent of your activity of conveying
++the work, and under which the third party grants, to any of the
++parties who would receive the covered work from you, a discriminatory
++patent license (a) in connection with copies of the covered work
++conveyed by you (or copies made from those copies), or (b) primarily
++for and in connection with specific products or compilations that
++contain the covered work, unless you entered into that arrangement,
++or that patent license was granted, prior to 28 March 2007.
++
++  Nothing in this License shall be construed as excluding or limiting
++any implied license or other defenses to infringement that may
++otherwise be available to you under applicable patent law.
++
++  12. No Surrender of Others' Freedom.
++
++  If conditions are imposed on you (whether by court order, agreement or
++otherwise) that contradict the conditions of this License, they do not
++excuse you from the conditions of this License.  If you cannot convey a
++covered work so as to satisfy simultaneously your obligations under this
++License and any other pertinent obligations, then as a consequence you may
++not convey it at all.  For example, if you agree to terms that obligate you
++to collect a royalty for further conveying from those to whom you convey
++the Program, the only way you could satisfy both those terms and this
++License would be to refrain entirely from conveying the Program.
++
++  13. Use with the GNU Affero General Public License.
++
++  Notwithstanding any other provision of this License, you have
++permission to link or combine any covered work with a work licensed
++under version 3 of the GNU Affero General Public License into a single
++combined work, and to convey the resulting work.  The terms of this
++License will continue to apply to the part which is the covered work,
++but the special requirements of the GNU Affero General Public License,
++section 13, concerning interaction through a network will apply to the
++combination as such.
++
++  14. Revised Versions of this License.
++
++  The Free Software Foundation may publish revised and/or new versions of
++the GNU General Public License from time to time.  Such new versions will
++be similar in spirit to the present version, but may differ in detail to
++address new problems or concerns.
++
++  Each version is given a distinguishing version number.  If the
++Program specifies that a certain numbered version of the GNU General
++Public License "or any later version" applies to it, you have the
++option of following the terms and conditions either of that numbered
++version or of any later version published by the Free Software
++Foundation.  If the Program does not specify a version number of the
++GNU General Public License, you may choose any version ever published
++by the Free Software Foundation.
++
++  If the Program specifies that a proxy can decide which future
++versions of the GNU General Public License can be used, that proxy's
++public statement of acceptance of a version permanently authorizes you
++to choose that version for the Program.
++
++  Later license versions may give you additional or different
++permissions.  However, no additional obligations are imposed on any
++author or copyright holder as a result of your choosing to follow a
++later version.
++
++  15. Disclaimer of Warranty.
++
++  THERE IS NO WARRANTY FOR THE PROGRAM, TO THE EXTENT PERMITTED BY
++APPLICABLE LAW.  EXCEPT WHEN OTHERWISE STATED IN WRITING THE COPYRIGHT
++HOLDERS AND/OR OTHER PARTIES PROVIDE THE PROGRAM "AS IS" WITHOUT WARRANTY
++OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING, BUT NOT LIMITED TO,
++THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++PURPOSE.  THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM
++IS WITH YOU.  SHOULD THE PROGRAM PROVE DEFECTIVE, YOU ASSUME THE COST OF
++ALL NECESSARY SERVICING, REPAIR OR CORRECTION.
++
++  16. Limitation of Liability.
++
++  IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED TO IN WRITING
++WILL ANY COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MODIFIES AND/OR CONVEYS
++THE PROGRAM AS PERMITTED ABOVE, BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY
++GENERAL, SPECIAL, INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE
++USE OR INABILITY TO USE THE PROGRAM (INCLUDING BUT NOT LIMITED TO LOSS OF
++DATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD
++PARTIES OR A FAILURE OF THE PROGRAM TO OPERATE WITH ANY OTHER PROGRAMS),
++EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF
++SUCH DAMAGES.
++
++  17. Interpretation of Sections 15 and 16.
++
++  If the disclaimer of warranty and limitation of liability provided
++above cannot be given local legal effect according to their terms,
++reviewing courts shall apply local law that most closely approximates
++an absolute waiver of all civil liability in connection with the
++Program, unless a warranty or assumption of liability accompanies a
++copy of the Program in return for a fee.
++
++                     END OF TERMS AND CONDITIONS
++
++            How to Apply These Terms to Your New Programs
++
++  If you develop a new program, and you want it to be of the greatest
++possible use to the public, the best way to achieve this is to make it
++free software which everyone can redistribute and change under these terms.
++
++  To do so, attach the following notices to the program.  It is safest
++to attach them to the start of each source file to most effectively
++state the exclusion of warranty; and each file should have at least
++the "copyright" line and a pointer to where the full notice is found.
++
++    <one line to give the program's name and a brief idea of what it does.>
++    Copyright (C) <year>  <name of author>
++
++    This program is free software: you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation, either version 3 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program.  If not, see <https://www.gnu.org/licenses/>.
++
++Also add information on how to contact you by electronic and paper mail.
++
++  If the program does terminal interaction, make it output a short
++notice like this when it starts in an interactive mode:
++
++    <program>  Copyright (C) <year>  <name of author>
++    This program comes with ABSOLUTELY NO WARRANTY; for details type `show w'.
++    This is free software, and you are welcome to redistribute it
++    under certain conditions; type `show c' for details.
++
++The hypothetical commands `show w' and `show c' should show the appropriate
++parts of the General Public License.  Of course, your program's commands
++might be different; for a GUI interface, you would use an "about box".
++
++  You should also get your employer (if you work as a programmer) or school,
++if any, to sign a "copyright disclaimer" for the program, if necessary.
++For more information on this, and how to apply and follow the GNU GPL, see
++<https://www.gnu.org/licenses/>.
++
++  The GNU General Public License does not permit incorporating your program
++into proprietary programs.  If your program is a subroutine library, you
++may consider it more useful to permit linking proprietary applications with
++the library.  If this is what you want to do, use the GNU Lesser General
++Public License instead of this License.  But first, please read
++<https://www.gnu.org/licenses/why-not-lgpl.html>.
+diff --git a/launcher/PROVENANCE.md b/launcher/PROVENANCE.md
+new file mode 100644
+index 0000000..81342a9
+--- /dev/null
++++ b/launcher/PROVENANCE.md
+@@ -0,0 +1,33 @@
++# Emilyfn 0.1.0 provenance
++
++Emilyfn's C#/WPF interface, process manager, diagnostics and synthetic tests are new source in this directory. License: GPL-3.0, included in `LICENSE`.
++
++The local launch protocol and static compatibility arguments were adapted from Reboot Launcher at:
++
++- https://github.com/Auties00/Reboot-Launcher/tree/c6f82298b167ef2076bb59dc621f13dc5bd8d390
++- `common/lib/src/game/game_metadata.dart` and game constants at that revision; GPL-3.0.
++
++The `-fltoken` and `-caldera` entries in `compatibility-args.json` are exact public literals from `game_metadata.dart` at that pinned commit (lines 221–222), verified through GitHub before publication. They were not read from the user's accounts, machine, environment, or login session. The public Caldera payload records a generation date of 2021-12-05. Their argument-string SHA-256 values are `0bf0d8e7c07fcbca6a5ce666fccb70c216207d31750c80fdacc3e8e70057e85d` and `a9bf563cee35441cfba6be72f6c05c0bae038deef08951a0d23ad208e2b1fee8` respectively. Runtime local-profile names/passwords are generated separately and diagnostic exports redact these argument fields.
++
++Bundled components:
++
++| Component | Fixed source/build |
++| --- | --- |
++| Seasons 19–30 Auth, Client and Server DLLs | https://github.com/EmilyUwU666/reboot-2711/actions/runs/34847063986 — workflow commit `4aab950a0d518b0b13e5c545f49a0568d27341f8` |
++| Corresponding DLL/authentication source | `Reboot-S19-S30-Candidate1-Source`, artifact `10348805925` from that run |
++| Local backend and Windows Node runtime | https://github.com/EmilyUwU666/reboot-2711/actions/runs/34817850310 — workflow commit `dc15344b6d9c0b0c9e8e0f946931a04227550813` |
++| Backend upstream | https://github.com/Lawin0129/LawinServer/tree/7f0f26d7a772c6122c42b1783fd75f497e86d3a9 |
++| Node runtime | Official Windows x64 Node 24.21.0, with original license and build provenance in `resources/backend` |
++| Desktop runtime | Microsoft .NET 10 Windows Desktop, self-contained publish; exact patch recorded in package build metadata |
++
++Required component SHA-256 values are enforced by `build.ps1`:
++
++```
++032ea3458f0a84fceeb158d20d03e7b97511e05004fd0087051421c43d9bced1  Reboot-S19-S30-Server.dll
++246b36a8a49fa7681ae039d8bf9424edd63b82194f9a90e42ecd005a1d0c1dfa  Reboot-S19-S30-Client.dll
++878c3d6141e2ca9bf0b140f02f38d59393dbf15b6b954ab387c31387eac70ce3  Reboot-S19-S30-Auth.dll
++```
++
++The interface artwork is original vector geometry embedded in XAML. The icon is generated by `build-icon.ps1`. No Fortnite artwork or game assets are bundled.
++
++Upstream notices and licenses remain with the bundled components. The .NET notices are available at https://github.com/dotnet/runtime/blob/main/THIRD-PARTY-NOTICES.TXT and https://github.com/dotnet/wpf/blob/main/THIRD-PARTY-NOTICES.txt .
+diff --git a/launcher/README.md b/launcher/README.md
+new file mode 100644
+index 0000000..c6c0a44
+--- /dev/null
++++ b/launcher/README.md
+@@ -0,0 +1,57 @@
++# Emilyfn
++
++A portable Windows x64 launcher made for Emily's local Fortnite setup.
++
++## Start playing
++
++1. Download **Emilyfn-Windows-x64** from the successful Emilyfn build's Artifacts section.
++2. Extract the **whole ZIP** into a folder, such as `C:\Games\Emilyfn`. Keep `Emilyfn.exe`, `compatibility-args.json`, and `resources` together.
++3. Open `Emilyfn.exe`.
++4. Open **Library → Browse** and select the Fortnite folder containing `FortniteGame` and `Engine`.
++5. Check the release number (for example, `27.11`) and select **Add to library**.
++6. Go to **Play** and select **Play Fortnite**. With the default settings, Emilyfn starts the backend and host before opening the client.
++7. When the client reaches the lobby, ready up. **Copy join command** also provides `open 127.0.0.1:7777` for the in-game console.
++
++The backend, Node runtime, .NET runtime, authentication DLL, server DLL and client DLL are included. There is no separate DLL picker or runtime installation. Fortnite game files are not included.
++
++## Controls
++
++- **Start host** starts just the host and backend. The default host runs without rendering a window.
++- **Stop client**, **Stop host**, and **Stop all** control instances Emilyfn started. An existing external backend and unrelated programs are left running.
++- **Settings** saves your local display name and automatic/headless host preferences.
++- **Logs → Export diagnostic ZIP** collects launcher, game, backend and DLL startup diagnostics, with common credential fields redacted.
++- Closing Emilyfn stops its game instances and its own backend. Keep it open while playing.
++
++Build selection is saved, and the host and client must use the same selected installation and release. Emilyfn reads `Fortnite+Release-27.11` separately from an engine version such as `5.4.0`.
++
++## If a session fails
++
++Read the last stage in **Logs** and export a diagnostic ZIP. Authentication, login, module initialization and host listening have time limits. A process that exits is reported with its exit code.
++
++The backend uses loopback ports 3551, 80 and 8080. The host uses UDP 7777. If a port is occupied by an incompatible program, Emilyfn reports the problem; it does not stop that program or change Windows services.
++
++**Listening** means the launched host owns UDP port 7777. **Client active** means login and client SDK initialization completed. These states do not prove that a match loaded successfully. A client stuck at Connecting can still require a server/DLL fix.
++
++## Compatibility
++
++This release bundles the existing **experimental Seasons 19–30 candidate 1** components. The launcher accepts installed releases from 19.xx through 30.xx; this does not certify every patch for complete gameplay. The earlier 27.11 host crash/client Connecting issue has not been confirmed resolved by a live Fortnite test.
++
++This is a local private-session launcher. It does not join Epic's live matchmaking, download Fortnite, or ask for a real Epic password. Use the game files you already have. Windows x64 is required.
++
++## Data
++
++Settings and logs: `%LOCALAPPDATA%\Emilyfn`.
++
++The bundled backend is copied into `%LOCALAPPDATA%\Emilyfn\backend-candidate1` on first use, and that copy is reused so local backend data is retained. The package's original resources remain unchanged.
++
++## Build from source
++
++Use Windows x64, the .NET 10 SDK, PowerShell, and the full source artifact. To rebuild the launcher with components from an extracted portable package:
++
++```powershell
++.\launcher\build.ps1 -DllDirectory C:\Games\Emilyfn\resources\dlls -BackendDirectory C:\Games\Emilyfn\resources\backend -OutputDirectory .\Emilyfn-build
++```
++
++The script generates the icon and publishes a self-contained WPF executable. The workflow also builds small native test fixtures with the Visual C++ x64 toolchain and runs `Emilyfn.Tests`. Those fixtures test launcher mechanics; they contain no Fortnite code and are not included in the portable package.
++
++`PROVENANCE.md` identifies component source and build runs. `BUILD-INFO.txt` in the portable package records the actual compiler/runtime and artifact hashes. The source artifact includes the launcher source and the corresponding existing component source archive. See `LICENSE` and component licenses for redistribution terms.
+diff --git a/launcher/build.ps1 b/launcher/build.ps1
+new file mode 100644
+index 0000000..0655e97
+--- /dev/null
++++ b/launcher/build.ps1
+@@ -0,0 +1,46 @@
++param(
++    [Parameter(Mandatory=$true)][string]$DllDirectory,
++    [Parameter(Mandatory=$true)][string]$BackendDirectory,
++    [string]$OutputDirectory = "$PSScriptRoot/../Emilyfn-dist"
++)
++$ErrorActionPreference = 'Stop'
++$dllRoot = (Resolve-Path $DllDirectory).Path
++$backendRoot = (Resolve-Path $BackendDirectory).Path
++$out = [System.IO.Path]::GetFullPath($OutputDirectory)
++if (Test-Path $out) { throw 'Use a new output directory so existing files cannot enter the package.' }
++$expected = @{
++    'Reboot-S19-S30-Server.dll' = '032ea3458f0a84fceeb158d20d03e7b97511e05004fd0087051421c43d9bced1'
++    'Reboot-S19-S30-Client.dll' = '246b36a8a49fa7681ae039d8bf9424edd63b82194f9a90e42ecd005a1d0c1dfa'
++    'Reboot-S19-S30-Auth.dll' = '878c3d6141e2ca9bf0b140f02f38d59393dbf15b6b954ab387c31387eac70ce3'
++}
++foreach ($name in $expected.Keys) {
++    if ((Get-FileHash (Join-Path $dllRoot $name) -Algorithm SHA256).Hash -ne $expected[$name]) { throw "Unexpected DLL: $name" }
++}
++$backendInfo = Get-Content (Join-Path $backendRoot 'BUILD-INFO.txt') -Raw
++$nodeMatch = [regex]::Match($backendInfo, 'Node runtime SHA256: ([a-fA-F0-9]{64})')
++if (!$nodeMatch.Success) { throw 'The backend runtime provenance is missing.' }
++if ((Get-FileHash (Join-Path $backendRoot 'runtime/node.exe') -Algorithm SHA256).Hash -ne $nodeMatch.Groups[1].Value) { throw 'The backend Node runtime hash differs.' }
++& "$PSScriptRoot/build-icon.ps1"
++dotnet publish "$PSScriptRoot/Emilyfn.App/Emilyfn.App.csproj" -c Release -r win-x64 --self-contained true -o $out
++if ($LASTEXITCODE -ne 0) { throw 'Emilyfn publish failed.' }
++$null = New-Item -ItemType Directory -Path "$out/resources"
++Copy-Item $dllRoot "$out/resources/dlls" -Recurse
++Copy-Item $backendRoot "$out/resources/backend" -Recurse
++foreach ($name in @('compatibility-args.json', 'README.md', 'PROVENANCE.md', 'LICENSE')) { Copy-Item "$PSScriptRoot/$name" $out }
++$sdk = dotnet --version
++$runtime = (Get-Content "$PSScriptRoot/Emilyfn.App/obj/project.assets.json" -Raw | ConvertFrom-Json).libraries.PSObject.Properties.Name | Where-Object { $_ -match 'Microsoft\.(NETCore|WindowsDesktop)\.App\.Runtime\.win-x64/' }
++@"
++Emilyfn 0.1.0 - Windows x64
++SDK: $sdk
++Published runtimes: $($runtime -join ', ')
++Workflow commit: $env:GITHUB_SHA
++Workflow run: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID
++Components: Seasons 19-30 candidate 1 DLLs and portable backend candidate 1.
++Runtime limits: experimental game support; complete Fortnite matches not verified.
++"@ | Set-Content "$out/BUILD-INFO.txt" -Encoding utf8
++$hashes = Get-ChildItem $out -Recurse -File | Sort-Object FullName | ForEach-Object {
++    $relative = [System.IO.Path]::GetRelativePath($out, $_.FullName).Replace('\', '/')
++    "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $relative"
++}
++$hashes | Set-Content "$out/SHA256SUMS.txt" -Encoding utf8
++Write-Host "Emilyfn portable package created at $out"
+diff --git a/launcher/compatibility-args.json b/launcher/compatibility-args.json
+new file mode 100644
+index 0000000..162be3b
+--- /dev/null
++++ b/launcher/compatibility-args.json
+@@ -0,0 +1,11 @@
++[
++  "-epicapp=Fortnite",
++  "-epicenv=Prod",
++  "-epiclocale=en-us",
++  "-epicportal",
++  "-skippatchcheck",
++  "-nobe",
++  "-fromfl=eac",
++  "-fltoken=3db3ba5dcbd2e16703f3978d",
++  "-caldera=eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2NvdW50X2lkIjoiYmU5ZGE1YzJmYmVhNDQwN2IyZjQwZWJhYWQ4NTlhZDQiLCJnZW5lcmF0ZWQiOjE2Mzg3MTcyNzgsImNhbGRlcmFHdWlkIjoiMzgxMGI4NjMtMmE2NS00NDU3LTliNTgtNGRhYjNiNDgyYTg2IiwiYWNQcm92aWRlciI6IkVhc3lBbnRpQ2hlYXQiLCJub3RlcyI6IiIsImZhbGxiYWNrIjpmYWxzZX0.VAWQB67RTxhiWOxx7DBjnzDnXyyEnX7OljJm-j2d88G_WgwQ9wrE6lwMEHZHjBd1ISJdUO1UVUqkfLdU5nofBQ"
++]
