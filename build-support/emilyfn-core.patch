@@ -138,7 +138,7 @@ index 0000000..9a6c00c
 +</Project>
 diff --git a/launcher/Emilyfn.Core/LaunchProtocol.cs b/launcher/Emilyfn.Core/LaunchProtocol.cs
 new file mode 100644
-index 0000000..6891e1e
+index 0000000..2c14539
 --- /dev/null
 +++ b/launcher/Emilyfn.Core/LaunchProtocol.cs
 @@ -0,0 +1,48 @@
@@ -152,7 +152,7 @@ index 0000000..6891e1e
 +    [GeneratedRegex(@"(?i)(-?AUTH_(?:LOGIN|PASSWORD)|(?:access|refresh|id)_token|authorization|password|caldera|fltoken)([""']?\s*[=:]\s*)(""[^""]*""|[^\s,;]+)")] private static partial Regex SecretsRegex();
 +    [GeneratedRegex(@"(?i)bearer\s+[^\s"",;]+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")]
 +    private static partial Regex TokensRegex();
-+    public static string Redact(string line) => TokensRegex().Replace(SecretsRegex().Replace(line, "$1$2[redacted]"), "[redacted]");
++    public static string Redact(string line) => SecretsRegex().Replace(TokensRegex().Replace(line, "[redacted]"), "$1$2[redacted]");
 +    public static bool LoginCompleted(string line) => line.Contains("[UOnlineAccountCommon::ContinueLoggingIn]", StringComparison.Ordinal) && line.Contains("(Completed)", StringComparison.Ordinal);
 +    public static bool Fatal(string line) => line.Contains("Fatal error!", StringComparison.OrdinalIgnoreCase) || line.Contains("Unhandled Exception:", StringComparison.OrdinalIgnoreCase);
 +    public static string ValidateName(string name) => NameRegex().IsMatch(name) ? name : throw new ArgumentException("Use 1-24 letters, numbers, underscores or hyphens for your local name.");
@@ -1394,7 +1394,7 @@ index 0000000..f288702
 +<https://www.gnu.org/licenses/why-not-lgpl.html>.
 diff --git a/launcher/PROVENANCE.md b/launcher/PROVENANCE.md
 new file mode 100644
-index 0000000..81342a9
+index 0000000..6355917
 --- /dev/null
 +++ b/launcher/PROVENANCE.md
 @@ -0,0 +1,33 @@
@@ -1405,7 +1405,7 @@ index 0000000..81342a9
 +The local launch protocol and static compatibility arguments were adapted from Reboot Launcher at:
 +
 +- https://github.com/Auties00/Reboot-Launcher/tree/c6f82298b167ef2076bb59dc621f13dc5bd8d390
-+- `common/lib/src/game/game_metadata.dart` and game constants at that revision; GPL-3.0.
++- `common/lib/src/game/game_metadata.dart` and game constants at that revision. Upstream copyright remains with the original authors.
 +
 +The `-fltoken` and `-caldera` entries in `compatibility-args.json` are exact public literals from `game_metadata.dart` at that pinned commit (lines 221–222), verified through GitHub before publication. They were not read from the user's accounts, machine, environment, or login session. The public Caldera payload records a generation date of 2021-12-05. Their argument-string SHA-256 values are `0bf0d8e7c07fcbca6a5ce666fccb70c216207d31750c80fdacc3e8e70057e85d` and `a9bf563cee35441cfba6be72f6c05c0bae038deef08951a0d23ad208e2b1fee8` respectively. Runtime local-profile names/passwords are generated separately and diagnostic exports redact these argument fields.
 +
@@ -1496,10 +1496,10 @@ index 0000000..c6c0a44
 +`PROVENANCE.md` identifies component source and build runs. `BUILD-INFO.txt` in the portable package records the actual compiler/runtime and artifact hashes. The source artifact includes the launcher source and the corresponding existing component source archive. See `LICENSE` and component licenses for redistribution terms.
 diff --git a/launcher/build.ps1 b/launcher/build.ps1
 new file mode 100644
-index 0000000..0655e97
+index 0000000..39576d5
 --- /dev/null
 +++ b/launcher/build.ps1
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,56 @@
 +param(
 +    [Parameter(Mandatory=$true)][string]$DllDirectory,
 +    [Parameter(Mandatory=$true)][string]$BackendDirectory,
@@ -1530,7 +1530,17 @@ index 0000000..0655e97
 +Copy-Item $backendRoot "$out/resources/backend" -Recurse
 +foreach ($name in @('compatibility-args.json', 'README.md', 'PROVENANCE.md', 'LICENSE')) { Copy-Item "$PSScriptRoot/$name" $out }
 +$sdk = dotnet --version
-+$runtime = (Get-Content "$PSScriptRoot/Emilyfn.App/obj/project.assets.json" -Raw | ConvertFrom-Json).libraries.PSObject.Properties.Name | Where-Object { $_ -match 'Microsoft\.(NETCore|WindowsDesktop)\.App\.Runtime\.win-x64/' }
++$assets = Get-Content "$PSScriptRoot/Emilyfn.App/obj/project.assets.json" -Raw | ConvertFrom-Json
++$runtime = $assets.libraries.PSObject.Properties.Name | Where-Object { $_ -match 'Microsoft\.(NETCore|WindowsDesktop)\.App\.Runtime\.win-x64/' }
++$packageCache = $assets.packageFolders.PSObject.Properties.Name | Select-Object -First 1
++$null = New-Item -ItemType Directory -Path "$out/licenses"
++foreach ($id in $runtime) {
++    $package = Join-Path $packageCache $id.ToLowerInvariant()
++    Get-ChildItem $package -Recurse -File | Where-Object { $_.Name -match '^(LICENSE|THIRD.PARTY.NOTICES)(\.txt)?$' } | ForEach-Object {
++        $name = $id.Replace('/', '-') + '-' + $_.Name
++        Copy-Item $_.FullName (Join-Path "$out/licenses" $name)
++    }
++}
 +@"
 +Emilyfn 0.1.0 - Windows x64
 +SDK: $sdk
