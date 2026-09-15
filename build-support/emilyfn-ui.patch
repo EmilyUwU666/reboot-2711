@@ -215,7 +215,7 @@ index 0000000..24aa163
 +</Window>
 diff --git a/launcher/Emilyfn.App/MainWindow.xaml.cs b/launcher/Emilyfn.App/MainWindow.xaml.cs
 new file mode 100644
-index 0000000..011f345
+index 0000000..378ef68
 --- /dev/null
 +++ b/launcher/Emilyfn.App/MainWindow.xaml.cs
 @@ -0,0 +1,194 @@
@@ -402,7 +402,7 @@ index 0000000..011f345
 +    }
 +    public void RenderPreview(string file)
 +    {
-+        System.Windows.Interop.RenderOptions.ProcessRenderMode = System.Windows.Interop.RenderMode.SoftwareOnly;
++        System.Windows.Media.RenderOptions.ProcessRenderMode = System.Windows.Interop.RenderMode.SoftwareOnly;
 +        Show();
 +        Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
 +        UpdateLayout();
