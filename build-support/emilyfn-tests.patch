@@ -1,0 +1,283 @@
+diff --git a/launcher/Emilyfn.Tests/Emilyfn.Tests.csproj b/launcher/Emilyfn.Tests/Emilyfn.Tests.csproj
+new file mode 100644
+index 0000000..3881743
+--- /dev/null
++++ b/launcher/Emilyfn.Tests/Emilyfn.Tests.csproj
+@@ -0,0 +1,9 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup>
++    <OutputType>Exe</OutputType>
++    <TargetFramework>net10.0</TargetFramework>
++    <ImplicitUsings>enable</ImplicitUsings>
++    <Nullable>enable</Nullable>
++  </PropertyGroup>
++  <ItemGroup><ProjectReference Include="../Emilyfn.Core/Emilyfn.Core.csproj" /></ItemGroup>
++</Project>
+diff --git a/launcher/Emilyfn.Tests/Program.cs b/launcher/Emilyfn.Tests/Program.cs
+new file mode 100644
+index 0000000..bd5978f
+--- /dev/null
++++ b/launcher/Emilyfn.Tests/Program.cs
+@@ -0,0 +1,150 @@
++using Emilyfn.Core;
++using System.Collections.Concurrent;
++using System.Diagnostics;
++using System.Net;
++using System.Net.Sockets;
++using System.Text;
++using System.Text.Json;
++
++var checks = 0;
++void Check(bool condition, string message) { if (!condition) throw new Exception(message); checks++; }
++void Throws(Action action, string message) { try { action(); } catch { checks++; return; } throw new Exception(message); }
++async Task Until(Func<bool> condition, string description)
++{
++    var clock = Stopwatch.StartNew();
++    while (!condition() && clock.Elapsed < TimeSpan.FromSeconds(15)) await Task.Delay(50);
++    Check(condition(), description);
++}
++var root = Path.Combine(Path.GetTempPath(), "Emilyfn tests " + Guid.NewGuid().ToString("N"));
++Directory.CreateDirectory(root);
++LauncherEngine? engine = null;
++Process? unrelated = null;
++Process? suspended = null;
++using var backendCancellation = new CancellationTokenSource();
++TcpListener? listener = null;
++BackendManager? bundled = null;
++try
++{
++    for (var season = 19; season <= 30; season++)
++    {
++        Check(Releases.Valid($"{season}.00") && Releases.Valid($"{season}.40"), $"Season {season} range");
++        Check(Releases.FromMetadata($"5.4.0-123+++Fortnite+Release-{season}.11") == $"{season}.11", "engine/game separation");
++    }
++    foreach (var release in new[] { "18.40", "31.00", "5.4.0", "27.110", "27.011", "027.11", "27.1", "27.11 -foo" }) Check(!Releases.Valid(release), "invalid release rejected");
++    Check(Releases.FromMetadata("5.4.0", "5.4") is null, "engine metadata is not a Fortnite release");
++    Check(Releases.FromMetadata("5.5.0-1+++Fortnite+Release-31.00") == "31.00", "out-of-range metadata remains visible for rejection");
++    Check(Releases.Island("19.40") == "Artemis" && Releases.Island("24.40") == "Asteria" && Releases.Island("27.11") == "Athena" && Releases.Island("30.40") == "Helios", "island mapping");
++    Throws(() => LaunchProtocol.ValidateName("a\" -flag"), "argument name validation");
++    var clientArgs = LaunchProtocol.Arguments("Emily", GameRole.Client, true, @"C:\path with spaces\client.log", ["-epicapp=Fortnite"]);
++    var hostArgs = LaunchProtocol.Arguments("Emily", GameRole.Host, true, @"C:\path with spaces\host.log", ["-epicapp=Fortnite"]);
++    Check(!clientArgs.Contains("-nullrhi") && hostArgs.Contains("-nullrhi"), "headless applies only to host");
++    Check(clientArgs.Single(a => a.StartsWith("-AUTH_LOGIN")) != hostArgs.Single(a => a.StartsWith("-AUTH_LOGIN")), "host and player use distinct local profiles");
++    Check(clientArgs.Contains(@"-abslog=C:\path with spaces\client.log"), "argument boundaries retain spaces");
++    foreach (var line in new[] { "-AUTH_PASSWORD=secret", "Authorization: Bearer secret", "{\"access_token\":\"secret\"}", "refresh_token=secret", "-caldera=secret" })
++        Check(!LaunchProtocol.Redact(line).Contains("secret"), "credential redaction: " + line.Split('=')[0]);
++    var signals = new LogSignals();
++    signals.Observe("[UOnlineAccountCommon::ContinueLoggingIn] Started");
++    Check(!signals.Login.Task.IsCompleted, "partial login is not ready");
++    signals.Observe("[UOnlineAccountCommon::ContinueLoggingIn] (Completed)");
++    Check(signals.Login.Task.IsCompletedSuccessfully, "completed login detected");
++    signals.Observe("LogWindows: Fatal error!");
++    Check(signals.FatalError.Task.IsCompleted, "game fatal is detected");
++    var store = new SettingsStore(Path.Combine(root, "settings"));
++    var setting = new LauncherSettings { DisplayName = "Emily", Installations = [new("a", @"D:\Games\27.11", "27.11")], SelectedId = "a" };
++    store.Save(setting);
++    Check(store.Load().SelectedId == "a" && store.Load().Installations[0].Directory == @"D:\Games\27.11", "atomic settings round trip");
++    File.WriteAllText(Path.Combine(store.DirectoryPath, "settings.json"), "{broken");
++    Check(store.Load().Installations.Count == 0 && Directory.GetFiles(store.DirectoryPath, "*.invalid-*").Length == 1, "corrupt settings retained for recovery");
++    Throws(() => LaunchProtocol.RequireMatching(new("a", root, "19.00"), new("b", root, "27.11")), "mixed release blocked");
++    var broken = Path.Combine(root, "broken.dll"); File.WriteAllBytes(broken, [0x4d, 0x5a]);
++    Throws(() => PeImage.RequireX64(broken, true), "truncated PE rejected");
++    var fixtureRoot = Path.GetFullPath(args[0]);
++    var package = Path.Combine(root, "package");
++    Directory.CreateDirectory(Path.Combine(package, "resources", "dlls"));
++    File.WriteAllText(Path.Combine(package, "compatibility-args.json"), JsonSerializer.Serialize(new[] { "-epicapp=Fortnite" }));
++    foreach (var name in new[] { "Auth", "Client", "Server" }) File.Copy(Path.Combine(fixtureRoot, $"Reboot-S19-S30-{name}.dll"), Path.Combine(package, "resources", "dlls", $"Reboot-S19-S30-{name}.dll"));
++    var game = Path.Combine(root, "game folder");
++    var binary = Path.Combine(game, "FortniteGame", "Binaries", "Win64"); Directory.CreateDirectory(binary);
++    var executable = Path.Combine(binary, "FortniteClient-Win64-Shipping.exe");
++    File.Copy(Path.Combine(fixtureRoot, "test-child.exe"), executable);
++    Directory.CreateDirectory(Path.Combine(game, "FortniteGame", "Content", "Paks"));
++    File.WriteAllText(Path.Combine(game, "FortniteGame", "Content", "Paks", "synthetic.pak"), "This is a test marker, not game data.");
++    Check(Releases.Inspect(game).Release == "27.11", "version resource and installation inspection");
++    suspended = NativeWindows.StartSuspendedCompanion(executable);
++    await Task.Delay(150);
++    Check(!suspended.HasExited && !File.Exists(executable + ".started-" + suspended.Id), "companion stays suspended without running its entry point");
++    suspended.Kill(true); await suspended.WaitForExitAsync(); suspended.Dispose(); suspended = null;
++    listener = new TcpListener(IPAddress.Loopback, 3551); listener.Start();
++    var backendTask = Task.Run(async () =>
++    {
++        while (!backendCancellation.IsCancellationRequested)
++        {
++            using var connection = await listener.AcceptTcpClientAsync(backendCancellation.Token);
++            using var stream = connection.GetStream();
++            var buffer = new byte[4096]; await stream.ReadAsync(buffer, backendCancellation.Token);
++            var json = "{\"appId\":\"Fortnite\",\"token\":\"synthetic\"}";
++            var response = Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {json.Length}\r\nConnection: close\r\n\r\n{json}");
++            await stream.WriteAsync(response, backendCancellation.Token);
++        }
++    });
++    engine = new LauncherEngine(package, Path.Combine(root, "data"));
++    var states = new ConcurrentQueue<SessionStatus>(); engine.StatusChanged += states.Enqueue;
++    var install = new GameInstall("fixture", game, "27.11");
++    await engine.StartAsync(GameRole.Host, install, setting).WaitAsync(TimeSpan.FromSeconds(25));
++    var host = states.Last(s => s.Role == GameRole.Host);
++    Check(host.Stage == LaunchStage.Listening && host.Pid is int && NativeWindows.OwnsUdpPort(host.Pid.Value, 7777), "host readiness belongs to the launched PID");
++    Check(!NativeWindows.OwnsUdpPort(Environment.ProcessId, 7777), "another process cannot satisfy host readiness");
++    await engine.StartAsync(GameRole.Client, install, setting).WaitAsync(TimeSpan.FromSeconds(25));
++    var client = states.Last(s => s.Role == GameRole.Client);
++    Check(client.Stage == LaunchStage.Active && client.Pid != host.Pid, "staged authentication/login/client module succeeds");
++    var clientStages = states.Where(s => s.Role == GameRole.Client).Select(s => s.Stage).ToList();
++    Check(clientStages.IndexOf(LaunchStage.Authentication) < clientStages.IndexOf(LaunchStage.Login) && clientStages.IndexOf(LaunchStage.Login) < clientStages.IndexOf(LaunchStage.LoadingModule), "module order is preserved");
++    using (var crashed = Process.GetProcessById(client.Pid!.Value)) crashed.Kill(true);
++    await Until(() => states.Any(s => s.Role == GameRole.Client && s.Stage == LaunchStage.Failed && s.Detail.Contains("0x")), "unexpected exit retains exit code");
++    await Until(() => !engine.HasSession(GameRole.Client), "crashed client releases its session");
++    Environment.SetEnvironmentVariable("EMILYFN_TEST_FAIL_AUTH", "1");
++    try
++    {
++        var failed = false;
++        try { await engine.StartAsync(GameRole.Client, install, setting).WaitAsync(TimeSpan.FromSeconds(20)); }
++        catch (InvalidOperationException) { failed = true; }
++        Check(failed, "auth failure stops startup instead of waiting forever");
++    }
++    finally { Environment.SetEnvironmentVariable("EMILYFN_TEST_FAIL_AUTH", null); }
++    await Until(() => !engine.HasSession(GameRole.Client), "failed startup cleans up its process");
++    unrelated = Process.Start(new ProcessStartInfo(executable) { UseShellExecute = false });
++    await engine.StopAllAsync();
++    Check(!engine.HasSession(GameRole.Host) && !engine.HasSession(GameRole.Client), "Stop all clears owned sessions");
++    Check(unrelated is { HasExited: false }, "Stop all leaves unrelated processes running");
++    Check(await engine.Backend.HealthyAsync(CancellationToken.None), "Stop all leaves an existing external backend running");
++    await engine.ExportLogsAsync(Path.Combine(root, "diagnostics.zip"));
++    Check(new FileInfo(Path.Combine(root, "diagnostics.zip")).Length > 0, "diagnostic ZIP is produced");
++    backendCancellation.Cancel(); listener.Stop();
++    try { await backendTask; } catch (OperationCanceledException) { } catch (SocketException) { } catch (ObjectDisposedException) { }
++    if (args.Length > 1)
++    {
++        var backendData = Path.Combine(root, "bundled backend data");
++        Directory.CreateDirectory(backendData);
++        bundled = new BackendManager(Path.GetFullPath(args[1]), backendData, Console.WriteLine);
++        await bundled.EnsureAsync(CancellationToken.None);
++        Check(bundled.Status == "Running · bundled" && await bundled.HealthyAsync(CancellationToken.None), "bundled backend starts from a copied runtime");
++        var marker = Path.Combine(backendData, "backend-candidate1", "Emilyfn-profile-preservation-test.txt");
++        File.WriteAllText(marker, "Keep existing local data");
++        await bundled.EnsureAsync(CancellationToken.None);
++        Check(File.Exists(marker), "reusing the running backend preserves data");
++        await bundled.StopOwnedAsync();
++        Check(!await bundled.HealthyAsync(CancellationToken.None), "owned backend stops with the launcher");
++        await bundled.EnsureAsync(CancellationToken.None);
++        Check(File.Exists(marker) && await bundled.HealthyAsync(CancellationToken.None), "restarting uses the existing backend data");
++        await bundled.StopOwnedAsync();
++    }
++    Console.WriteLine($"{checks} Emilyfn checks passed, including native x64 DLL loading, staged launch, UDP ownership, crash reporting, process cleanup and backend lifecycle. Synthetic game fixtures only; Fortnite gameplay is not covered.");
++}
++finally
++{
++    if (engine is not null) await engine.StopAllAsync();
++    if (bundled is not null) await bundled.StopOwnedAsync();
++    foreach (var process in new[] { unrelated, suspended }) if (process is not null) { try { if (!process.HasExited) { process.Kill(true); await process.WaitForExitAsync(); } } catch { } process.Dispose(); }
++    backendCancellation.Cancel(); listener?.Stop();
++    try { Directory.Delete(root, true); } catch { }
++}
+diff --git a/launcher/Emilyfn.Tests/native/child.cpp b/launcher/Emilyfn.Tests/native/child.cpp
+new file mode 100644
+index 0000000..a53c48b
+--- /dev/null
++++ b/launcher/Emilyfn.Tests/native/child.cpp
+@@ -0,0 +1,28 @@
++#include <windows.h>
++#include <cstdio>
++#include <string>
++
++int wmain(int argc, wchar_t** argv)
++{
++    wchar_t module[MAX_PATH]{};
++    GetModuleFileNameW(nullptr, module, MAX_PATH);
++    std::wstring receipt = std::wstring(module) + L".started-" + std::to_wstring(GetCurrentProcessId());
++    auto file = CreateFileW(receipt.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, 0, nullptr);
++    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
++    std::wstring log;
++    for (int i = 1; i < argc; i++)
++        if (std::wstring(argv[i]).rfind(L"-abslog=", 0) == 0) log = argv[i] + 8;
++    for (int i = 0; i < 1200; i++)
++    {
++        if (!log.empty() && GetModuleHandleW(L"Reboot-S19-S30-Auth.dll"))
++        {
++            FILE* out = nullptr;
++            _wfopen_s(&out, log.c_str(), L"ab");
++            if (out) { fputs("[UOnlineAccountCommon::ContinueLoggingIn] (Completed)\n", out); fclose(out); }
++            puts("[UOnlineAccountCommon::ContinueLoggingIn] (Completed)"); fflush(stdout);
++            log.clear();
++        }
++        Sleep(50);
++    }
++    return 0;
++}
+diff --git a/launcher/Emilyfn.Tests/native/module.cpp b/launcher/Emilyfn.Tests/native/module.cpp
+new file mode 100644
+index 0000000..4b2e8c1
+--- /dev/null
++++ b/launcher/Emilyfn.Tests/native/module.cpp
+@@ -0,0 +1,43 @@
++#include <winsock2.h>
++#include <windows.h>
++#include <cstdio>
++#include <string>
++#pragma comment(lib,"Ws2_32.lib")
++#ifndef MODULE_ROLE
++#define MODULE_ROLE 0
++#endif
++
++static DWORD WINAPI Work(void*)
++{
++    wchar_t temporary[MAX_PATH]{};
++    GetTempPathW(MAX_PATH, temporary);
++    const wchar_t* role = MODULE_ROLE == 0 ? L"Auth" : MODULE_ROLE == 1 ? L"Server" : L"Client";
++    const auto path = std::wstring(temporary) + L"Reboot-S19-S30-" + role + L"-startup.log";
++    FILE* file = nullptr;
++    _wfopen_s(&file, path.c_str(), MODULE_ROLE == 0 ? L"wb" : L"ab");
++    if (file)
++    {
++        if (MODULE_ROLE == 0)
++        {
++            fprintf(file, "Synthetic auth fixture; PID=%lu\n", GetCurrentProcessId());
++            if (GetEnvironmentVariableW(L"EMILYFN_TEST_FAIL_AUTH", nullptr, 0)) fputs("ERROR: intentional authentication fixture failure\n", file);
++            else fputs("READY: game and EOS authentication hooks installed\n", file);
++        }
++        else fprintf(file, "[PID %lu] S19-S30 candidate 1 SDK initialized; synthetic fixture\n", GetCurrentProcessId());
++        fclose(file);
++    }
++    if (MODULE_ROLE == 1)
++    {
++        WSADATA data{}; WSAStartup(MAKEWORD(2,2), &data);
++        auto socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
++        sockaddr_in address{}; address.sin_family = AF_INET; address.sin_addr.s_addr = htonl(INADDR_LOOPBACK); address.sin_port = htons(7777);
++        if (bind(socket, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0) Sleep(60000);
++        closesocket(socket); WSACleanup();
++    }
++    return 0;
++}
++BOOL WINAPI DllMain(HMODULE, DWORD reason, LPVOID)
++{
++    if (reason == DLL_PROCESS_ATTACH) { auto thread = CreateThread(nullptr, 0, Work, nullptr, 0, nullptr); if (thread) CloseHandle(thread); }
++    return TRUE;
++}
+diff --git a/launcher/Emilyfn.Tests/native/version.rc b/launcher/Emilyfn.Tests/native/version.rc
+new file mode 100644
+index 0000000..9b49122
+--- /dev/null
++++ b/launcher/Emilyfn.Tests/native/version.rc
+@@ -0,0 +1,23 @@
++#include <windows.h>
++1 VERSIONINFO
++FILEVERSION 27,11,0,0
++PRODUCTVERSION 27,11,0,0
++FILEFLAGSMASK 0x3fL
++FILEFLAGS 0
++FILEOS VOS_NT_WINDOWS32
++FILETYPE VFT_APP
++BEGIN
++ BLOCK "StringFileInfo"
++ BEGIN
++  BLOCK "040904b0"
++  BEGIN
++   VALUE "FileDescription", "Emilyfn synthetic launcher test process\0"
++   VALUE "FileVersion", "5.4.0-1+++Fortnite+Release-27.11\0"
++   VALUE "ProductVersion", "5.4.0-1+++Fortnite+Release-27.11\0"
++  END
++ END
++ BLOCK "VarFileInfo"
++ BEGIN
++  VALUE "Translation", 0x409, 1200
++ END
++END
