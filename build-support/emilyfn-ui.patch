@@ -1,0 +1,460 @@
+diff --git a/launcher/Emilyfn.App/App.xaml b/launcher/Emilyfn.App/App.xaml
+new file mode 100644
+index 0000000..103278d
+--- /dev/null
++++ b/launcher/Emilyfn.App/App.xaml
+@@ -0,0 +1,19 @@
++<Application x:Class="Emilyfn.App.App" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
++  <Application.Resources>
++    <SolidColorBrush x:Key="Panel" Color="#151B2A"/>
++    <SolidColorBrush x:Key="Muted" Color="#919CB7"/>
++    <Style TargetType="TextBlock"><Setter Property="Foreground" Value="#F4F5FB"/><Setter Property="FontFamily" Value="Segoe UI"/></Style>
++    <Style TargetType="Button">
++      <Setter Property="Foreground" Value="#EFF0FF"/><Setter Property="Background" Value="#222A40"/>
++      <Setter Property="BorderBrush" Value="#37405C"/><Setter Property="BorderThickness" Value="1"/>
++      <Setter Property="Padding" Value="18,11"/><Setter Property="FontSize" Value="13"/><Setter Property="FontWeight" Value="SemiBold"/>
++      <Setter Property="Cursor" Value="Hand"/><Setter Property="HorizontalContentAlignment" Value="Center"/>
++      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button"><Border x:Name="Surface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="9" Padding="{TemplateBinding Padding}"><ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"/></Border><ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Surface" Property="BorderBrush" Value="#AA94F8"/></Trigger><Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Surface" Property="BorderBrush" Value="#DCCEFF"/></Trigger><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
++    </Style>
++    <Style x:Key="Accent" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Setter Property="Background"><Setter.Value><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#9F6EFF" Offset="0"/><GradientStop Color="#6E58EA" Offset="1"/></LinearGradientBrush></Setter.Value></Setter><Setter Property="BorderBrush" Value="#B89CFF"/></Style>
++    <Style x:Key="Nav" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/><Setter Property="HorizontalContentAlignment" Value="Left"/><Setter Property="Margin" Value="0,4"/><Setter Property="Padding" Value="16,13"/></Style>
++    <Style TargetType="TextBox"><Setter Property="Background" Value="#0E1422"/><Setter Property="Foreground" Value="#F4F5FB"/><Setter Property="CaretBrush" Value="#BD9FFF"/><Setter Property="BorderBrush" Value="#37405C"/><Setter Property="Padding" Value="12,10"/><Setter Property="FontSize" Value="14"/><Setter Property="VerticalContentAlignment" Value="Center"/></Style>
++    <Style TargetType="CheckBox"><Setter Property="Foreground" Value="#E2E6F4"/><Setter Property="Margin" Value="0,12"/><Setter Property="FontSize" Value="14"/></Style>
++    <Style TargetType="ListBoxItem"><Setter Property="Foreground" Value="#F4F5FB"/><Setter Property="Padding" Value="14"/><Setter Property="Margin" Value="0,0,0,8"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem"><Border x:Name="Item" Background="#171F31" CornerRadius="10" Padding="{TemplateBinding Padding}" BorderThickness="1" BorderBrush="#29334B"><ContentPresenter/></Border><ControlTemplate.Triggers><Trigger Property="IsSelected" Value="True"><Setter TargetName="Item" Property="BorderBrush" Value="#AB8AFF"/><Setter TargetName="Item" Property="Background" Value="#292240"/></Trigger><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Item" Property="BorderBrush" Value="#657499"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter></Style>
++  </Application.Resources>
++</Application>
+diff --git a/launcher/Emilyfn.App/App.xaml.cs b/launcher/Emilyfn.App/App.xaml.cs
+new file mode 100644
+index 0000000..97de4e0
+--- /dev/null
++++ b/launcher/Emilyfn.App/App.xaml.cs
+@@ -0,0 +1,30 @@
++using System.Windows;
++
++namespace Emilyfn.App;
++public partial class App : Application
++{
++    private Mutex? instance;
++    protected override void OnStartup(StartupEventArgs e)
++    {
++        base.OnStartup(e);
++        try
++        {
++            var preview = e.Args.Length == 2 && e.Args[0] == "--render-preview";
++            if (!preview)
++            {
++                instance = new Mutex(true, @"Local\Emilyfn-Launcher", out var first);
++                if (!first) { MessageBox.Show("Emilyfn is already open.", "Emilyfn"); Shutdown(); return; }
++            }
++            var window = new MainWindow(preview);
++            MainWindow = window;
++            if (preview) { window.RenderPreview(System.IO.Path.GetFullPath(e.Args[1])); window.Close(); Shutdown(); }
++            else window.Show();
++        }
++        catch (Exception error)
++        {
++            if (e.Args.Contains("--render-preview")) { System.IO.File.WriteAllText("Emilyfn-preview-error.txt", error.ToString()); Shutdown(1); }
++            else { MessageBox.Show(error.Message, "Emilyfn startup"); Shutdown(1); }
++        }
++    }
++    protected override void OnExit(ExitEventArgs e) { instance?.Dispose(); base.OnExit(e); }
++}
+diff --git a/launcher/Emilyfn.App/Emilyfn.App.csproj b/launcher/Emilyfn.App/Emilyfn.App.csproj
+new file mode 100644
+index 0000000..ab2bace
+--- /dev/null
++++ b/launcher/Emilyfn.App/Emilyfn.App.csproj
+@@ -0,0 +1,26 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup>
++    <OutputType>WinExe</OutputType>
++    <TargetFramework>net10.0-windows</TargetFramework>
++    <UseWPF>true</UseWPF>
++    <ImplicitUsings>enable</ImplicitUsings>
++    <Nullable>enable</Nullable>
++    <AssemblyName>Emilyfn</AssemblyName>
++    <RootNamespace>Emilyfn.App</RootNamespace>
++    <ApplicationIcon>../assets/Emilyfn.ico</ApplicationIcon>
++    <ApplicationManifest>app.manifest</ApplicationManifest>
++    <Version>0.1.0</Version>
++    <Description>Emilyfn private Fortnite launcher</Description>
++    <Authors>Emilyfn</Authors>
++    <PublishSingleFile>true</PublishSingleFile>
++    <SelfContained>true</SelfContained>
++    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
++    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
++    <PublishTrimmed>false</PublishTrimmed>
++    <DebugType>embedded</DebugType>
++  </PropertyGroup>
++  <ItemGroup>
++    <ProjectReference Include="../Emilyfn.Core/Emilyfn.Core.csproj" />
++    <Resource Include="../assets/Emilyfn.ico" Link="Emilyfn.ico" />
++  </ItemGroup>
++</Project>
+diff --git a/launcher/Emilyfn.App/MainWindow.xaml b/launcher/Emilyfn.App/MainWindow.xaml
+new file mode 100644
+index 0000000..24aa163
+--- /dev/null
++++ b/launcher/Emilyfn.App/MainWindow.xaml
+@@ -0,0 +1,116 @@
++<Window x:Class="Emilyfn.App.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
++        Title="Emilyfn" Width="1200" Height="840" MinWidth="1050" MinHeight="740" WindowStartupLocation="CenterScreen" Background="#0D111C" Icon="Emilyfn.ico" Foreground="#F4F5FB" FontFamily="Segoe UI" Closing="Window_Closing">
++  <Grid>
++    <Grid.ColumnDefinitions><ColumnDefinition Width="208"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
++    <Border Background="#101522" BorderBrush="#232B3D" BorderThickness="0,0,1,0">
++      <Grid Margin="20,28,20,22"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
++        <StackPanel>
++          <StackPanel Orientation="Horizontal"><Border Width="38" Height="38" CornerRadius="12" Background="#9769ED"><TextBlock Text="E" FontSize="27" FontWeight="Black" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border><TextBlock Text="Emilyfn" FontSize="25" FontWeight="Bold" Margin="10,0,0,0" VerticalAlignment="Center"/></StackPanel>
++          <TextBlock Text="YOUR PRIVATE PLAYSPACE" Foreground="#707C98" FontSize="9" Margin="2,15,0,28"/>
++        </StackPanel>
++        <StackPanel Grid.Row="1">
++          <Button x:Name="PlayNav" Style="{StaticResource Nav}" Content="▶     Play" Click="PlayNav_Click"/>
++          <Button x:Name="LibraryNav" Style="{StaticResource Nav}" Content="▦     Library" Click="LibraryNav_Click"/>
++          <Button x:Name="SettingsNav" Style="{StaticResource Nav}" Content="⚙     Settings" Click="SettingsNav_Click"/>
++          <Button x:Name="LogsNav" Style="{StaticResource Nav}" Content="≡     Logs" Click="LogsNav_Click"/>
++        </StackPanel>
++        <StackPanel Grid.Row="3">
++          <Border Background="#171E2F" CornerRadius="12" Padding="15"><StackPanel>
++            <TextBlock Text="LOCAL SESSION" FontSize="10" Foreground="#7986A3" Margin="0,0,0,13"/>
++            <TextBlock Text="Backend" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="{Binding BackendStatus}" FontSize="11" Foreground="#7EE8DA" TextWrapping="Wrap" Margin="0,4,0,12"/>
++            <TextBlock Text="Host" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="{Binding HostLabel}" FontSize="11" Foreground="#A899D3" Margin="0,4,0,12"/>
++            <TextBlock Text="Client" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="{Binding ClientLabel}" FontSize="11" Foreground="#A899D3" Margin="0,4,0,0"/>
++          </StackPanel></Border>
++          <TextBlock Text="v0.1.0  ·  Made for Emily" Foreground="#626E89" FontSize="10" Margin="4,17,0,0"/>
++        </StackPanel>
++      </Grid>
++    </Border>
++    <Grid Grid.Column="1" Margin="32,25,32,20">
++      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
++      <Grid Margin="0,0,0,21"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
++        <StackPanel><TextBlock Text="{Binding PageTitle}" FontSize="25" FontWeight="SemiBold"/><TextBlock Text="{Binding PageSubtitle}" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,6,0,0"/></StackPanel>
++        <Button Grid.Column="1" Content="Stop all" Padding="17,9" VerticalAlignment="Center" Click="StopAll_Click"/>
++      </Grid>
++      <Border Grid.Row="1" Background="#30223C" BorderBrush="#654571" BorderThickness="1" CornerRadius="9" Padding="12" Margin="0,0,0,14" Visibility="{Binding BannerVisibility}"><TextBlock Text="{Binding Banner}" TextWrapping="Wrap" Foreground="#EEDCF7" FontSize="12"/></Border>
++      <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
++        <Grid>
++          <StackPanel x:Name="PlayPage">
++            <Border CornerRadius="17" ClipToBounds="True" Height="240" BorderBrush="#554675" BorderThickness="1">
++              <Grid>
++                <Grid.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#302244" Offset="0"/><GradientStop Color="#252644" Offset="0.55"/><GradientStop Color="#143C4C" Offset="1"/></LinearGradientBrush></Grid.Background>
++                <Viewbox HorizontalAlignment="Right" Width="480" Opacity="0.85"><Canvas Width="480" Height="260">
++                  <Ellipse Width="170" Height="170" Canvas.Left="265" Canvas.Top="12" Fill="#30576A"/>
++                  <Ellipse Width="122" Height="122" Canvas.Left="289" Canvas.Top="35" Fill="#6C7F9B" Opacity="0.65"/>
++                  <Path Data="M30,240 L176,63 238,159 300,87 464,242Z" Fill="#474165"/>
++                  <Path Data="M176,63 L195,157 238,159Z" Fill="#86638D"/>
++                  <Path Data="M157,86 L176,63 195,106 178,100 169,110Z" Fill="#D0BACB"/>
++                  <Path Data="M137,243 L300,87 464,242Z" Fill="#2C5D6B"/>
++                  <Path Data="M300,87 L334,171 300,155 276,176 258,135Z" Fill="#89C6C5"/>
++                  <Path Data="M0,246 L78,187 129,209 202,182 270,222 342,186 480,226 480,260 0,260Z" Fill="#12343F"/>
++                  <Path Data="M270,260 L337,207 371,227 345,260Z" Fill="#79DED3" Opacity="0.5"/>
++                  <Path Data="M388,188 L402,146 416,188 410,188 422,207 382,207 393,188Z" Fill="#172D43"/>
++                  <Path Data="M88,205 L101,164 115,205 108,205 121,226 82,226 93,205Z" Fill="#20243C"/>
++                  <Ellipse Width="4" Height="4" Canvas.Left="215" Canvas.Top="39" Fill="#CDB6FF"/><Ellipse Width="3" Height="3" Canvas.Left="425" Canvas.Top="25" Fill="#A9EBE8"/><Ellipse Width="3" Height="3" Canvas.Left="115" Canvas.Top="50" Fill="#D7CDFF"/>
++                </Canvas></Viewbox>
++                <Border Width="540" HorizontalAlignment="Left"><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,0"><GradientStop Color="#F02C233F" Offset="0"/><GradientStop Color="#002C233F" Offset="1"/></LinearGradientBrush></Border.Background></Border>
++                <StackPanel Margin="29,28,0,0" HorizontalAlignment="Left">
++                  <Border Background="#453458" CornerRadius="5" Padding="9,4" HorizontalAlignment="Left"><TextBlock Text="SEASONS 19–30   /   EXPERIMENTAL" FontSize="9" FontWeight="SemiBold" Foreground="#CFB6FC"/></Border>
++                  <TextBlock Text="Your island.&#10;Your rules." FontSize="35" FontWeight="Bold" LineHeight="39" Margin="0,12,0,12"/>
++                  <TextBlock Text="{Binding BuildHeadline}" FontSize="14" FontWeight="SemiBold"/>
++                  <TextBlock Text="{Binding BuildSubline}" FontSize="11" Foreground="#B2ABCB" Margin="0,5,0,0"/>
++                </StackPanel>
++                <Button Content="Change build  →" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,21,20" Background="#C0202B3B" BorderBrush="#63718C" Padding="12,8" FontSize="11" Click="LibraryNav_Click"/>
++              </Grid>
++            </Border>
++            <Grid Margin="0,20,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
++              <Border Background="{StaticResource Panel}" CornerRadius="14" BorderBrush="#2D334B" BorderThickness="1" Padding="23"><StackPanel>
++                <TextBlock Text="PLAYER" Foreground="#B697F4" FontSize="10" FontWeight="Bold"/>
++                <TextBlock Text="Jump back in" FontSize="23" FontWeight="SemiBold" Margin="0,9,0,8"/>
++                <TextBlock Text="{Binding ClientDetail}" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Height="43" FontSize="12"/>
++                <Button Content="▶    Play Fortnite" Style="{StaticResource Accent}" Click="Play_Click" IsEnabled="{Binding CanStartClient}" Margin="0,14,0,10"/>
++                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><Button Content="Copy join command" FontSize="11" Padding="10,7" Click="CopyJoin_Click"/><Button Grid.Column="1" Content="Stop client" FontSize="11" Padding="10,7" Margin="9,0,0,0" Click="StopClient_Click" IsEnabled="{Binding ClientBusy}"/></Grid>
++              </StackPanel></Border>
++              <Border Grid.Column="2" Background="{StaticResource Panel}" CornerRadius="14" BorderBrush="#2D334B" BorderThickness="1" Padding="23"><StackPanel>
++                <TextBlock Text="HOST" Foreground="#72D7D1" FontSize="10" FontWeight="Bold"/>
++                <TextBlock Text="Make it your world" FontSize="23" FontWeight="SemiBold" Margin="0,9,0,8"/>
++                <TextBlock Text="{Binding HostDetail}" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Height="43" FontSize="12"/>
++                <Button Content="Start host" Background="#203C48" BorderBrush="#4C858D" Click="Host_Click" IsEnabled="{Binding CanStartHost}" Margin="0,14,0,10"/>
++                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="LOCAL  ·  127.0.0.1:7777" Foreground="#71829D" FontSize="10" VerticalAlignment="Center"/><Button Grid.Column="1" Content="Stop host" FontSize="11" Padding="10,7" Click="StopHost_Click" IsEnabled="{Binding HostBusy}"/></Grid>
++              </StackPanel></Border>
++            </Grid>
++            <Border Background="#121827" BorderBrush="#252E43" BorderThickness="1" CornerRadius="12" Padding="18" Margin="0,19,0,0"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><TextBlock Text="SESSION ACTIVITY" FontSize="9" Foreground="#7E8BA5" Margin="0,0,0,8"/><TextBlock Text="{Binding LatestActivity}" TextWrapping="Wrap" Foreground="#B6C0D5" FontSize="12"/></StackPanel><Button Grid.Column="1" Content="View logs  →" Margin="18,0,0,0" Padding="12,8" FontSize="11" Click="LogsNav_Click"/></Grid></Border>
++          </StackPanel>
++          <StackPanel x:Name="LibraryPage" Visibility="Collapsed">
++            <Border Background="{StaticResource Panel}" CornerRadius="14" Padding="24"><StackPanel>
++              <TextBlock Text="Add a Fortnite installation" FontSize="23" FontWeight="SemiBold"/>
++              <TextBlock Text="Choose an existing Windows build between 19.xx and 30.xx." Foreground="{StaticResource Muted}" Margin="0,8,0,20"/>
++              <TextBlock Text="Game folder" FontSize="12" Margin="0,0,0,7"/>
++              <DockPanel><Button Content="Browse…" DockPanel.Dock="Right" Click="Browse_Click" Margin="10,0,0,0"/><TextBox Text="{Binding NewGamePath, UpdateSourceTrigger=PropertyChanged}"/></DockPanel>
++              <TextBlock Text="Release number" FontSize="12" Margin="0,17,0,7"/>
++              <TextBox Text="{Binding NewRelease, UpdateSourceTrigger=PropertyChanged}" MaxLength="5" Width="140" HorizontalAlignment="Left"/>
++              <TextBlock Text="Detected automatically when available. Otherwise enter the installed release, such as 27.11." Foreground="{StaticResource Muted}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,18"/>
++              <Button Content="Add to library" Style="{StaticResource Accent}" HorizontalAlignment="Left" Click="AddBuild_Click"/>
++            </StackPanel></Border>
++            <Grid Margin="0,24,0,14"><TextBlock Text="Your builds" FontSize="19" FontWeight="SemiBold"/><Button Content="Remove selected" HorizontalAlignment="Right" FontSize="11" Padding="12,7" Click="RemoveBuild_Click"/></Grid>
++            <ListBox ItemsSource="{Binding Installations}" SelectedItem="{Binding SelectedInstall}" Background="Transparent" BorderThickness="0" SelectionChanged="BuildSelection_Changed" MinHeight="150"><ListBox.ItemTemplate><DataTemplate><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><TextBlock Text="{Binding Label}" FontWeight="SemiBold" FontSize="17"/><TextBlock Text="{Binding Directory}" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,6,0,0" TextTrimming="CharacterEllipsis"/></StackPanel><Border Grid.Column="1" Background="#253143" CornerRadius="6" Padding="10,6" VerticalAlignment="Center"><TextBlock Text="{Binding Island}" FontSize="11" Foreground="#8ED5D2"/></Border></Grid></DataTemplate></ListBox.ItemTemplate></ListBox>
++            <TextBlock Text="Selecting a build makes it active for both the host and client." Foreground="{StaticResource Muted}" FontSize="12" Margin="0,14,0,0"/>
++          </StackPanel>
++          <StackPanel x:Name="SettingsPage" Visibility="Collapsed">
++            <Border Background="{StaticResource Panel}" CornerRadius="14" Padding="24"><StackPanel>
++              <TextBlock Text="Your local profile" FontSize="23" FontWeight="SemiBold"/>
++              <TextBlock Text="Display name" FontSize="12" Margin="0,21,0,7"/><TextBox Text="{Binding DisplayName, UpdateSourceTrigger=PropertyChanged}" MaxLength="24"/>
++              <TextBlock Text="Letters, numbers, underscores and hyphens. No Epic account is needed here." FontSize="11" Foreground="{StaticResource Muted}" Margin="0,8,0,14"/>
++              <CheckBox Content="Start my host automatically when I press Play" IsChecked="{Binding AutoHost}"/>
++              <CheckBox Content="Run the host without rendering a game window" IsChecked="{Binding HeadlessHost}"/>
++              <Button Content="Save preferences" Style="{StaticResource Accent}" HorizontalAlignment="Left" Click="SaveSettings_Click" Margin="0,12,0,0"/>
++            </StackPanel></Border>
++            <Border Background="{StaticResource Panel}" CornerRadius="14" Padding="24" Margin="0,20,0,0"><StackPanel><TextBlock Text="Local backend" FontSize="21" FontWeight="SemiBold"/><TextBlock Text="Emilyfn starts its bundled backend, or uses a compatible one already running on port 3551." Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,10,0,18"/><Button Content="Start / check backend" HorizontalAlignment="Left" Click="Backend_Click"/></StackPanel></Border>
++            <TextBlock Text="Emilyfn 0.1.0 · Experimental Seasons 19–30 support.&#10;A successful launch does not yet guarantee a complete match on every build." Foreground="#76829D" TextWrapping="Wrap" Margin="3,23,0,0" FontSize="12"/>
++          </StackPanel>
++          <Grid x:Name="LogsPage" Visibility="Collapsed"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions><StackPanel Orientation="Horizontal" Margin="0,0,0,18"><Button Content="Export diagnostic ZIP" Style="{StaticResource Accent}" Click="ExportLogs_Click"/><Button Content="Open logs folder" Margin="12,0,0,0" Click="OpenLogs_Click"/></StackPanel><Border Grid.Row="1" Background="#090F19" CornerRadius="12" Padding="18" MinHeight="470"><TextBox Text="{Binding LogText, Mode=OneWay}" FontFamily="Consolas" FontSize="11" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Height="500" BorderThickness="0" Background="Transparent" Foreground="#B1C5D9"/></Border></Grid>
++        </Grid>
++      </ScrollViewer>
++      <TextBlock Grid.Row="3" Text="Host and client use the same selected build. Closing Emilyfn stops the instances it started." Foreground="#63708C" FontSize="10" Margin="0,15,0,0"/>
++    </Grid>
++  </Grid>
++</Window>
+diff --git a/launcher/Emilyfn.App/MainWindow.xaml.cs b/launcher/Emilyfn.App/MainWindow.xaml.cs
+new file mode 100644
+index 0000000..011f345
+--- /dev/null
++++ b/launcher/Emilyfn.App/MainWindow.xaml.cs
+@@ -0,0 +1,194 @@
++using Emilyfn.Core;
++using Microsoft.Win32;
++using System.Collections.ObjectModel;
++using System.ComponentModel;
++using System.Diagnostics;
++using System.IO;
++using System.Runtime.CompilerServices;
++using System.Windows;
++using System.Windows.Media;
++using System.Windows.Media.Imaging;
++using System.Windows.Threading;
++
++namespace Emilyfn.App;
++
++public partial class MainWindow : Window, INotifyPropertyChanged
++{
++    private readonly SettingsStore store;
++    private readonly LauncherSettings settings;
++    private readonly LauncherEngine engine;
++    private readonly CancellationTokenSource lifetime = new();
++    private readonly bool preview;
++    private bool closing;
++    private readonly List<string> lines = [];
++    private GameInstall? selectedInstall;
++    private SessionStatus host = new(GameRole.Host, LaunchStage.Idle, "Start a local server for your selected build.");
++    private SessionStatus client = new(GameRole.Client, LaunchStage.Idle, "Your selected build, with a local profile.");
++    public event PropertyChangedEventHandler? PropertyChanged;
++    public ObservableCollection<GameInstall> Installations { get; } = [];
++    public GameInstall? SelectedInstall { get => selectedInstall; set { selectedInstall = value; Notify(); RefreshDashboard(); } }
++    public string NewGamePath { get; set; } = "";
++    public string NewRelease { get; set; } = "";
++    public string DisplayName { get; set; } = "Emily";
++    public bool AutoHost { get; set; } = true;
++    public bool HeadlessHost { get; set; } = true;
++    public string BackendStatus { get; private set; } = "Not started";
++    public string PageTitle { get; private set; } = "Let's play, Emily.";
++    public string PageSubtitle { get; private set; } = "Your favorite chapters, in one place.";
++    public string Banner { get; private set; } = "";
++    public Visibility BannerVisibility => string.IsNullOrEmpty(Banner) ? Visibility.Collapsed : Visibility.Visible;
++    public string BuildHeadline => SelectedInstall?.Label ?? "Add your first Fortnite build";
++    public string BuildSubline => SelectedInstall is { } i ? i.Island + " island  ·  Local play" : "Open Library to choose your game folder.";
++    public string HostLabel => StageLabel(host.Stage);
++    public string ClientLabel => StageLabel(client.Stage);
++    public string HostDetail => host.Detail;
++    public string ClientDetail => client.Detail;
++    public bool HostBusy => host.Stage is not (LaunchStage.Idle or LaunchStage.Failed);
++    public bool ClientBusy => client.Stage is not (LaunchStage.Idle or LaunchStage.Failed);
++    public bool CanStartHost => !HostBusy && !closing;
++    public bool CanStartClient => !ClientBusy && !closing;
++    public string LatestActivity => lines.Count == 0 ? "Ready when you are. Add a build to get started." : lines[^1];
++    public string LogText => string.Join(Environment.NewLine, lines);
++    public MainWindow(bool renderPreview = false)
++    {
++        preview = renderPreview;
++        InitializeComponent();
++        var data = preview ? Path.Combine(Path.GetTempPath(), "Emilyfn-preview-" + Guid.NewGuid().ToString("N")) : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Emilyfn");
++        store = new SettingsStore(data);
++        settings = store.Load();
++        DisplayName = settings.DisplayName; AutoHost = settings.AutoHost; HeadlessHost = settings.HeadlessHost;
++        foreach (var install in settings.Installations) Installations.Add(install);
++        SelectedInstall = Installations.FirstOrDefault(i => i.Id == settings.SelectedId) ?? Installations.FirstOrDefault();
++        engine = new LauncherEngine(AppContext.BaseDirectory, data);
++        engine.Logged += line => UI(() => { lines.Add(line); if (lines.Count > 250) lines.RemoveAt(0); Notify(nameof(LogText)); Notify(nameof(LatestActivity)); });
++        engine.Backend.Changed += state => UI(() => { BackendStatus = state; Notify(nameof(BackendStatus)); });
++        engine.StatusChanged += state => UI(() => { if (state.Role == GameRole.Host) host = state; else client = state; RefreshDashboard(); if (state.Stage == LaunchStage.Failed) ShowBanner(state.Detail); });
++        if (preview)
++        {
++            var demo = new GameInstall("preview", @"D:\Fortnite\27.11", "27.11");
++            Installations.Add(demo); SelectedInstall = demo;
++            lines.Add("Emilyfn is ready. Select Play to start your local session.");
++        }
++        DataContext = this;
++        Navigate("Play");
++    }
++    private void UI(Action action) { if (!Dispatcher.HasShutdownStarted) _ = Dispatcher.BeginInvoke(action); }
++    private void Notify([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
++    private void RefreshDashboard()
++    {
++        foreach (var name in new[] { nameof(BuildHeadline), nameof(BuildSubline), nameof(HostLabel), nameof(ClientLabel), nameof(HostDetail), nameof(ClientDetail), nameof(HostBusy), nameof(ClientBusy), nameof(CanStartHost), nameof(CanStartClient) }) Notify(name);
++    }
++    private static string StageLabel(LaunchStage stage) => stage switch { LaunchStage.Idle => "Idle", LaunchStage.Listening => "Listening", LaunchStage.Active => "Active", LaunchStage.Failed => "Needs attention", LaunchStage.Login => "Signing in", LaunchStage.LoadingMap => "Loading island", _ => stage.ToString() };
++    private void ShowBanner(string message) { Banner = message; Notify(nameof(Banner)); Notify(nameof(BannerVisibility)); }
++    private void Save()
++    {
++        LaunchProtocol.ValidateName(DisplayName);
++        settings.DisplayName = DisplayName; settings.AutoHost = AutoHost; settings.HeadlessHost = HeadlessHost;
++        settings.Installations = Installations.ToList(); settings.SelectedId = SelectedInstall?.Id;
++        if (!preview) store.Save(settings);
++    }
++    private async Task ActionAsync(Func<Task> action)
++    {
++        if (preview || closing) return;
++        ShowBanner("");
++        try { await action(); }
++        catch (OperationCanceledException) { }
++        catch (Exception error) { engine.Log(error.Message); ShowBanner(error.Message); }
++        RefreshDashboard();
++    }
++    private GameInstall RequireBuild()
++    {
++        if (SelectedInstall is null) { Navigate("Library"); throw new InvalidOperationException("Add your Fortnite folder in Library first."); }
++        return SelectedInstall;
++    }
++    private void Navigate(string page)
++    {
++        PlayPage.Visibility = page == "Play" ? Visibility.Visible : Visibility.Collapsed;
++        LibraryPage.Visibility = page == "Library" ? Visibility.Visible : Visibility.Collapsed;
++        SettingsPage.Visibility = page == "Settings" ? Visibility.Visible : Visibility.Collapsed;
++        LogsPage.Visibility = page == "Logs" ? Visibility.Visible : Visibility.Collapsed;
++        PageTitle = page == "Play" ? $"Let's play, {DisplayName}." : page;
++        PageSubtitle = page switch { "Library" => "Bring your builds. Keep your favorites.", "Settings" => "A little setup. A lot of possibility.", "Logs" => "See exactly where your session is up to.", _ => "Your favorite chapters, in one place." };
++        foreach (var (button, title) in new[] { (PlayNav, "Play"), (LibraryNav, "Library"), (SettingsNav, "Settings"), (LogsNav, "Logs") })
++            button.Background = (Brush)new BrushConverter().ConvertFromString(page == title ? "#29223D" : "Transparent")!;
++        Notify(nameof(PageTitle)); Notify(nameof(PageSubtitle));
++    }
++    private void PlayNav_Click(object sender, RoutedEventArgs e) => Navigate("Play");
++    private void LibraryNav_Click(object sender, RoutedEventArgs e) => Navigate("Library");
++    private void SettingsNav_Click(object sender, RoutedEventArgs e) => Navigate("Settings");
++    private void LogsNav_Click(object sender, RoutedEventArgs e) => Navigate("Logs");
++    private async void Play_Click(object sender, RoutedEventArgs e) => await ActionAsync(async () => { Save(); await engine.PlayAsync(RequireBuild(), settings); });
++    private async void Host_Click(object sender, RoutedEventArgs e) => await ActionAsync(async () => { Save(); await engine.StartAsync(GameRole.Host, RequireBuild(), settings); });
++    private async void StopClient_Click(object sender, RoutedEventArgs e) => await ActionAsync(() => engine.StopAsync(GameRole.Client));
++    private async void StopHost_Click(object sender, RoutedEventArgs e) => await ActionAsync(() => engine.StopAsync(GameRole.Host));
++    private async void StopAll_Click(object sender, RoutedEventArgs e) => await ActionAsync(engine.StopAllAsync);
++    private async void Backend_Click(object sender, RoutedEventArgs e) => await ActionAsync(() => engine.Backend.EnsureAsync(lifetime.Token));
++    private async void SaveSettings_Click(object sender, RoutedEventArgs e) => await ActionAsync(() => { Save(); ShowBanner("Preferences saved."); return Task.CompletedTask; });
++    private async void CopyJoin_Click(object sender, RoutedEventArgs e) => await ActionAsync(() => { Clipboard.SetText("open 127.0.0.1:7777"); ShowBanner("Copied. In Fortnite's console, paste the command to join your local host."); return Task.CompletedTask; });
++    private async void Browse_Click(object sender, RoutedEventArgs e) => await ActionAsync(() =>
++    {
++        var dialog = new OpenFolderDialog { Title = "Choose your Fortnite installation", Multiselect = false };
++        if (dialog.ShowDialog(this) == true)
++        {
++            var result = Releases.Inspect(dialog.FolderName);
++            NewGamePath = result.Root; NewRelease = result.Release ?? "";
++            Notify(nameof(NewGamePath)); Notify(nameof(NewRelease));
++        }
++        return Task.CompletedTask;
++    });
++    private async void AddBuild_Click(object sender, RoutedEventArgs e) => await ActionAsync(() =>
++    {
++        var result = Releases.Inspect(NewGamePath.Trim());
++        var release = result.Release ?? NewRelease.Trim();
++        if (!Releases.Valid(release)) throw new InvalidOperationException("Enter the installed release as 19.xx-30.xx, for example 27.11.");
++        var existing = Installations.FirstOrDefault(i => string.Equals(i.Directory, result.Root, StringComparison.OrdinalIgnoreCase));
++        if (existing is not null) SelectedInstall = existing;
++        else { var item = new GameInstall(Guid.NewGuid().ToString("N"), result.Root, release); Installations.Add(item); SelectedInstall = item; }
++        Save(); ShowBanner("Build added. You're ready to launch from Play.");
++        return Task.CompletedTask;
++    });
++    private async void RemoveBuild_Click(object sender, RoutedEventArgs e) => await ActionAsync(() =>
++    {
++        if (HostBusy || ClientBusy) throw new InvalidOperationException("Stop your game instances before changing the library.");
++        if (SelectedInstall is { } install) { Installations.Remove(install); SelectedInstall = Installations.FirstOrDefault(); Save(); }
++        return Task.CompletedTask;
++    });
++    private void BuildSelection_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
++    {
++        if (engine is null || preview) return;
++        try { Save(); } catch (Exception error) { ShowBanner(error.Message); }
++    }
++    private async void OpenLogs_Click(object sender, RoutedEventArgs e) => await ActionAsync(() => { Process.Start(new ProcessStartInfo("explorer.exe") { ArgumentList = { engine.LogsRoot }, UseShellExecute = true }); return Task.CompletedTask; });
++    private async void ExportLogs_Click(object sender, RoutedEventArgs e) => await ActionAsync(async () =>
++    {
++        var dialog = new SaveFileDialog { Title = "Export Emilyfn diagnostics", Filter = "ZIP archive|*.zip", FileName = $"Emilyfn-logs-{DateTime.Now:yyyyMMdd-HHmmss}.zip", OverwritePrompt = false };
++        if (dialog.ShowDialog(this) != true) return;
++        if (File.Exists(dialog.FileName)) throw new IOException("Choose a new filename for the diagnostic ZIP.");
++        await engine.ExportLogsAsync(dialog.FileName);
++        ShowBanner("Diagnostic ZIP saved.");
++    });
++    private async void Window_Closing(object? sender, CancelEventArgs e)
++    {
++        if (closing || preview) return;
++        e.Cancel = true; closing = true; lifetime.Cancel(); RefreshDashboard();
++        try
++        {
++            try { Save(); } catch (Exception error) { engine.Log(error.Message); }
++            await engine.StopAllAsync();
++        }
++        catch (Exception error) { engine.Log(error.Message); }
++        finally { Close(); }
++    }
++    public void RenderPreview(string file)
++    {
++        System.Windows.Interop.RenderOptions.ProcessRenderMode = System.Windows.Interop.RenderMode.SoftwareOnly;
++        Show();
++        Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
++        UpdateLayout();
++        var visual = (FrameworkElement)Content;
++        var image = new RenderTargetBitmap((int)visual.ActualWidth, (int)visual.ActualHeight, 96, 96, PixelFormats.Pbgra32);
++        image.Render(visual);
++        var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(image));
++        using var stream = File.Create(file); encoder.Save(stream);
++    }
++}
+diff --git a/launcher/Emilyfn.App/app.manifest b/launcher/Emilyfn.App/app.manifest
+new file mode 100644
+index 0000000..87061f8
+--- /dev/null
++++ b/launcher/Emilyfn.App/app.manifest
+@@ -0,0 +1,7 @@
++<?xml version="1.0" encoding="utf-8"?>
++<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
++  <assemblyIdentity version="0.1.0.0" name="Emilyfn"/>
++  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3"><security><requestedPrivileges><requestedExecutionLevel level="asInvoker" uiAccess="false"/></requestedPrivileges></security></trustInfo>
++  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1"><application><supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/></application></compatibility>
++  <application xmlns="urn:schemas-microsoft-com:asm.v3"><windowsSettings><dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness><longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware></windowsSettings></application>
++</assembly>
+diff --git a/launcher/build-icon.ps1 b/launcher/build-icon.ps1
+new file mode 100644
+index 0000000..59d1f8a
+--- /dev/null
++++ b/launcher/build-icon.ps1
+@@ -0,0 +1,26 @@
++param([string]$Output = "$PSScriptRoot/assets/Emilyfn.ico")
++$ErrorActionPreference = 'Stop'
++Add-Type -AssemblyName System.Drawing
++$bitmap = [System.Drawing.Bitmap]::new(256,256)
++$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
++$graphics.SmoothingMode = 'AntiAlias'
++$graphics.Clear([System.Drawing.Color]::FromArgb(16,21,34))
++$rectangle = [System.Drawing.Rectangle]::new(16,16,224,224)
++$gradient = [System.Drawing.Drawing2D.LinearGradientBrush]::new($rectangle,[System.Drawing.Color]::FromArgb(172,118,255),[System.Drawing.Color]::FromArgb(98,77,220),45)
++$graphics.FillEllipse($gradient,$rectangle)
++$font = [System.Drawing.Font]::new('Segoe UI',155,[System.Drawing.FontStyle]::Bold,[System.Drawing.GraphicsUnit]::Pixel)
++$format = [System.Drawing.StringFormat]::new()
++$format.Alignment = 'Center'
++$format.LineAlignment = 'Center'
++$graphics.DrawString('E',$font,[System.Drawing.Brushes]::White,[System.Drawing.RectangleF]::new(7,0,242,247),$format)
++$icon = [System.Drawing.Icon]::FromHandle($bitmap.GetHicon())
++$null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Output)
++$stream = [System.IO.File]::Create($Output)
++$icon.Save($stream)
++$stream.Dispose()
++$icon.Dispose()
++$format.Dispose()
++$font.Dispose()
++$gradient.Dispose()
++$graphics.Dispose()
++$bitmap.Dispose()
