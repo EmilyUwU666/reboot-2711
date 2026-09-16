@@ -18,7 +18,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for name in core ui tests; do
+          for name in core ui tests downloads; do
             git show "HEAD:build-support/emilyfn-${name}.patch" > "emilyfn-${name}.patch"
             git apply --check "emilyfn-${name}.patch"
             git apply "emilyfn-${name}.patch"
