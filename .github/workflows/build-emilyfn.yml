@@ -93,6 +93,11 @@ jobs:
           }
           if (!(Test-Path $preview) -or (Get-Item $preview).Length -lt 10000) { throw 'The WPF preview is missing or incomplete.' }
           Write-Host ('EMILYFN_PREVIEW_BASE64=' + [Convert]::ToBase64String([IO.File]::ReadAllBytes($preview)))
+          foreach ($page in @('Library','Settings')) {
+            $file = Join-Path $env:GITHUB_WORKSPACE "Emilyfn-preview-$page.png"
+            if (!(Test-Path $file) -or (Get-Item $file).Length -lt 10000) { throw "Missing $page preview." }
+            Write-Host ("EMILYFN_" + $page.ToUpperInvariant() + "_BASE64=" + [Convert]::ToBase64String([IO.File]::ReadAllBytes($file)))
+          }
       - name: Package complete source and validate executable
         shell: python
         run: |
@@ -132,6 +137,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Emilyfn-Preview
-          path: Emilyfn-preview.png
+          path: Emilyfn-preview*.png
           if-no-files-found: error
           retention-days: 90
