@@ -371,10 +371,20 @@ index 5833f91..a1de3af 100644
 +The FortForge UI and its 30.40 queue were observed live; a complete 101 GB game
 +transfer and live Windows WebView2 integration have not been validated here.
 diff --git a/launcher/build.ps1 b/launcher/build.ps1
-index 77d8f4c..d6f36d1 100644
+index 77d8f4c..096b271 100644
 --- a/launcher/build.ps1
 +++ b/launcher/build.ps1
-@@ -40,7 +40,7 @@ foreach ($id in $runtime) {
+@@ -32,7 +32,8 @@ $assets = Get-Content "$PSScriptRoot/Emilyfn.App/obj/project.assets.json" -Raw |
+ $runtime = $assets.libraries.PSObject.Properties.Name | Where-Object { $_ -match 'Microsoft\.(NETCore|WindowsDesktop)\.App\.Runtime\.win-x64/' }
+ $packageCache = $assets.packageFolders.PSObject.Properties.Name | Select-Object -First 1
+ $null = New-Item -ItemType Directory -Path "$out/licenses"
+-foreach ($id in $runtime) {
++$notices = @($runtime) + @($assets.libraries.PSObject.Properties.Name | Where-Object { $_ -match '^Microsoft.Web.WebView2/' })
++foreach ($id in $notices) {
+     $package = Join-Path $packageCache $id.ToLowerInvariant()
+     Get-ChildItem $package -Recurse -File | Where-Object { $_.Name -match '^(LICENSE|THIRD.PARTY.NOTICES)(\.txt)?$' } | ForEach-Object {
+         $name = $id.Replace('/', '-') + '-' + $_.Name
+@@ -40,7 +41,7 @@ foreach ($id in $runtime) {
      }
  }
  @"
