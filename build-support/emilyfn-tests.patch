@@ -1,6 +1,6 @@
 diff --git a/launcher/Emilyfn.Tests/DownloadChecks.cs b/launcher/Emilyfn.Tests/DownloadChecks.cs
 new file mode 100644
-index 0000000..a4ca69f
+index 0000000..065385b
 --- /dev/null
 +++ b/launcher/Emilyfn.Tests/DownloadChecks.cs
 @@ -0,0 +1,82 @@
@@ -27,9 +27,9 @@ index 0000000..a4ca69f
 +                foreach (var entry in entries) { var item = zip.CreateEntry(entry.Path); item.ExternalAttributes = entry.Attributes; using var stream = item.Open(); stream.Write(entry.Content); }
 +            return data.ToArray();
 +        }
-+        Check(BuildCatalog.Entries.Where(e => e.Url is not null).All(e => Releases.Valid(e.Release) && BuildDownloader.ValidateUrl(e.Url!).AbsolutePath.EndsWith(".zip")), "catalog contains supported direct HTTPS ZIP entries");
-+        Check(BuildCatalog.Entries.Single(e => e.Release == "30.40").Url is null, "missing 30.40 source is not invented");
-+        Check(BuildCatalog.Entries.Select(e => e.Release).Distinct().Count() == BuildCatalog.Entries.Count, "catalog releases are unique");
++        Check(BuildCatalog.Entries.Where(e => e.Url is not null && !e.BrowserDownload).All(e => Releases.Valid(e.Release) && BuildDownloader.ValidateUrl(e.Url!).AbsolutePath.EndsWith(".zip")), "catalog contains supported direct HTTPS ZIP entries");
++        Check(BuildCatalog.Entries.Any(e => e.Release == "30.40" && e.BrowserDownload && new Uri(e.Url!).Host == "www.fortforge.co.uk"), "FortForge supplies a verified 30.40 build page");
++        Check(BuildCatalog.Entries.Select(e => e.Url).Distinct().Count() == BuildCatalog.Entries.Count, "catalog source URLs are unique");
 +        var exe = File.ReadAllBytes(executable);
 +        var good = Zip(("wrapped/FortniteGame/Binaries/Win64/FortniteClient-Win64-Shipping.exe", exe, 0), ("wrapped/FortniteGame/Content/Paks/test.pak", new byte[] { 1 }, 0));
 +        HttpResponseMessage Bytes(byte[] data) => new(HttpStatusCode.OK) { Content = new ByteArrayContent(data) };
@@ -39,7 +39,7 @@ index 0000000..a4ca69f
 +            var parent = Parent(); bool rejected = false;
 +            using var downloader = new BuildDownloader(new Handler(send));
 +            try { await downloader.InstallAsync("https://builds.example/build.zip?private=not-logged", parent, release, checksum, progress, token); }
-+            catch (Exception error) when (error is IOException or ArgumentException or OperationCanceledException) { rejected = true; Check(!error.Message.Contains("not-logged"), "download errors do not expose signed links"); }
++            catch (Exception error) when (error is IOException or InvalidDataException or ArgumentException or OperationCanceledException) { rejected = true; Check(!error.Message.Contains("not-logged"), "download errors do not expose signed links"); }
 +            Check(rejected, description);
 +            Check(!Directory.Exists(parent) || !Directory.EnumerateFileSystemEntries(parent).Any(), description + " leaves no partial install");
 +        }
