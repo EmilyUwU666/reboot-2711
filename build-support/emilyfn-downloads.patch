@@ -1,0 +1,281 @@
+diff --git a/launcher/Emilyfn.Core/BuildCatalog.cs b/launcher/Emilyfn.Core/BuildCatalog.cs
+new file mode 100644
+index 0000000..b5f9442
+--- /dev/null
++++ b/launcher/Emilyfn.Core/BuildCatalog.cs
+@@ -0,0 +1,32 @@
++namespace Emilyfn.Core;
++
++public sealed record CatalogBuild(string Release, string? Url, string Source)
++{
++    public bool Custom => Release.Length == 0;
++    public string Label => Custom ? "Custom ZIP link…" : $"Fortnite {Release}" + (Url is null ? " — no direct ZIP available" : "");
++}
++public static class BuildCatalog
++{
++    public const string Credits = "https://github.com/llamaqwerty/fortnite-builds-archive";
++    public const string CheckedDate = "2026-09-16";
++    // Exact public archive links; availability is checked by HTTP at download time.
++    // Do not infer URLs for missing releases or treat sharing pages as ZIP files.
++    public static IReadOnlyList<CatalogBuild> Entries { get; } =
++    [
++        new("", null, "Your own direct HTTPS ZIP link"),
++        new("30.40", null, "The public archive currently lists this release as unavailable."),
++        new("26.30", "https://r2.ploosh.dev/26.30.zip", "ploosh.dev"),
++        new("25.11", "https://r2.ploosh.dev/25.11.zip", "ploosh.dev"),
++        new("24.20", "https://r2.ploosh.dev/24.20.zip", "ploosh.dev"),
++        new("23.50", "https://public.simplyblk.xyz/23.50.zip", "simplyblk.xyz"),
++        new("23.40", "https://public.simplyblk.xyz/23.40.zip", "simplyblk.xyz"),
++        new("21.50", "https://public.simplyblk.xyz/21.50.zip", "simplyblk.xyz"),
++        new("21.10", "https://public.simplyblk.xyz/21.10.zip", "simplyblk.xyz"),
++        new("21.00", "https://r2.ploosh.dev/21.00.zip", "ploosh.dev"),
++        new("20.40", "https://public.simplyblk.xyz/20.40.zip", "simplyblk.xyz"),
++        new("20.20", "https://public.simplyblk.xyz/20.20.zip", "simplyblk.xyz"),
++        new("20.10", "https://public.simplyblk.xyz/20.10.zip", "simplyblk.xyz"),
++        new("19.10", "https://crystal.ploosh.dev/19.10.zip", "ploosh.dev"),
++        new("19.01", "https://r2.ploosh.dev/19.01.zip", "ploosh.dev")
++    ];
++}
+diff --git a/launcher/Emilyfn.Core/BuildDetector.cs b/launcher/Emilyfn.Core/BuildDetector.cs
+index f6caada..053fcef 100644
+--- a/launcher/Emilyfn.Core/BuildDetector.cs
++++ b/launcher/Emilyfn.Core/BuildDetector.cs
+@@ -13,7 +13,7 @@ public static class BuildDetector
+     {
+         var root = Path.GetFullPath(path.Trim().Trim('"'));
+         if (File.Exists(root)) root = Path.GetDirectoryName(root)!;
+-        if (Path.GetFileName(root).Equals("Win64", StringComparison.OrdinalIgnoreCase) && Path.GetFileName(Path.GetDirectoryName(root)).Equals("Binaries", StringComparison.OrdinalIgnoreCase)) root = Path.GetDirectoryName(Path.GetDirectoryName(root)!)!;
++        if (Path.GetFileName(root).Equals("Win64", StringComparison.OrdinalIgnoreCase) && string.Equals(Path.GetFileName(Path.GetDirectoryName(root)), "Binaries", StringComparison.OrdinalIgnoreCase)) root = Path.GetDirectoryName(Path.GetDirectoryName(root)!)!;
+         if (Path.GetFileName(root).Equals("FortniteGame", StringComparison.OrdinalIgnoreCase)) root = Path.GetDirectoryName(root)!;
+         return Path.TrimEndingDirectorySeparator(root);
+     }
+diff --git a/launcher/Emilyfn.Core/BuildDownloader.cs b/launcher/Emilyfn.Core/BuildDownloader.cs
+new file mode 100644
+index 0000000..482799a
+--- /dev/null
++++ b/launcher/Emilyfn.Core/BuildDownloader.cs
+@@ -0,0 +1,165 @@
++using System.Diagnostics;
++using System.IO.Compression;
++using System.Net;
++using System.Security.Cryptography;
++using System.Text.RegularExpressions;
++
++namespace Emilyfn.Core;
++
++public sealed record DownloadProgress(string Stage, long Bytes, long? Total, double BytesPerSecond = 0)
++{
++    public double Percent => Total is > 0 ? Math.Clamp(100d * Bytes / Total.Value, 0, 100) : 0;
++    public string Label => $"{Stage} · {Bytes / 1048576d:N1} MiB" + (Total is > 0 ? $" / {Total / 1048576d:N1} MiB" : "") + (BytesPerSecond > 0 ? $" · {BytesPerSecond / 1048576d:N1} MiB/s" : "");
++}
++
++/// <summary>Installs a direct HTTPS ZIP into a new directory. Never executes archive content.</summary>
++public sealed class BuildDownloader : IDisposable
++{
++    private const long Limit = 512L * 1024 * 1024 * 1024;
++    private readonly HttpClient http;
++    public BuildDownloader(HttpMessageHandler? handler = null)
++    {
++        http = new HttpClient(handler ?? new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = Timeout.InfiniteTimeSpan };
++        http.DefaultRequestHeaders.UserAgent.ParseAdd("Emilyfn/0.3.0");
++    }
++    public static Uri ValidateUrl(string text)
++    {
++        if (!Uri.TryCreate(text, UriKind.Absolute, out var uri) || uri.Scheme != "https" || string.IsNullOrEmpty(uri.Host) || uri.UserInfo.Length > 0 || uri.Fragment.Length > 0)
++            throw new ArgumentException("Paste a direct HTTPS ZIP download link without a username, password or fragment.");
++        return uri;
++    }
++    public async Task<GameInstall> InstallAsync(string url, string parent, string release, string checksum, IProgress<DownloadProgress>? progress, CancellationToken token)
++    {
++        var uri = ValidateUrl(url.Trim());
++        if (!Releases.Valid(release)) throw new ArgumentException("Enter a release between 19.xx and 30.xx, such as 30.40.");
++        checksum = checksum.Trim();
++        if (checksum.Length > 0 && !Regex.IsMatch(checksum, "^[a-fA-F0-9]{64}$")) throw new ArgumentException("SHA256 must be 64 hexadecimal characters, or leave it empty.");
++        if (string.IsNullOrWhiteSpace(parent) || !Path.IsPathFullyQualified(parent)) throw new ArgumentException("Choose an absolute installation folder.");
++        parent = Path.GetFullPath(parent);
++        Directory.CreateDirectory(parent);
++        var destination = Path.Combine(parent, "Fortnite-" + release);
++        if (Directory.Exists(destination) || File.Exists(destination)) throw new IOException("That build folder already exists. Choose a different installation folder.");
++        var work = Path.Combine(parent, ".emilyfn-download-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(work);
++        try
++        {
++            var zip = Path.Combine(work, "build.zip");
++            await DownloadAsync(uri, zip, checksum, progress, token);
++            var unpacked = Path.Combine(work, "unpacked");
++            await ExtractAsync(zip, unpacked, progress, token);
++            progress?.Report(new("Checking build", 0, null));
++            var executables = Directory.EnumerateFiles(unpacked, "FortniteClient-Win64-Shipping.exe", SearchOption.AllDirectories).Take(2).ToArray();
++            if (executables.Length != 1) throw new InvalidDataException("The ZIP must contain exactly one complete Windows Fortnite build.");
++            var found = Releases.Inspect(executables[0], token);
++            if (found.Release is null) throw new InvalidDataException("The executable's release could not be verified. Use a build with readable Fortnite release metadata.");
++            if (found.Release != release) throw new InvalidDataException($"The ZIP contains Fortnite {found.Release}, not {release}. Nothing was installed.");
++            token.ThrowIfCancellationRequested();
++            Directory.Move(found.Root, destination);
++            progress?.Report(new("Installed", 1, 1));
++            return new(Guid.NewGuid().ToString("N"), destination, found.Release);
++        }
++        catch (HttpRequestException) { throw new IOException("Download failed. Check the direct ZIP link and your connection, then retry."); }
++        finally { if (Directory.Exists(work)) Directory.Delete(work, true); }
++    }
++    private async Task DownloadAsync(Uri uri, string file, string checksum, IProgress<DownloadProgress>? progress, CancellationToken token)
++    {
++        HttpResponseMessage? response = null;
++        try
++        {
++            for (int redirect = 0; redirect <= 5; redirect++)
++            {
++                using var headers = CancellationTokenSource.CreateLinkedTokenSource(token);
++                headers.CancelAfter(TimeSpan.FromSeconds(45));
++                try { response = await http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, headers.Token); }
++                catch (OperationCanceledException) when (!token.IsCancellationRequested) { throw new IOException("The download server did not respond in time. Retry the download."); }
++                if ((int)response.StatusCode is >= 300 and < 400)
++                {
++                    var next = response.Headers.Location;
++                    response.Dispose(); response = null;
++                    if (next is null || redirect == 5) throw new IOException("The download link has too many redirects or a missing destination.");
++                    uri = ValidateUrl(new Uri(uri, next).AbsoluteUri);
++                    continue;
++                }
++                break;
++            }
++            response!.EnsureSuccessStatusCode();
++            if (response.StatusCode != HttpStatusCode.OK) throw new IOException("The server did not return a complete download.");
++            if (response.Content.Headers.ContentType?.MediaType?.Contains("html", StringComparison.OrdinalIgnoreCase) == true) throw new IOException("This link opens a webpage. Paste the direct ZIP download link instead.");
++            var total = response.Content.Headers.ContentLength;
++            if (total is > Limit || total is 0) throw new IOException("The download is empty or exceeds the 512 GiB limit.");
++            CheckSpace(file, total ?? 256L * 1024 * 1024);
++            await using var input = await response.Content.ReadAsStreamAsync(token);
++            await using var output = new FileStream(file, FileMode.CreateNew, FileAccess.Write, FileShare.None, 131072, true);
++            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
++            var buffer = new byte[131072]; long received = 0; var clock = Stopwatch.StartNew(); long last = -250;
++            progress?.Report(new("Downloading", 0, total));
++            while (true)
++            {
++                using var stall = CancellationTokenSource.CreateLinkedTokenSource(token); stall.CancelAfter(TimeSpan.FromSeconds(90));
++                int count;
++                try { count = await input.ReadAsync(buffer, stall.Token); }
++                catch (OperationCanceledException) when (!token.IsCancellationRequested) { throw new IOException("The download stalled. Check your connection and retry."); }
++                if (count == 0) break;
++                received += count;
++                if (received > Limit || total is not null && received > total) throw new IOException("The download exceeds its expected size.");
++                hash.AppendData(buffer, 0, count);
++                await output.WriteAsync(buffer.AsMemory(0, count), token);
++                if (clock.ElapsedMilliseconds - last >= 250) { progress?.Report(new("Downloading", received, total, received / Math.Max(.001, clock.Elapsed.TotalSeconds))); last = clock.ElapsedMilliseconds; }
++            }
++            if (total is not null && received != total) throw new IOException("The download was incomplete. Retry the download.");
++            if (checksum.Length > 0 && !Convert.ToHexString(hash.GetHashAndReset()).Equals(checksum, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("SHA256 mismatch. The downloaded archive was discarded.");
++        }
++        finally { response?.Dispose(); }
++    }
++    private static void CheckSpace(string path, long needed)
++    {
++        var drive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(path))!);
++        if (drive.IsReady && drive.AvailableFreeSpace < needed + 256L * 1024 * 1024) throw new IOException("There is not enough free disk space for this build and its temporary files.");
++    }
++    private static async Task ExtractAsync(string zip, string root, IProgress<DownloadProgress>? progress, CancellationToken token)
++    {
++        using var archive = ZipFile.OpenRead(zip);
++        if (archive.Entries.Count is 0 or > 500000) throw new InvalidDataException("The ZIP is empty or contains too many entries.");
++        Directory.CreateDirectory(root);
++        var prefix = Path.GetFullPath(root) + Path.DirectorySeparatorChar;
++        var destinations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        var entries = new List<(ZipArchiveEntry Entry, string Path, bool Directory)>();
++        long total = 0;
++        foreach (var entry in archive.Entries)
++        {
++            token.ThrowIfCancellationRequested();
++            var name = entry.FullName.Replace('\\', '/');
++            var parts = name.TrimEnd('/').Split('/');
++            if (name.StartsWith('/') || parts.Any(p => p.Length == 0 || p is "." or ".." || p.EndsWith('.') || p.EndsWith(' ') || p.IndexOfAny([':', '*', '?', '"', '<', '>', '|', '\0']) >= 0 || p.Any(char.IsControl) || Regex.IsMatch(p, @"^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(\.|$)", RegexOptions.IgnoreCase)))
++                throw new InvalidDataException("The ZIP contains an unsafe file path.");
++            if (((entry.ExternalAttributes >> 16) & 0xF000) is 0xA000 || (entry.ExternalAttributes & (int)FileAttributes.ReparsePoint) != 0) throw new InvalidDataException("Archive links are not supported.");
++            var target = Path.GetFullPath(Path.Combine(root, name.Replace('/', Path.DirectorySeparatorChar)));
++            if (!target.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || !destinations.Add(target)) throw new InvalidDataException("The ZIP contains duplicate or unsafe paths.");
++            total = checked(total + entry.Length);
++            if (total > Limit) throw new InvalidDataException("Extracted content exceeds the 512 GiB limit.");
++            entries.Add((entry, target, name.EndsWith('/')));
++        }
++        CheckSpace(root, total);
++        long extracted = 0; var clock = Stopwatch.StartNew(); long last = -250;
++        var buffer = new byte[131072];
++        foreach (var item in entries)
++        {
++            token.ThrowIfCancellationRequested();
++            if (item.Directory) { Directory.CreateDirectory(item.Path); continue; }
++            Directory.CreateDirectory(Path.GetDirectoryName(item.Path)!);
++            await using var source = item.Entry.Open();
++            await using var target = new FileStream(item.Path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 131072, true);
++            long entryBytes = 0;
++            int count;
++            while ((count = await source.ReadAsync(buffer, token)) > 0)
++            {
++                entryBytes += count; extracted += count;
++                if (entryBytes > item.Entry.Length || extracted > total) throw new InvalidDataException("Archive content exceeds its declared size.");
++                await target.WriteAsync(buffer.AsMemory(0, count), token);
++                if (clock.ElapsedMilliseconds - last >= 250) { progress?.Report(new("Extracting", extracted, total)); last = clock.ElapsedMilliseconds; }
++            }
++            if (entryBytes != item.Entry.Length) throw new InvalidDataException("The ZIP contains an incomplete file.");
++        }
++    }
++    public void Dispose() => http.Dispose();
++}
+diff --git a/launcher/README.md b/launcher/README.md
+index 5833f91..49ee0cd 100644
+--- a/launcher/README.md
++++ b/launcher/README.md
+@@ -93,3 +93,41 @@ IPC protocol: https://docs.discord.com/developers/topics/rpc .
+ The Windows build tests this protocol with a local synthetic named-pipe server,
+ including fragmented frames, PING/PONG, reconnect and presence clearing. A real
+ Discord application ID/account is needed to verify the live profile display.
++
++
++## Download and install builds (0.3.0)
++
++In Library, paste a **direct HTTPS ZIP link**, enter the release (for example
++30.40), choose an installation parent folder and select Download and install.
++An optional SHA256 from your source verifies the downloaded archive. The launcher
++follows up to five HTTPS redirects, shows transferred MiB and speed, extracts the
++ZIP and checks the actual Fortnite release before adding it to Library. A ZIP may
++have one enclosing folder, but must contain exactly one complete Windows build.
++No game files or Epic account credentials are bundled.
++
++The install is committed to a new `Fortnite-<release>` folder only after validation.
++Existing folders are never overwritten. Temporary ZIP/extraction files are removed
++on success, cancellation or error. Keep enough disk space for the compressed ZIP
++and extracted game at the same time. There is a 512 GiB download/extraction limit.
++Cancellation and failed transfers restart from the beginning; HTTP resume, RAR,
++7z, split archives and Epic manifest/chunk downloads are not implemented. A browser
++landing page is not a direct ZIP link. Unknown/mismatched releases are rejected.
++
++Only a verified installation is registered; downloaded files are not executed by
++the installer. Installing 30.40 does not add LEGO Fortnite or Festival server support.
++Tests use in-memory HTTP responses and synthetic builds, covering redirects, hash
++mismatches, version mismatch, traversal, links, duplicate paths, cancellation,
++truncated downloads and preserving existing installations. Real multi-gigabyte
++Fortnite downloads remain to be tested with the user's chosen source.
++
++### Public build picker
++
++The embedded catalog includes 13 direct ZIP links for 19.01, 19.10, 20.10, 20.20,
++20.40, 21.00, 21.10, 21.50, 23.40, 23.50, 24.20, 25.11 and 26.30. Select a build,
++choose the destination, then Download and install; the link is filled automatically.
++Source and credit: https://github.com/llamaqwerty/fortnite-builds-archive (read
++2026-09-16). Links belong to third-party hosts and may expire. No checksum was
++published in the source table; optional manual SHA256 verification remains available.
++The catalog intentionally excludes sharing pages, RAR/7z and a mislabeled 19.00 row
++that pointed to 19.01. 30.40 is shown as unavailable because no direct ZIP source was
++found. A download link is not a guarantee of gameplay compatibility or file contents.
+diff --git a/launcher/build.ps1 b/launcher/build.ps1
+index 77d8f4c..d6f36d1 100644
+--- a/launcher/build.ps1
++++ b/launcher/build.ps1
+@@ -40,7 +40,7 @@ foreach ($id in $runtime) {
+     }
+ }
+ @"
+-Emilyfn 0.2.0 - Windows x64
++Emilyfn 0.3.0 - Windows x64
+ SDK: $sdk
+ Published runtimes: $($runtime -join ', ')
+ Workflow commit: $env:GITHUB_SHA
