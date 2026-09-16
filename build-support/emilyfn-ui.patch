@@ -61,10 +61,10 @@ index 0000000..97de4e0
 +}
 diff --git a/launcher/Emilyfn.App/Emilyfn.App.csproj b/launcher/Emilyfn.App/Emilyfn.App.csproj
 new file mode 100644
-index 0000000..9538e91
+index 0000000..7f8892f
 --- /dev/null
 +++ b/launcher/Emilyfn.App/Emilyfn.App.csproj
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,28 @@
 +<Project Sdk="Microsoft.NET.Sdk">
 +  <PropertyGroup>
 +    <OutputType>WinExe</OutputType>
@@ -90,11 +90,12 @@ index 0000000..9538e91
 +  <ItemGroup>
 +    <ProjectReference Include="../Emilyfn.Core/Emilyfn.Core.csproj" />
 +    <Resource Include="../assets/Emilyfn.ico" Link="Emilyfn.ico" />
++    <Resource Include="../assets/Emilyfn-logo.png" Link="Emilyfn-logo.png" />
 +  </ItemGroup>
 +</Project>
 diff --git a/launcher/Emilyfn.App/MainWindow.xaml b/launcher/Emilyfn.App/MainWindow.xaml
 new file mode 100644
-index 0000000..787e0b6
+index 0000000..1abcb26
 --- /dev/null
 +++ b/launcher/Emilyfn.App/MainWindow.xaml
 @@ -0,0 +1,116 @@
@@ -105,7 +106,7 @@ index 0000000..787e0b6
 +    <Border Background="#101522" BorderBrush="#232B3D" BorderThickness="0,0,1,0">
 +      <Grid Margin="20,28,20,22"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
 +        <StackPanel>
-+          <StackPanel Orientation="Horizontal"><Image Source="Emilyfn.ico" Width="38" Height="38" Stretch="Uniform" AutomationProperties.Name="Emilyfn logo"/><TextBlock Text="Emilyfn" FontSize="25" FontWeight="Bold" Margin="10,0,0,0" VerticalAlignment="Center"/></StackPanel>
++          <StackPanel Orientation="Horizontal"><Image Source="Emilyfn-logo.png" Width="38" Height="38" Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality" AutomationProperties.Name="Emilyfn logo"/><TextBlock Text="Emilyfn" FontSize="25" FontWeight="Bold" Margin="10,0,0,0" VerticalAlignment="Center"/></StackPanel>
 +          <TextBlock Text="YOUR PRIVATE PLAYSPACE" Foreground="#707C98" FontSize="9" Margin="2,15,0,28"/>
 +        </StackPanel>
 +        <StackPanel Grid.Row="1">
@@ -1581,10 +1582,10 @@ index 0000000..3c80f45
 +build-icon.ps1 fits the complete logo into seven Windows icon sizes.
 diff --git a/launcher/build-icon.ps1 b/launcher/build-icon.ps1
 new file mode 100644
-index 0000000..4bdcc40
+index 0000000..cda515c
 --- /dev/null
 +++ b/launcher/build-icon.ps1
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,65 @@
 +param([string]$Output = "$PSScriptRoot/assets/Emilyfn.ico")
 +$ErrorActionPreference = 'Stop'
 +Add-Type -AssemblyName System.Drawing
@@ -1598,7 +1599,7 @@ index 0000000..4bdcc40
 +    # Fit the complete logo and wordmark; discard only the surrounding white margins.
 +    $crop = [Drawing.RectangleF]::new(112,316,600,606)
 +    if ($source.Width -ne 832 -or $source.Height -ne 1248) { throw 'Unexpected source logo dimensions.' }
-+    # WPF Image selects the first ICO frame; put the largest first for sharp downscaling.
++    # Keep the largest frame first; the in-app badge also uses its own PNG resource.
 +    $sizes = @(256,128,64,48,32,24,16)
 +    $frames = [Collections.Generic.List[byte[]]]::new()
 +    foreach ($size in $sizes) {
@@ -1645,6 +1646,7 @@ index 0000000..4bdcc40
 +    $large = [Drawing.Bitmap]::new($largeStream)
 +    try { if ($large.Width -ne 256 -or $large.Height -ne 256) { throw 'Large icon frame validation failed.' } }
 +    finally { $large.Dispose(); $largeStream.Dispose() }
++    [IO.File]::WriteAllBytes("$PSScriptRoot/assets/Emilyfn-logo.png", $frames[0])
 +    Write-Host ('EMILYFN_ICON_BASE64=' + [Convert]::ToBase64String($frames[0]))
 +    Write-Host 'Emilyfn user logo icon built: 16, 24, 32, 48, 64, 128 and 256 pixels.'
 +}
