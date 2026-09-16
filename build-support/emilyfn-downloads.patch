@@ -1,15 +1,15 @@
 diff --git a/launcher/Emilyfn.Core/BuildCatalog.cs b/launcher/Emilyfn.Core/BuildCatalog.cs
 new file mode 100644
-index 0000000..b5f9442
+index 0000000..6c187a8
 --- /dev/null
 +++ b/launcher/Emilyfn.Core/BuildCatalog.cs
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,100 @@
 +namespace Emilyfn.Core;
 +
-+public sealed record CatalogBuild(string Release, string? Url, string Source)
++public sealed record CatalogBuild(string Release, string? Url, string Source, bool BrowserDownload = false)
 +{
 +    public bool Custom => Release.Length == 0;
-+    public string Label => Custom ? "Custom ZIP link…" : $"Fortnite {Release}" + (Url is null ? " — no direct ZIP available" : "");
++    public string Label => Custom ? "Custom ZIP link…" : $"Fortnite {Release} · {Source}";
 +}
 +public static class BuildCatalog
 +{
@@ -20,7 +20,75 @@ index 0000000..b5f9442
 +    public static IReadOnlyList<CatalogBuild> Entries { get; } =
 +    [
 +        new("", null, "Your own direct HTTPS ZIP link"),
-+        new("30.40", null, "The public archive currently lists this release as unavailable."),
++        new("30.40", "https://www.fortforge.co.uk/builds/b62d9559-9608-4d43-ad46-8cb1c39e1366", "FortForge CL-35235494", true),
++        new("30.30", "https://www.fortforge.co.uk/builds/8b9818ef-ae3e-49e5-9e62-e3100ccbcffe", "FortForge CL-34891016", true),
++        new("30.20", "https://www.fortforge.co.uk/builds/e325233c-4308-4d51-a855-e5115a4cd416", "FortForge CL-34597766", true),
++        new("30.10", "https://www.fortforge.co.uk/builds/09be6fd4-e04b-4dd8-a7c7-6d6ba2103014", "FortForge CL-34184790", true),
++        new("30.00", "https://www.fortforge.co.uk/builds/041b195a-898a-4452-965e-d43ca00cc8a1", "FortForge CL-33760522", true),
++        new("30.00", "https://www.fortforge.co.uk/builds/5ec7a21e-871c-4cab-9890-b66c27390722", "FortForge CL-33962396", true),
++        new("29.40", "https://www.fortforge.co.uk/builds/4fbbc230-c28a-425c-96b0-a89d8679b519", "FortForge CL-33629566", true),
++        new("29.30", "https://www.fortforge.co.uk/builds/38052f13-5afc-429a-a361-7a559285b5b4", "FortForge CL-32982357", true),
++        new("29.10", "https://www.fortforge.co.uk/builds/feb41edd-cbd1-49a9-93c0-4c9537ed3b45", "FortForge CL-32567225", true),
++        new("29.01", "https://www.fortforge.co.uk/builds/502f77c1-5c8b-4b7a-b6c1-4eb9f30acc0d", "FortForge CL-32291970", true),
++        new("29.00", "https://www.fortforge.co.uk/builds/c16788d2-c383-4cc8-be56-cb792ccbd7e0", "FortForge CL-32116959", true),
++        new("28.30", "https://www.fortforge.co.uk/builds/48d3ac1b-baae-49f0-9353-1264114de009", "FortForge CL-31511038", true),
++        new("28.10", "https://www.fortforge.co.uk/builds/7db54eed-6554-47f7-817c-31f8e1f0aa5e", "FortForge CL-30835064", true),
++        new("28.01", "https://www.fortforge.co.uk/builds/02a8bbf8-ebd2-4412-b64e-39ed8d6bdb42", "FortForge CL-30313795", true),
++        new("27.11", "https://www.fortforge.co.uk/builds/242931f8-9abf-487a-b3ff-4f1cc775a3bf", "FortForge CL-29739262", true),
++        new("27.10", "https://www.fortforge.co.uk/builds/910cf670-87ab-4717-8cd7-40b3c4446291", "FortForge CL-29552510", true),
++        new("27.00", "https://www.fortforge.co.uk/builds/cc247cb1-11c0-4e81-9dca-2928c603153e", "FortForge CL-29072304", true),
++        new("26.30", "https://www.fortforge.co.uk/builds/60c49654-8ab0-441d-9ef3-da9ee2f58e2d", "FortForge CL-28688692", true),
++        new("26.20", "https://www.fortforge.co.uk/builds/ce0b5553-7c4a-4af2-9445-6ef1f811a698", "FortForge CL-28096793", true),
++        new("26.10", "https://www.fortforge.co.uk/builds/6cc4cbdd-faf9-4b8c-b9cb-187ce8f13f5c", "FortForge CL-27681420", true),
++        new("26.00", "https://www.fortforge.co.uk/builds/26a47736-63f0-4192-8043-314eddceb428", "FortForge CL-27233190", true),
++        new("26.00", "https://www.fortforge.co.uk/builds/89de68ac-05e9-4022-a6df-c40756de0b83", "FortForge CL-27424790", true),
++        new("25.30", "https://www.fortforge.co.uk/builds/b7fa8c51-a8e7-4ebc-9000-9d335325bdef", "FortForge CL-26867995", true),
++        new("25.20", "https://www.fortforge.co.uk/builds/91047ca0-62ab-48e9-8be2-00d8da40de65", "FortForge CL-26629111", true),
++        new("25.11", "https://www.fortforge.co.uk/builds/368d5d9d-631e-4266-af68-55ac700db695", "FortForge CL-26171015", true),
++        new("25.10", "https://www.fortforge.co.uk/builds/f796e829-2901-4ca0-a7d2-4f022967012d", "FortForge CL-26000959", true),
++        new("25.00", "https://www.fortforge.co.uk/builds/a7d0b41b-0e30-466f-9ce4-fc1411356cb8", "FortForge CL-25909622", true),
++        new("24.40", "https://www.fortforge.co.uk/builds/6b619b11-1838-4eeb-a724-c72f579fe1ae", "FortForge CL-25521145", true),
++        new("24.40", "https://www.fortforge.co.uk/builds/3c5fa1ae-8a8a-4f70-b230-f4f14b501ac8", "FortForge CL-25420516", true),
++        new("24.30", "https://www.fortforge.co.uk/builds/307316f7-5b82-487d-813e-18bb7a9017b0", "FortForge CL-25210886", true),
++        new("24.30", "https://www.fortforge.co.uk/builds/11e4e940-784a-4bfb-aef7-799d23f4aa51", "FortForge CL-25347382", true),
++        new("24.20", "https://www.fortforge.co.uk/builds/e767d3b4-237e-4f76-87a9-ff57b5213693", "FortForge CL-25156858", true),
++        new("24.20", "https://www.fortforge.co.uk/builds/a85ce745-72bf-48d6-bdfb-a2ad55927a1f", "FortForge CL-25058254", true),
++        new("24.20", "https://www.fortforge.co.uk/builds/5a39bfe2-b950-4e7e-a15b-e4a5242e72fc", "FortForge CL-25019967", true),
++        new("24.20", "https://www.fortforge.co.uk/builds/c4910091-eb16-415f-a978-0556d02aa219", "FortForge CL-24939793", true),
++        new("24.10", "https://www.fortforge.co.uk/builds/51574862-8c0d-47b5-bb3d-e392b9a223ed", "FortForge CL-24939793", true),
++        new("24.01", "https://www.fortforge.co.uk/builds/fabc531b-7e4e-4e9f-9748-f30d14f8bbf1", "FortForge CL-24672685", true),
++        new("24.00", "https://www.fortforge.co.uk/builds/7163219f-d0fa-4efa-93cc-b2b0341d446b", "FortForge CL-24554913", true),
++        new("23.50", "https://www.fortforge.co.uk/builds/b0bf28c5-6c49-40e5-8930-ccbf318e1aa8", "FortForge CL-24441668", true),
++        new("23.40", "https://www.fortforge.co.uk/builds/d769ec2c-03b1-4f40-9284-6ca449172b49", "FortForge CL-24087481", true),
++        new("23.30", "https://www.fortforge.co.uk/builds/f8705320-6c83-433c-9aa5-ea3cd5d91eb8", "FortForge CL-23986860", true),
++        new("23.20", "https://www.fortforge.co.uk/builds/47228000-d66b-4aa9-ab54-e5fa977a835e", "FortForge CL-23783097", true),
++        new("23.10", "https://www.fortforge.co.uk/builds/03fbcdfa-a1bd-4fbb-a5b0-ef71f115fdf5", "FortForge CL-23443094", true),
++        new("23.10", "https://www.fortforge.co.uk/builds/f7a013b2-dfe8-4a0b-93ee-121292909616", "FortForge CL-23572221", true),
++        new("23.00", "https://www.fortforge.co.uk/builds/248a6df9-b267-4764-ad1c-ccae191f2c26", "FortForge CL-23344627", true),
++        new("22.40", "https://www.fortforge.co.uk/builds/9e2cc16b-f841-4639-81c7-4621ddfb2253", "FortForge CL-23070899", true),
++        new("22.30", "https://www.fortforge.co.uk/builds/d291143e-8aa6-4a97-8d30-5251b4f1bfe2", "FortForge CL-22803135", true),
++        new("22.20", "https://www.fortforge.co.uk/builds/701c337f-ca7c-4af8-9e51-6ff31b261486", "FortForge CL-22600409", true),
++        new("22.10", "https://www.fortforge.co.uk/builds/0c9fda6f-83d9-4253-b180-4bae6d3b7ee3", "FortForge CL-22429549", true),
++        new("22.00", "https://www.fortforge.co.uk/builds/1701749a-ad06-4b2c-ae11-d8f60a47c6f6", "FortForge CL-22149829", true),
++        new("21.51", "https://www.fortforge.co.uk/builds/7e6e9462-8639-4f9c-b7fd-ba0c0b6b5e70", "FortForge CL-21735703", true),
++        new("21.50", "https://www.fortforge.co.uk/builds/f1937854-2514-4236-a46a-550c292e8b2a", "FortForge CL-21657658", true),
++        new("21.40", "https://www.fortforge.co.uk/builds/322311a9-7367-4815-8004-44f66bd75e1b", "FortForge CL-21407327", true),
++        new("21.30", "https://www.fortforge.co.uk/builds/635d0bf6-7718-48e1-8106-a80ec93cabb4", "FortForge CL-21155462", true),
++        new("21.20", "https://www.fortforge.co.uk/builds/2f0b18cd-0d8d-4db5-9209-365dd94d0bb3", "FortForge CL-20978394", true),
++        new("21.20", "https://www.fortforge.co.uk/builds/71cf07a7-646d-4f90-9aa2-eaa89279f8ae", "FortForge CL-21035704", true),
++        new("21.10", "https://www.fortforge.co.uk/builds/a9a05db2-cbfb-4afc-af95-8668eb826108", "FortForge CL-20696680", true),
++        new("21.00", "https://www.fortforge.co.uk/builds/88edcc2c-a903-42fa-9a2e-67258a7762c7", "FortForge CL-20463113", true),
++        new("20.40", "https://www.fortforge.co.uk/builds/4a69e13d-476f-49cf-9c3f-2c8f565d294b", "FortForge CL-20244966", true),
++        new("20.30", "https://www.fortforge.co.uk/builds/0be5be95-64b4-49e3-be60-c63766baa022", "FortForge CL-19950687", true),
++        new("20.20", "https://www.fortforge.co.uk/builds/e8d63af9-4484-4b5e-b9ae-52b6c6bf99d5", "FortForge CL-19751212", true),
++        new("20.10", "https://www.fortforge.co.uk/builds/6597ec1d-38aa-4ffe-a9cb-d57a046a3870", "FortForge CL-19598943", true),
++        new("20.00", "https://www.fortforge.co.uk/builds/309e6724-aeda-4495-865d-8d18d1526ff0", "FortForge CL-19458861", true),
++        new("19.40", "https://www.fortforge.co.uk/builds/148c15f5-6ce8-4ee6-9655-501f691792c1", "FortForge CL-19215531", true),
++        new("19.30", "https://www.fortforge.co.uk/builds/a5251910-d1bc-4a43-9aa8-55b8ec8614e1", "FortForge CL-19027703", true),
++        new("19.20", "https://www.fortforge.co.uk/builds/ba41c36d-6b87-4776-ba21-02a87471b4cb", "FortForge CL-18775446", true),
++        new("19.10", "https://www.fortforge.co.uk/builds/bb7ccb3a-fead-4ccd-85e8-9020231b7639", "FortForge CL-18675304", true),
++        new("19.01", "https://www.fortforge.co.uk/builds/2442fe98-cbbb-45c0-8db0-927c9d706d22", "FortForge CL-18489740", true),
++        new("19.00", "https://www.fortforge.co.uk/builds/91c64a49-cb15-404f-83a0-704ed85f98ba", "FortForge CL-18335626", true),
 +        new("26.30", "https://r2.ploosh.dev/26.30.zip", "ploosh.dev"),
 +        new("25.11", "https://r2.ploosh.dev/25.11.zip", "ploosh.dev"),
 +        new("24.20", "https://r2.ploosh.dev/24.20.zip", "ploosh.dev"),
@@ -51,10 +119,10 @@ index f6caada..053fcef 100644
      }
 diff --git a/launcher/Emilyfn.Core/BuildDownloader.cs b/launcher/Emilyfn.Core/BuildDownloader.cs
 new file mode 100644
-index 0000000..482799a
+index 0000000..ac34d78
 --- /dev/null
 +++ b/launcher/Emilyfn.Core/BuildDownloader.cs
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,182 @@
 +using System.Diagnostics;
 +using System.IO.Compression;
 +using System.Net;
@@ -85,9 +153,13 @@ index 0000000..482799a
 +            throw new ArgumentException("Paste a direct HTTPS ZIP download link without a username, password or fragment.");
 +        return uri;
 +    }
-+    public async Task<GameInstall> InstallAsync(string url, string parent, string release, string checksum, IProgress<DownloadProgress>? progress, CancellationToken token)
++    public Task<GameInstall> InstallAsync(string url, string parent, string release, string checksum, IProgress<DownloadProgress>? progress, CancellationToken token)
 +    {
 +        var uri = ValidateUrl(url.Trim());
++        return InstallWithProviderAsync(parent, release, checksum, (zip, ct) => DownloadAsync(uri, zip, progress, ct), progress, token);
++    }
++    public async Task<GameInstall> InstallWithProviderAsync(string parent, string release, string checksum, Func<string, CancellationToken, Task> acquire, IProgress<DownloadProgress>? progress, CancellationToken token)
++    {
 +        if (!Releases.Valid(release)) throw new ArgumentException("Enter a release between 19.xx and 30.xx, such as 30.40.");
 +        checksum = checksum.Trim();
 +        if (checksum.Length > 0 && !Regex.IsMatch(checksum, "^[a-fA-F0-9]{64}$")) throw new ArgumentException("SHA256 must be 64 hexadecimal characters, or leave it empty.");
@@ -101,7 +173,15 @@ index 0000000..482799a
 +        try
 +        {
 +            var zip = Path.Combine(work, "build.zip");
-+            await DownloadAsync(uri, zip, checksum, progress, token);
++            await acquire(zip, token);
++            if (new FileInfo(zip).Length is 0 or > Limit) throw new InvalidDataException("The archive is empty or exceeds the 512 GiB limit.");
++            if (checksum.Length > 0)
++            {
++                progress?.Report(new("Verifying SHA256", 0, null));
++                await using var verify = File.OpenRead(zip);
++                var digest = await SHA256.HashDataAsync(verify, token);
++                if (!Convert.ToHexString(digest).Equals(checksum, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("SHA256 mismatch. The downloaded archive was discarded.");
++            }
 +            var unpacked = Path.Combine(work, "unpacked");
 +            await ExtractAsync(zip, unpacked, progress, token);
 +            progress?.Report(new("Checking build", 0, null));
@@ -116,9 +196,17 @@ index 0000000..482799a
 +            return new(Guid.NewGuid().ToString("N"), destination, found.Release);
 +        }
 +        catch (HttpRequestException) { throw new IOException("Download failed. Check the direct ZIP link and your connection, then retry."); }
-+        finally { if (Directory.Exists(work)) Directory.Delete(work, true); }
++        finally
++        {
++            for (var attempt = 0; Directory.Exists(work); attempt++)
++            {
++                try { Directory.Delete(work, true); break; }
++                catch (IOException) when (attempt < 9) { await Task.Delay(200); }
++                catch (UnauthorizedAccessException) when (attempt < 9) { await Task.Delay(200); }
++            }
++        }
 +    }
-+    private async Task DownloadAsync(Uri uri, string file, string checksum, IProgress<DownloadProgress>? progress, CancellationToken token)
++    private async Task DownloadAsync(Uri uri, string file, IProgress<DownloadProgress>? progress, CancellationToken token)
 +    {
 +        HttpResponseMessage? response = null;
 +        try
@@ -147,7 +235,6 @@ index 0000000..482799a
 +            CheckSpace(file, total ?? 256L * 1024 * 1024);
 +            await using var input = await response.Content.ReadAsStreamAsync(token);
 +            await using var output = new FileStream(file, FileMode.CreateNew, FileAccess.Write, FileShare.None, 131072, true);
-+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
 +            var buffer = new byte[131072]; long received = 0; var clock = Stopwatch.StartNew(); long last = -250;
 +            progress?.Report(new("Downloading", 0, total));
 +            while (true)
@@ -159,12 +246,10 @@ index 0000000..482799a
 +                if (count == 0) break;
 +                received += count;
 +                if (received > Limit || total is not null && received > total) throw new IOException("The download exceeds its expected size.");
-+                hash.AppendData(buffer, 0, count);
 +                await output.WriteAsync(buffer.AsMemory(0, count), token);
 +                if (clock.ElapsedMilliseconds - last >= 250) { progress?.Report(new("Downloading", received, total, received / Math.Max(.001, clock.Elapsed.TotalSeconds))); last = clock.ElapsedMilliseconds; }
 +            }
 +            if (total is not null && received != total) throw new IOException("The download was incomplete. Retry the download.");
-+            if (checksum.Length > 0 && !Convert.ToHexString(hash.GetHashAndReset()).Equals(checksum, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("SHA256 mismatch. The downloaded archive was discarded.");
 +        }
 +        finally { response?.Dispose(); }
 +    }
@@ -221,10 +306,10 @@ index 0000000..482799a
 +    public void Dispose() => http.Dispose();
 +}
 diff --git a/launcher/README.md b/launcher/README.md
-index 5833f91..49ee0cd 100644
+index 5833f91..a1de3af 100644
 --- a/launcher/README.md
 +++ b/launcher/README.md
-@@ -93,3 +93,41 @@ IPC protocol: https://docs.discord.com/developers/topics/rpc .
+@@ -93,3 +93,60 @@ IPC protocol: https://docs.discord.com/developers/topics/rpc .
  The Windows build tests this protocol with a local synthetic named-pipe server,
  including fragmented frames, PING/PONG, reconnect and presence clearing. A real
  Discord application ID/account is needed to verify the live profile display.
@@ -263,9 +348,28 @@ index 5833f91..49ee0cd 100644
 +Source and credit: https://github.com/llamaqwerty/fortnite-builds-archive (read
 +2026-09-16). Links belong to third-party hosts and may expire. No checksum was
 +published in the source table; optional manual SHA256 verification remains available.
-+The catalog intentionally excludes sharing pages, RAR/7z and a mislabeled 19.00 row
-+that pointed to 19.01. 30.40 is shown as unavailable because no direct ZIP source was
-+found. A download link is not a guarantee of gameplay compatibility or file contents.
++The direct-link catalog excludes sharing pages, RAR/7z and a mislabeled 19.00 row
++that pointed to 19.01. A download link is not a guarantee of gameplay compatibility
++or file contents.
++
++### FortForge catalog
++
++FortForge build detail links for available PC releases 19.xx–30.xx are also included,
++with changelist numbers to distinguish variants. These links were read from the
++public chapter/season pages at https://www.fortforge.co.uk/builds on 2026-09-16.
++FortForge **does list 30.40**; the other archive's unavailable entry is superseded.
++Select a FortForge entry and Download and install. Emilyfn opens FortForge inside a
++WebView2 window, uses its normal Download Build button and queue, and captures the
++ZIP into the install staging folder. If the automatic button click is too early,
++click Download Build in that window. Closing it cancels the transfer.
++
++Requires Microsoft Edge WebView2 Runtime (separate from the bundled .NET runtime).
++If missing, install it from https://developer.microsoft.com/microsoft-edge/webview2.
++FortForge controls availability, queue timing and file format. No temporary queue
++URLs or tokens are stored in the catalog. RAR/7z downloads are rejected with an
++explanation. Only a completed ZIP that passes installation validation is registered.
++The FortForge UI and its 30.40 queue were observed live; a complete 101 GB game
++transfer and live Windows WebView2 integration have not been validated here.
 diff --git a/launcher/build.ps1 b/launcher/build.ps1
 index 77d8f4c..d6f36d1 100644
 --- a/launcher/build.ps1
