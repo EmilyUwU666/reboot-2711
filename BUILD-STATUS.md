@@ -1,24 +1,34 @@
 # Emilyfn launcher and Fortnite component build status
 
-## Emilyfn 0.1.0 — compiled Windows launcher with Emily's logo
+## Emilyfn 0.2.0 — automatic build detection and Discord Rich Presence
 
 The custom Emilyfn launcher is built and packaged with the existing backend,
 its Node runtime, the .NET desktop runtime, and all three Seasons 19–30 DLLs.
 
-- **Windows download:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35068680512/artifacts/10435123824
-- **Corresponding source:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35068680512/artifacts/10435650520
-- **Compiled UI preview:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35068680512/artifacts/10435034230
-- **Successful build:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35068680512
-- Workflow commit: `e4053ab1329122956de0fda62e6e896428ac49ef`
-- Windows package: 114,588,640 bytes; ZIP SHA256 `e6b0fc7eda2c407d80538225c1fbbd9a59e376fdabb6e33587e5a1ead657b531`.
-- Emilyfn.exe: self-contained Windows x64, 140,342,879 bytes; SHA256 `aebcc0b5ad5793d3b216e503a54fa1a39d542adea8bf30a119337b08cf1373aa`.
-- Source package ZIP SHA256: `9ce794f2262397c1ef5b358de7f839d63ca7c4c02a6166e9b0a91fa156d28e96`.
+- **Windows download:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35070250967/artifacts/10435927666
+- **Corresponding source:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35070250967/artifacts/10435668258
+- **Compiled UI preview:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35070250967/artifacts/10436465016
+- **Successful build:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35070250967
+- Workflow commit: `5ae2ea684c749692d7850adb7817fad70c825478`
+- Windows package: 114,604,083 bytes; ZIP SHA256 `e3088730227a329bb9830c5bb1d3f09cf86353a63b192c7d08f22e0aabcd3aa5`.
+- Emilyfn.exe: self-contained Windows x64, 140,387,935 bytes; SHA256 `448610fd938493826f763c17971bcef79acd56c8d31cc930439dc943b15b2953`.
+- Source package ZIP SHA256: `89ad839dc308b59388e48204b1333ba6b648775a8e0ee5ff209da601a0f1fc75`.
 
 Logo update, 2026-09-16: Emily's supplied artwork is embedded as the Windows
 executable/window icon at 16, 24, 32, 48, 64, 128 and 256 pixels. The in-app badge
-uses a separate high-resolution image. File version: `0.1.0.1`. The uploaded JPEG
+uses a separate high-resolution image. File version: `0.2.0.0`. The uploaded JPEG
 is preserved exactly in the source, with only its surrounding white margins
 excluded when fitting the icon. The compiled icon and WPF preview were inspected.
+
+Automatic detection runs on startup and is available under Library → Detect builds
+or Scan a folder. It reads Epic installation records and actual executable release
+tags, deduplicates builds and leaves ambiguous versions for manual selection.
+
+Discord Rich Presence is optional. Create an application named Emilyfn at
+https://discord.com/developers/applications, copy its public Application ID into
+Settings, enable presence and save. Keep Discord desktop open with activity sharing
+enabled. No bot token or client secret is required. Tests exercise a local mock
+Discord pipe, reconnects and clearing activity; live Discord presence is unverified.
 
 ### Setup
 
@@ -34,6 +44,25 @@ excluded when fitting the icon. The compiled icon and WPF preview were inspected
 No separate DLL selection or runtime installation is needed. Keep Emilyfn open
 while playing. Settings and diagnostic logs are under `%LOCALAPPDATA%\Emilyfn`.
 
+### LEGO Fortnite and Fortnite Festival request — not implemented
+
+The current package does not support these modes. Source review found the following
+concrete blockers; no playlist toggle or guessed map path has been shipped as support:
+
+- `Reboot2711/RuntimeProfile.h` routes 28.xx–30.xx hosts to `Helios_Terrain`.
+- `Erbium/Erbium/Public/Configuration.h` selects the Battle Royale Solo playlist.
+- `Erbium/FortniteGame/Private/FortGameMode.cpp` assumes Athena game state,
+  playlist, player spawning, inventory and replication behavior.
+- The inspected backend has no LEGO/Festival-specific implementation.
+
+Implementation needs an exact Chapter 5 build and its mode assets/reflection data,
+then mode-specific host startup, player spawning and backend contracts. LEGO world
+creation/save/reload and Festival stage/song/session behavior need separate runtime
+tests. First verify one release before extending to other Chapter 5 releases.
+No Chapter 5 executable, asset inventory or reflection dump was supplied here;
+the uploaded game logs concern the earlier 27.11 investigation. These modes remain
+unavailable, and support for 31.xx is outside the existing 19.xx–30.xx package.
+
 ### Behavior and validation
 
 - Custom WPF interface with Play, Library, Settings and Logs pages.
@@ -44,11 +73,13 @@ while playing. Settings and diagnostic logs are under `%LOCALAPPDATA%\Emilyfn`.
 - Startup timeouts, actual process exit codes and exported diagnostic ZIPs.
 - Stop controls only close processes owned by Emilyfn; a pre-existing compatible
   backend and unrelated processes are left running.
-- **69 checks passed on Windows**, including native x64 DLL loading with synthetic
+- **123 checks passed on Windows**, including native x64 DLL loading with synthetic
   fixtures, launch ordering, host UDP ownership, failure cleanup, log redaction,
   and the actual bundled backend's first start, stop, restart and data retention.
+  The new checks cover build scanning and Discord IPC.
+- Build succeeded with one nullable-analysis warning in path normalization.
 - The published executable ran its WPF preview successfully; the rendered UI was
-  visually inspected. Source patches reproduce all 26 launcher source files.
+  visually inspected. The Library and Settings previews were also inspected.
 
 **Runtime limit:** the included Seasons 19–30 game components remain experimental.
 The tests use a synthetic game process and do not establish Fortnite match
