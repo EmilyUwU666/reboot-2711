@@ -1,4 +1,5 @@
 name: Build Emilyfn Windows launcher
+# Rebuild Emilyfn 0.3.0 after FortForge byte-counter fix
 on:
   workflow_dispatch:
   push:
