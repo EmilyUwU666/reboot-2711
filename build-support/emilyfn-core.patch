@@ -122,6 +122,341 @@ index 0000000..153ee6a
 +        finally { gate.Release(); }
 +    }
 +}
+diff --git a/launcher/Emilyfn.Core/BuildDetector.cs b/launcher/Emilyfn.Core/BuildDetector.cs
+new file mode 100644
+index 0000000..f6caada
+--- /dev/null
++++ b/launcher/Emilyfn.Core/BuildDetector.cs
+@@ -0,0 +1,154 @@
++using System.Diagnostics;
++using System.Text;
++using System.Text.Json;
++using System.Collections.Concurrent;
++
++namespace Emilyfn.Core;
++
++public sealed record DetectionResult(IReadOnlyList<GameInstall> Builds, IReadOnlyList<string> Unknown, bool Incomplete, int Examined);
++public static class BuildDetector
++{
++    private static readonly ConcurrentDictionary<string, (long Length, DateTime Modified, string? Release)> cache = new(StringComparer.OrdinalIgnoreCase);
++    public static string NormalizeRoot(string path)
++    {
++        var root = Path.GetFullPath(path.Trim().Trim('"'));
++        if (File.Exists(root)) root = Path.GetDirectoryName(root)!;
++        if (Path.GetFileName(root).Equals("Win64", StringComparison.OrdinalIgnoreCase) && Path.GetFileName(Path.GetDirectoryName(root)).Equals("Binaries", StringComparison.OrdinalIgnoreCase)) root = Path.GetDirectoryName(Path.GetDirectoryName(root)!)!;
++        if (Path.GetFileName(root).Equals("FortniteGame", StringComparison.OrdinalIgnoreCase)) root = Path.GetDirectoryName(root)!;
++        return Path.TrimEndingDirectorySeparator(root);
++    }
++    public static string? ReadRelease(string executable, CancellationToken cancellation = default)
++    {
++        var file = new FileInfo(executable);
++        if (cache.TryGetValue(file.FullName, out var saved) && saved.Length == file.Length && saved.Modified == file.LastWriteTimeUtc) return saved.Release;
++        var info = FileVersionInfo.GetVersionInfo(executable);
++        var release = Releases.FromMetadata(info.ProductVersion, info.FileVersion);
++        if (release is null)
++        {
++            using var stream = new FileStream(executable, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1024 * 1024, FileOptions.SequentialScan);
++            release = ReadEmbeddedRelease(stream, cancellation);
++        }
++        cache[file.FullName] = (file.Length, file.LastWriteTimeUtc, release);
++        return release;
++    }
++    public static string? ReadEmbeddedRelease(Stream stream, CancellationToken cancellation = default)
++    {
++        // Search exact compiled branch tags, never engine version numbers or folder names.
++        if (stream.CanSeek && stream.Length > 1024L * 1024 * 1024) return null;
++        var buffer = new byte[1024 * 1024 + 256];
++        var ascii = Encoding.ASCII.GetBytes("++Fortnite+Release-");
++        var wide = Encoding.Unicode.GetBytes("++Fortnite+Release-");
++        var releases = new HashSet<string>(StringComparer.Ordinal);
++        var carry = 0;
++        while (true)
++        {
++            cancellation.ThrowIfCancellationRequested();
++            var read = stream.Read(buffer, carry, buffer.Length - carry);
++            if (read == 0) break;
++            var count = carry + read;
++            Find(buffer.AsSpan(0, count), ascii, Encoding.ASCII, releases);
++            Find(buffer.AsSpan(0, count), wide, Encoding.Unicode, releases);
++            if (releases.Count > 1) return null; // Conflicting tags require manual verification.
++            carry = Math.Min(256, count);
++            buffer.AsSpan(count - carry, carry).CopyTo(buffer);
++        }
++        return releases.Count == 1 ? releases.Single() : null;
++    }
++    private static void Find(ReadOnlySpan<byte> data, byte[] marker, Encoding encoding, HashSet<string> results)
++    {
++        while (data.Length >= marker.Length + 7)
++        {
++            var offset = data.IndexOf(marker);
++            if (offset < 0) return;
++            var available = data.Length - offset;
++            // Include a trailing character to reject truncated or longer version numbers.
++            var needed = marker.Length + (encoding == Encoding.Unicode ? 14 : 7);
++            if (available >= needed)
++            {
++                var release = Releases.FromMetadata(encoding.GetString(data.Slice(offset, needed)));
++                if (release is not null) results.Add(release);
++            }
++            data = data[(offset + marker.Length)..];
++        }
++    }
++    public static IEnumerable<string> ManifestRoots(string manifestDirectory, string installedFile)
++    {
++        var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        string[] files;
++        try { files = Directory.GetFiles(manifestDirectory, "*.item"); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { files = []; }
++        foreach (var file in files.Append(installedFile))
++        {
++            try
++            {
++                if (!File.Exists(file) || new FileInfo(file).Length > 4 * 1024 * 1024) continue;
++                using var doc = JsonDocument.Parse(File.ReadAllText(file));
++                var entries = doc.RootElement.TryGetProperty("InstallationList", out var list) && list.ValueKind == JsonValueKind.Array ? list.EnumerateArray().ToArray() : [doc.RootElement];
++                foreach (var item in entries)
++                {
++                    if (item.ValueKind != JsonValueKind.Object) continue;
++                    if (item.TryGetProperty("InstallLocation", out var location) && location.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(location.GetString())) found.Add(location.GetString()!);
++                }
++            }
++            catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException) { }
++        }
++        return found;
++    }
++    public static IReadOnlyList<string> DefaultRoots(IEnumerable<GameInstall> saved)
++    {
++        var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        var data = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
++        foreach (var root in ManifestRoots(Path.Combine(data,"Epic","EpicGamesLauncher","Data","Manifests"), Path.Combine(data,"Epic","UnrealEngineLauncher","LauncherInstalled.dat"))) roots.Add(root);
++        foreach (var build in saved) { roots.Add(build.Directory); if (Path.GetDirectoryName(build.Directory) is { } parent && Path.GetPathRoot(parent) != parent) roots.Add(parent); }
++        foreach (var drive in DriveInfo.GetDrives())
++        {
++            try
++            {
++                if (drive.DriveType != DriveType.Fixed || !drive.IsReady) continue;
++                foreach (var folder in new[] { "Fortnite", "Fortnite Builds", "FortniteBuilds", "Games", "Builds", "Epic Games", @"Program Files\Epic Games", @"Program Files (x86)\Epic Games" }) roots.Add(Path.Combine(drive.RootDirectory.FullName, folder));
++            }
++            catch (IOException) { }
++        }
++        return roots.ToArray();
++    }
++    public static DetectionResult Scan(IEnumerable<string> roots, CancellationToken cancellation, Action<string>? progress = null, int maxDepth = 4, int maxDirectories = 12000)
++    {
++        var found = new List<GameInstall>(); var unknown = new List<string>();
++        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        var queue = new Queue<(string Path, int Depth)>();
++        foreach (var root in roots)
++        {
++            try { queue.Enqueue((NormalizeRoot(root), 0)); } catch (Exception e) when (e is ArgumentException or NotSupportedException or IOException) { }
++        }
++        var examined = 0; var incomplete = false;
++        try
++        {
++            while (queue.Count > 0)
++            {
++                cancellation.ThrowIfCancellationRequested();
++                if (examined >= maxDirectories) { incomplete = true; break; }
++                var (directory, depth) = queue.Dequeue();
++                if (!seen.Add(directory)) continue;
++                try
++                {
++                    var attributes = File.GetAttributes(directory);
++                    if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.System)) != 0) continue;
++                    examined++;
++                    var exe = Path.Combine(directory,"FortniteGame","Binaries","Win64","FortniteClient-Win64-Shipping.exe");
++                    if (File.Exists(exe))
++                    {
++                        progress?.Invoke("Checking " + directory);
++                        var inspected = Releases.Inspect(directory, cancellation);
++                        if (inspected.Release is { } release) found.Add(new(Guid.NewGuid().ToString("N"), inspected.Root, release));
++                        else unknown.Add(inspected.Root);
++                        continue; // Do not descend into game content.
++                    }
++                    if (depth >= maxDepth) continue;
++                    foreach (var child in Directory.GetDirectories(directory)) queue.Enqueue((child,depth+1));
++                }
++                catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException) { }
++            }
++        }
++        catch (OperationCanceledException) { incomplete = true; }
++        return new(found, unknown, incomplete, examined);
++    }
++}
+diff --git a/launcher/Emilyfn.Core/DiscordPresence.cs b/launcher/Emilyfn.Core/DiscordPresence.cs
+new file mode 100644
+index 0000000..a97293a
+--- /dev/null
++++ b/launcher/Emilyfn.Core/DiscordPresence.cs
+@@ -0,0 +1,169 @@
++using System.Buffers.Binary;
++using System.IO.Pipes;
++using System.Text.Json;
++using System.Text.RegularExpressions;
++
++namespace Emilyfn.Core;
++
++public sealed record PresenceActivity(string Details, string State, long Started);
++public sealed class DiscordPresence : IAsyncDisposable
++{
++    private readonly string[] pipes;
++    private readonly TimeSpan interval;
++    private readonly TimeSpan retry;
++    private readonly SemaphoreSlim configureGate = new(1,1);
++    private readonly SemaphoreSlim writeGate = new(1,1);
++    private CancellationTokenSource? cancellation;
++    private Task worker = Task.CompletedTask;
++    private PresenceActivity activity = new("Emilyfn launcher", "Browsing builds", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
++    public string Status { get; private set; } = "Disabled";
++    public event Action<string>? Changed;
++    public DiscordPresence(IEnumerable<string>? pipeNames = null, TimeSpan? updateInterval = null, TimeSpan? retryInterval = null)
++    {
++        pipes = (pipeNames ?? Enumerable.Range(0,10).Select(i => "discord-ipc-" + i)).ToArray();
++        interval = updateInterval ?? TimeSpan.FromSeconds(15);
++        retry = retryInterval ?? TimeSpan.FromSeconds(15);
++    }
++    public static bool ValidApplicationId(string id) => Regex.IsMatch(id, @"^[1-9][0-9]{16,19}$", RegexOptions.CultureInvariant);
++    public void Update(PresenceActivity value) => Volatile.Write(ref activity, value);
++    public static PresenceActivity Describe(GameInstall? selected, SessionStatus host, SessionStatus client, long started)
++    {
++        var clientBusy = client.Stage is not (LaunchStage.Idle or LaunchStage.Failed);
++        var hostBusy = host.Stage is not (LaunchStage.Idle or LaunchStage.Failed);
++        var release = clientBusy ? client.Release : hostBusy ? host.Release : selected?.Release;
++        var details = release is not null && Releases.Valid(release) ? "Fortnite " + release : "Emilyfn launcher";
++        var state = clientBusy ? client.Stage == LaunchStage.Active ? "Client active" : "Starting client"
++            : hostBusy ? host.Stage == LaunchStage.Listening ? "Hosting a local server" : "Starting host" : "Browsing builds";
++        return new(details,state,started);
++    }
++    private void Set(string value) { if (Status == value) return; Status=value; Changed?.Invoke(value); }
++    public async Task ConfigureAsync(bool enabled, string applicationId)
++    {
++        await configureGate.WaitAsync();
++        try
++        {
++            await StopAsync();
++            if (!enabled) { Set("Disabled"); return; }
++            if (!ValidApplicationId(applicationId)) { Set("Enter a valid Discord Application ID"); return; }
++            cancellation = new();
++            worker = RunAsync(applicationId, cancellation.Token);
++        }
++        finally { configureGate.Release(); }
++    }
++    private async Task StopAsync()
++    {
++        cancellation?.Cancel();
++        try { await worker; } catch (OperationCanceledException) { }
++        cancellation?.Dispose(); cancellation=null;
++    }
++    private async Task<NamedPipeClientStream> ConnectAsync(CancellationToken token)
++    {
++        foreach (var name in pipes)
++        {
++            token.ThrowIfCancellationRequested();
++            var pipe = new NamedPipeClientStream(".",name,PipeDirection.InOut,PipeOptions.Asynchronous);
++            try { await pipe.ConnectAsync(180,token); return pipe; }
++            catch (Exception e) when (e is TimeoutException or IOException or UnauthorizedAccessException) { pipe.Dispose(); }
++            catch { pipe.Dispose(); throw; }
++        }
++        throw new IOException("Discord desktop is not running.");
++    }
++    private async Task RunAsync(string id, CancellationToken token)
++    {
++        while (!token.IsCancellationRequested)
++        {
++            NamedPipeClientStream? pipe=null;
++            using var session = CancellationTokenSource.CreateLinkedTokenSource(token);
++            Task? reader=null;
++            var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
++            try
++            {
++                Set("Connecting to Discord desktop");
++                pipe = await ConnectAsync(token);
++                reader = ReceiveAsync(pipe, ready, session.Token);
++                await SendAsync(pipe,0,JsonSerializer.SerializeToUtf8Bytes(new { v=1, client_id=id }),token);
++                var first = await Task.WhenAny(ready.Task, reader, Task.Delay(TimeSpan.FromSeconds(5),token));
++                if (first == reader) await reader;
++                if (!ready.Task.IsCompletedSuccessfully) throw new IOException("Discord did not accept the application ID.");
++                while (!token.IsCancellationRequested)
++                {
++                    var snapshot=Volatile.Read(ref activity);
++                    await SendAsync(pipe,1,ActivityPayload(snapshot),token);
++                    var delay=Task.Delay(interval,token);
++                    if (await Task.WhenAny(reader,delay)==reader) { await reader; throw new IOException("Discord disconnected."); }
++                    await delay;
++                }
++            }
++            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
++            catch (Exception e) when (e is IOException or TimeoutException or JsonException or UnauthorizedAccessException or InvalidOperationException)
++            { Set("Unavailable — open Discord or check the Application ID"); }
++            finally
++            {
++                if (pipe is { IsConnected:true } && ready.Task.IsCompletedSuccessfully)
++                {
++                    using var clearTimeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(700));
++                    try { await SendAsync(pipe,1,ActivityPayload(null),clearTimeout.Token); }
++                    catch (Exception e) when (e is IOException or OperationCanceledException or ObjectDisposedException or InvalidOperationException) { }
++                }
++                session.Cancel(); pipe?.Dispose();
++                if (reader is not null) { try { await reader; } catch (Exception e) when (e is IOException or OperationCanceledException or JsonException or ObjectDisposedException or InvalidOperationException) { } }
++            }
++            if (!token.IsCancellationRequested)
++            {
++                try { await Task.Delay(retry,token); } catch (OperationCanceledException) { }
++            }
++        }
++    }
++    public static byte[] ActivityPayload(PresenceActivity? value)
++    {
++        object? activity = value is null ? null : new { details=value.Details, state=value.State, timestamps=new { start=value.Started } };
++        return JsonSerializer.SerializeToUtf8Bytes(new { cmd="SET_ACTIVITY", args=new { pid=Environment.ProcessId, activity }, nonce=Guid.NewGuid().ToString("N") });
++    }
++    private async Task ReceiveAsync(Stream pipe, TaskCompletionSource ready, CancellationToken token)
++    {
++        while (true)
++        {
++            var (opcode,payload) = await ReadFrameAsync(pipe,token);
++            if (opcode==2) throw new IOException("Discord closed RPC.");
++            if (opcode==3) { await SendAsync(pipe,4,payload,token); continue; }
++            if (opcode!=1) continue;
++            using var document=JsonDocument.Parse(payload);
++            var root=document.RootElement;
++            if (root.TryGetProperty("evt",out var ev) && ev.ValueKind==JsonValueKind.String)
++            {
++                if (ev.GetString()=="ERROR") throw new IOException("Discord rejected presence.");
++                if (ev.GetString()=="READY") ready.TrySetResult();
++            }
++            if (root.TryGetProperty("cmd",out var cmd) && cmd.GetString()=="SET_ACTIVITY") Set("Connected");
++        }
++    }
++    private async Task SendAsync(Stream pipe,int opcode,byte[] payload,CancellationToken token)
++    {
++        await writeGate.WaitAsync(token);
++        try { await WriteFrameAsync(pipe,opcode,payload,token); }
++        finally { writeGate.Release(); }
++    }
++    public static async Task WriteFrameAsync(Stream pipe,int opcode,byte[] payload,CancellationToken token)
++    {
++        if (payload.Length>1024*1024) throw new InvalidDataException("Discord frame is too large.");
++        var header=new byte[8];
++        BinaryPrimitives.WriteInt32LittleEndian(header,opcode);
++        BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(4),payload.Length);
++        await pipe.WriteAsync(header,token); await pipe.WriteAsync(payload,token); await pipe.FlushAsync(token);
++    }
++    public static async Task<(int Opcode,byte[] Payload)> ReadFrameAsync(Stream pipe,CancellationToken token)
++    {
++        var header=new byte[8]; await pipe.ReadExactlyAsync(header,token);
++        var opcode=BinaryPrimitives.ReadInt32LittleEndian(header);
++        var length=BinaryPrimitives.ReadInt32LittleEndian(header.AsSpan(4));
++        if (length<0 || length>1024*1024) throw new InvalidDataException("Invalid Discord frame length.");
++        var payload=new byte[length]; await pipe.ReadExactlyAsync(payload,token);
++        return (opcode,payload);
++    }
++    public async ValueTask DisposeAsync()
++    {
++        await configureGate.WaitAsync();
++        try { await StopAsync(); Set("Disabled"); }
++        finally { configureGate.Release(); }
++    }
++}
 diff --git a/launcher/Emilyfn.Core/Emilyfn.Core.csproj b/launcher/Emilyfn.Core/Emilyfn.Core.csproj
 new file mode 100644
 index 0000000..9a6c00c
@@ -192,7 +527,7 @@ index 0000000..2c14539
 +}
 diff --git a/launcher/Emilyfn.Core/LauncherEngine.cs b/launcher/Emilyfn.Core/LauncherEngine.cs
 new file mode 100644
-index 0000000..5a6a95c
+index 0000000..796531e
 --- /dev/null
 +++ b/launcher/Emilyfn.Core/LauncherEngine.cs
 @@ -0,0 +1,265 @@
@@ -251,7 +586,7 @@ index 0000000..5a6a95c
 +    private void State(Session session, LaunchStage stage, string detail)
 +    {
 +        if (!sessions.TryGetValue(session.Role, out var current) || !ReferenceEquals(current, session)) return;
-+        StatusChanged?.Invoke(new(session.Role, stage, detail, session.Process?.Id));
++        StatusChanged?.Invoke(new(session.Role, stage, detail, session.Process?.Id, session.Install.Release));
 +        Log($"{session.Role}: {detail}");
 +    }
 +    public async Task PlayAsync(GameInstall install, LauncherSettings settings)
@@ -282,7 +617,7 @@ index 0000000..5a6a95c
 +        {
 +            await launchGate.WaitAsync(token); gateHeld = true;
 +            foreach (var other in sessions.Values) LaunchProtocol.RequireMatching(session.Install, other.Install);
-+            var inspected = Releases.Inspect(session.Install.Directory);
++            var inspected = await Task.Run(() => Releases.Inspect(session.Install.Directory, token), token);
 +            if (inspected.Release is not null && inspected.Release != session.Install.Release) throw new InvalidOperationException("The executable metadata differs from the saved release. Remove and add this installation again.");
 +            if (compatibility.Length == 0) throw new FileNotFoundException("Compatibility settings are missing. Extract the full Emilyfn package.");
 +            var dllRoot = Path.Combine(resources, "dlls");
@@ -463,10 +798,10 @@ index 0000000..5a6a95c
 +}
 diff --git a/launcher/Emilyfn.Core/Models.cs b/launcher/Emilyfn.Core/Models.cs
 new file mode 100644
-index 0000000..96892f6
+index 0000000..0e06867
 --- /dev/null
 +++ b/launcher/Emilyfn.Core/Models.cs
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,111 @@
 +using System.Diagnostics;
 +using System.Text.Json;
 +using System.Text.RegularExpressions;
@@ -481,7 +816,7 @@ index 0000000..96892f6
 +    public string Island => Releases.Island(Release);
 +    public string Executable => Path.Combine(Directory, "FortniteGame", "Binaries", "Win64", "FortniteClient-Win64-Shipping.exe");
 +}
-+public sealed record SessionStatus(GameRole Role, LaunchStage Stage, string Detail, int? Pid = null)
++public sealed record SessionStatus(GameRole Role, LaunchStage Stage, string Detail, int? Pid = null, string? Release = null)
 +{
 +    public bool Running => Pid is not null && Stage is not LaunchStage.Idle;
 +}
@@ -492,6 +827,9 @@ index 0000000..96892f6
 +    public string DisplayName { get; set; } = "Emily";
 +    public bool AutoHost { get; set; } = true;
 +    public bool HeadlessHost { get; set; } = true;
++    public bool AutoDetectBuilds { get; set; } = true;
++    public bool DiscordEnabled { get; set; }
++    public string DiscordApplicationId { get; set; } = "";
 +}
 +public static partial class Releases
 +{
@@ -515,17 +853,16 @@ index 0000000..96892f6
 +        var season = int.Parse(release[..2], System.Globalization.CultureInfo.InvariantCulture);
 +        return season <= 22 ? "Artemis" : season <= 26 ? "Asteria" : season == 27 ? "Athena" : "Helios";
 +    }
-+    public static (string Root, string? Release) Inspect(string directory)
++    public static (string Root, string? Release) Inspect(string directory, CancellationToken cancellation = default)
 +    {
-+        var root = Path.GetFullPath(directory);
++        var root = BuildDetector.NormalizeRoot(directory);
 +        var exe = Path.Combine(root, "FortniteGame", "Binaries", "Win64", "FortniteClient-Win64-Shipping.exe");
 +        if (!File.Exists(exe)) throw new IOException("Choose the Fortnite folder containing FortniteGame and Engine.");
 +        PeImage.RequireX64(exe, false);
 +        var paks = Path.Combine(root, "FortniteGame", "Content", "Paks");
 +        if (!System.IO.Directory.Exists(paks) || !System.IO.Directory.EnumerateFiles(paks).Any(p => Path.GetExtension(p) is ".pak" or ".utoc"))
 +            throw new IOException("The selected installation has no .pak or .utoc game content.");
-+        var info = FileVersionInfo.GetVersionInfo(exe);
-+        var release = FromMetadata(info.ProductVersion, info.FileVersion);
++        var release = BuildDetector.ReadRelease(exe, cancellation);
 +        if (release is not null && !Valid(release)) throw new InvalidOperationException($"Fortnite {release} is outside the experimental 19.xx-30.xx range.");
 +        return (root, release);
 +    }
@@ -1433,10 +1770,10 @@ index 0000000..6355917
 +Upstream notices and licenses remain with the bundled components. The .NET notices are available at https://github.com/dotnet/runtime/blob/main/THIRD-PARTY-NOTICES.TXT and https://github.com/dotnet/wpf/blob/main/THIRD-PARTY-NOTICES.txt .
 diff --git a/launcher/README.md b/launcher/README.md
 new file mode 100644
-index 0000000..c6c0a44
+index 0000000..5833f91
 --- /dev/null
 +++ b/launcher/README.md
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,95 @@
 +# Emilyfn
 +
 +A portable Windows x64 launcher made for Emily's local Fortnite setup.
@@ -1494,9 +1831,47 @@ index 0000000..c6c0a44
 +The script generates the icon and publishes a self-contained WPF executable. The workflow also builds small native test fixtures with the Visual C++ x64 toolchain and runs `Emilyfn.Tests`. Those fixtures test launcher mechanics; they contain no Fortnite code and are not included in the portable package.
 +
 +`PROVENANCE.md` identifies component source and build runs. `BUILD-INFO.txt` in the portable package records the actual compiler/runtime and artifact hashes. The source artifact includes the launcher source and the corresponding existing component source archive. See `LICENSE` and component licenses for redistribution terms.
++
++## Automatic build detection (0.2.0)
++
++Emilyfn checks Epic installation records, common game folders on fixed drives,
++and existing library locations at startup. **Library → Detect builds** repeats
++that search. **Scan a folder…** checks a custom builds directory. Validated
++19.xx–30.xx installations are added without duplicates.
++
++Detection reads executable version metadata first, then compiled ASCII/UTF-16
++Fortnite branch tags when needed. Engine versions and folder names are never used
++as Fortnite release numbers. Conflicting or missing branch tags require manual
++release entry. Unsupported releases are skipped. Scans do not follow junctions,
++are limited to four nested directory levels and 12,000 directories, and have a
++45-second cancellation budget. Cancel retains results already found.
++
++## Discord Rich Presence (0.2.0)
++
++1. Open https://discord.com/developers/applications and create your own application
++   named **Emilyfn**, or use an existing Emilyfn application.
++2. Copy its **Application ID** into **Settings → Discord Rich Presence**.
++3. Enable **Show my Emilyfn activity on Discord**, then **Save preferences**.
++4. Keep the Discord desktop app open and enable activity sharing in Discord.
++
++No application ID is invented or borrowed. Rich Presence stays disabled until
++configured; no bot token, client secret or Discord password is required.
++Discord's application name/icon come from that application in the Developer
++Portal, so upload your logo there for matching Discord branding.
++
++Presence shows the actual active build and launcher state (browsing, starting,
++client active, or hosting), with elapsed launcher time. It does not infer that a
++match started from a client initialization signal. Paths, credentials and logs are
++not shared. Updates are limited to once per 15 seconds, reconnect automatically,
++and clear when disabled or when Emilyfn closes. It uses Discord's local desktop
++IPC protocol: https://docs.discord.com/developers/topics/rpc .
++
++The Windows build tests this protocol with a local synthetic named-pipe server,
++including fragmented frames, PING/PONG, reconnect and presence clearing. A real
++Discord application ID/account is needed to verify the live profile display.
 diff --git a/launcher/build.ps1 b/launcher/build.ps1
 new file mode 100644
-index 0000000..39576d5
+index 0000000..77d8f4c
 --- /dev/null
 +++ b/launcher/build.ps1
 @@ -0,0 +1,56 @@
@@ -1542,7 +1917,7 @@ index 0000000..39576d5
 +    }
 +}
 +@"
-+Emilyfn 0.1.0 - Windows x64
++Emilyfn 0.2.0 - Windows x64
 +SDK: $sdk
 +Published runtimes: $($runtime -join ', ')
 +Workflow commit: $env:GITHUB_SHA
