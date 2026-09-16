@@ -1,3 +1,88 @@
+diff --git a/launcher/Emilyfn.Tests/DownloadChecks.cs b/launcher/Emilyfn.Tests/DownloadChecks.cs
+new file mode 100644
+index 0000000..49c66ad
+--- /dev/null
++++ b/launcher/Emilyfn.Tests/DownloadChecks.cs
+@@ -0,0 +1,79 @@
++using Emilyfn.Core;
++using System.IO.Compression;
++using System.Net;
++using System.Security.Cryptography;
++
++internal static class DownloadChecks
++{
++    private sealed class Handler(Func<HttpRequestMessage, HttpResponseMessage> send) : HttpMessageHandler
++    {
++        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) { token.ThrowIfCancellationRequested(); return Task.FromResult(send(request)); }
++    }
++    private sealed class ProgressSink(Action<DownloadProgress> action) : IProgress<DownloadProgress> { public void Report(DownloadProgress progress) => action(progress); }
++    public static async Task<int> RunAsync(string root, string executable)
++    {
++        int checks = 0;
++        void Check(bool good, string name) { if (!good) throw new Exception(name); checks++; }
++        byte[] Zip(params (string Path, byte[] Content, int Attributes)[] entries)
++        {
++            using var data = new MemoryStream();
++            using (var zip = new ZipArchive(data, ZipArchiveMode.Create, true))
++                foreach (var entry in entries) { var item = zip.CreateEntry(entry.Path); item.ExternalAttributes = entry.Attributes; using var stream = item.Open(); stream.Write(entry.Content); }
++            return data.ToArray();
++        }
++        var exe = File.ReadAllBytes(executable);
++        var good = Zip(("wrapped/FortniteGame/Binaries/Win64/FortniteClient-Win64-Shipping.exe", exe, 0), ("wrapped/FortniteGame/Content/Paks/test.pak", new byte[] { 1 }, 0));
++        HttpResponseMessage Bytes(byte[] data) => new(HttpStatusCode.OK) { Content = new ByteArrayContent(data) };
++        string Parent() => Path.Combine(root, "download-" + Guid.NewGuid().ToString("N"));
++        async Task Reject(Func<HttpRequestMessage, HttpResponseMessage> send, string description, string release = "27.11", string checksum = "", IProgress<DownloadProgress>? progress = null, CancellationToken token = default)
++        {
++            var parent = Parent(); bool rejected = false;
++            using var downloader = new BuildDownloader(new Handler(send));
++            try { await downloader.InstallAsync("https://builds.example/build.zip?private=not-logged", parent, release, checksum, progress, token); }
++            catch (Exception error) when (error is IOException or ArgumentException or OperationCanceledException) { rejected = true; Check(!error.Message.Contains("not-logged"), "download errors do not expose signed links"); }
++            Check(rejected, description);
++            Check(!Directory.Exists(parent) || !Directory.EnumerateFileSystemEntries(parent).Any(), description + " leaves no partial install");
++        }
++        foreach (var url in new[] { "http://example.com/a.zip", "file:///C:/a.zip", "https://user:password@example.com/a.zip", "https://example.com/a.zip#fragment" })
++        {
++            bool rejected = false; try { BuildDownloader.ValidateUrl(url); } catch (ArgumentException) { rejected = true; } Check(rejected, "unsupported URL rejected");
++        }
++        Check(BuildDownloader.ValidateUrl("https://example.com/a?signature=value").Scheme == "https", "signed HTTPS URL accepted");
++        var parentGood = Parent(); var phases = new HashSet<string>();
++        using (var downloader = new BuildDownloader(new Handler(_ => Bytes(good))))
++        {
++            var install = await downloader.InstallAsync("https://builds.example/build.zip", parentGood, "27.11", Convert.ToHexString(SHA256.HashData(good)), new ProgressSink(p => phases.Add(p.Stage)), CancellationToken.None);
++            Check(install.Release == "27.11" && File.Exists(install.Executable), "verified archive installs nested root");
++            Check(phases.Contains("Downloading") && phases.Contains("Extracting") && phases.Contains("Installed"), "reports download and extraction progress");
++            Check(Directory.GetDirectories(parentGood).Length == 1, "successful install removes staging and ZIP");
++            var marker = Path.Combine(install.Directory, "keep.txt"); File.WriteAllText(marker, "keep");
++            bool blocked = false; try { await downloader.InstallAsync("https://builds.example/build.zip", parentGood, "27.11", "", null, CancellationToken.None); } catch (IOException) { blocked = true; }
++            Check(blocked && File.ReadAllText(marker) == "keep", "existing build never overwritten");
++        }
++        int requests = 0;
++        using (var downloader = new BuildDownloader(new Handler(_ => ++requests == 1 ? new(HttpStatusCode.Redirect) { Headers = { Location = new Uri("/final.zip", UriKind.Relative) } } : Bytes(good))))
++        {
++            var installed = await downloader.InstallAsync("https://builds.example/start", Parent(), "27.11", "", null, CancellationToken.None);
++            Check(requests == 2 && File.Exists(installed.Executable), "HTTPS relative redirect supported");
++        }
++        await Reject(_ => new(HttpStatusCode.Redirect) { Headers = { Location = new Uri("http://example.com/insecure.zip") } }, "HTTPS downgrade rejected");
++        await Reject(_ => new(HttpStatusCode.Redirect) { Headers = { Location = new Uri("/again", UriKind.Relative) } }, "redirect loops bounded");
++        await Reject(_ => new(HttpStatusCode.NotFound), "HTTP failure rejected");
++        await Reject(_ => new(HttpStatusCode.OK) { Content = new StringContent("<html>Download page</html>", System.Text.Encoding.UTF8, "text/html") }, "HTML pages rejected");
++        await Reject(_ => Bytes(good), "checksum mismatch rejected", checksum: new string('0', 64));
++        await Reject(_ => Bytes(good), "release mismatch rejected", release: "30.40");
++        await Reject(_ => Bytes([1, 2, 3]), "invalid ZIP rejected");
++        await Reject(_ => Bytes(Zip(("readme.txt", new byte[] { 1 }, 0))), "non-build ZIP rejected");
++        foreach (var path in new[] { "../escape.txt", "/absolute.txt", "C:/outside.txt", "file:stream", "CON.txt", "folder/../escape", "folder./file", "a\\..\\escape" })
++            await Reject(_ => Bytes(Zip((path, new byte[] { 1 }, 0))), "unsafe archive path rejected: " + path);
++        await Reject(_ => Bytes(Zip(("link", new byte[] { 1 }, unchecked((int)0xA0000000)))), "symbolic link rejected");
++        await Reject(_ => Bytes(Zip(("same", new byte[] { 1 }, 0), ("SAME", new byte[] { 2 }, 0))), "case-insensitive duplicate rejected");
++        await Reject(_ => { var response = Bytes(good); response.Content.Headers.ContentLength = good.Length + 100; return response; }, "truncated response rejected");
++        await Reject(_ => { var response = Bytes(good); response.Content.Headers.ContentLength = 600L * 1024 * 1024 * 1024; return response; }, "oversized download rejected before writing");
++        using (var cancel = new CancellationTokenSource())
++            await Reject(_ => Bytes(good), "mid-download cancellation cleans up", progress: new ProgressSink(p => { if (p.Stage == "Downloading") cancel.Cancel(); }), token: cancel.Token);
++        using (var cancel = new CancellationTokenSource())
++            await Reject(_ => Bytes(good), "extraction cancellation cleans up", progress: new ProgressSink(p => { if (p.Stage == "Extracting") cancel.Cancel(); }), token: cancel.Token);
++        return checks;
++    }
++}
 diff --git a/launcher/Emilyfn.Tests/Emilyfn.Tests.csproj b/launcher/Emilyfn.Tests/Emilyfn.Tests.csproj
 new file mode 100644
 index 0000000..3881743
@@ -136,10 +221,10 @@ index 0000000..7d8242b
 +}
 diff --git a/launcher/Emilyfn.Tests/Program.cs b/launcher/Emilyfn.Tests/Program.cs
 new file mode 100644
-index 0000000..93bf08b
+index 0000000..d7b902c
 --- /dev/null
 +++ b/launcher/Emilyfn.Tests/Program.cs
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,153 @@
 +using Emilyfn.Core;
 +using System.Collections.Concurrent;
 +using System.Diagnostics;
@@ -213,6 +298,7 @@ index 0000000..93bf08b
 +    File.WriteAllText(Path.Combine(game, "FortniteGame", "Content", "Paks", "synthetic.pak"), "This is a test marker, not game data.");
 +    Check(Releases.Inspect(game).Release == "27.11", "version resource and installation inspection");
 +    checks += await FeatureChecks.RunAsync(root, game, executable);
++    checks += await DownloadChecks.RunAsync(root, executable);
 +    suspended = NativeWindows.StartSuspendedCompanion(executable);
 +    await Task.Delay(150);
 +    Check(!suspended.HasExited && !File.Exists(executable + ".started-" + suspended.Id), "companion stays suspended without running its entry point");
@@ -282,7 +368,7 @@ index 0000000..93bf08b
 +        Check(File.Exists(marker) && await bundled.HealthyAsync(CancellationToken.None), "restarting uses the existing backend data");
 +        await bundled.StopOwnedAsync();
 +    }
-+    Console.WriteLine($"{checks} Emilyfn checks passed, including native x64 DLL loading, staged launch, UDP ownership, crash reporting, process cleanup, backend lifecycle, automatic build detection and Discord IPC. Synthetic game and Discord fixtures only; Fortnite gameplay and live Discord presence are not covered.");
++    Console.WriteLine($"{checks} Emilyfn checks passed, including native x64 DLL loading, staged launch, UDP ownership, crash reporting, process cleanup, backend lifecycle, automatic build detection, download installation and Discord IPC. Synthetic game and Discord fixtures only; Fortnite gameplay and live Discord presence are not covered.");
 +}
 +finally
 +{
