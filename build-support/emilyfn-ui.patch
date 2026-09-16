@@ -1581,10 +1581,10 @@ index 0000000..3c80f45
 +build-icon.ps1 fits the complete logo into seven Windows icon sizes.
 diff --git a/launcher/build-icon.ps1 b/launcher/build-icon.ps1
 new file mode 100644
-index 0000000..6e44297
+index 0000000..4bdcc40
 --- /dev/null
 +++ b/launcher/build-icon.ps1
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,64 @@
 +param([string]$Output = "$PSScriptRoot/assets/Emilyfn.ico")
 +$ErrorActionPreference = 'Stop'
 +Add-Type -AssemblyName System.Drawing
@@ -1598,7 +1598,8 @@ index 0000000..6e44297
 +    # Fit the complete logo and wordmark; discard only the surrounding white margins.
 +    $crop = [Drawing.RectangleF]::new(112,316,600,606)
 +    if ($source.Width -ne 832 -or $source.Height -ne 1248) { throw 'Unexpected source logo dimensions.' }
-+    $sizes = @(16,24,32,48,64,128,256)
++    # WPF Image selects the first ICO frame; put the largest first for sharp downscaling.
++    $sizes = @(256,128,64,48,32,24,16)
 +    $frames = [Collections.Generic.List[byte[]]]::new()
 +    foreach ($size in $sizes) {
 +        $bitmap = [Drawing.Bitmap]::new($size, $size, [Drawing.Imaging.PixelFormat]::Format32bppArgb)
@@ -1640,11 +1641,11 @@ index 0000000..6e44297
 +    finally { $check.Dispose() }
 +    # System.Drawing.Icon ranks the ICO directory's 0-byte width as zero, not 256.
 +    # Validate the largest PNG directly and the taskbar-sized native icon above.
-+    $largeStream = [IO.MemoryStream]::new($frames[$frames.Count-1], $false)
++    $largeStream = [IO.MemoryStream]::new($frames[0], $false)
 +    $large = [Drawing.Bitmap]::new($largeStream)
 +    try { if ($large.Width -ne 256 -or $large.Height -ne 256) { throw 'Large icon frame validation failed.' } }
 +    finally { $large.Dispose(); $largeStream.Dispose() }
-+    Write-Host ('EMILYFN_ICON_BASE64=' + [Convert]::ToBase64String($frames[$frames.Count-1]))
++    Write-Host ('EMILYFN_ICON_BASE64=' + [Convert]::ToBase64String($frames[0]))
 +    Write-Host 'Emilyfn user logo icon built: 16, 24, 32, 48, 64, 128 and 256 pixels.'
 +}
 +finally { $source.Dispose(); $imageStream.Dispose() }
