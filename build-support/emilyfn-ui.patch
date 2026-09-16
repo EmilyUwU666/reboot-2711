@@ -210,7 +210,7 @@ index 0000000..94cb7d9
 +}
 diff --git a/launcher/Emilyfn.App/MainWindow.xaml b/launcher/Emilyfn.App/MainWindow.xaml
 new file mode 100644
-index 0000000..8be4753
+index 0000000..34deaf7
 --- /dev/null
 +++ b/launcher/Emilyfn.App/MainWindow.xaml
 @@ -0,0 +1,153 @@
@@ -313,7 +313,7 @@ index 0000000..8be4753
 +                <TextBox Text="{Binding DownloadChecksum, UpdateSourceTrigger=PropertyChanged}" MaxLength="64"/>
 +              </StackPanel>
 +              <StackPanel Orientation="Horizontal" Margin="0,14,0,0"><Button Content="Download and install" Style="{StaticResource Accent}" Click="DownloadBuild_Click" IsEnabled="{Binding CanDownload}"/><Button Content="Cancel" Click="CancelDownload_Click" IsEnabled="{Binding CanCancelDownload}" Margin="10,0,0,0"/></StackPanel>
-+              <ProgressBar Value="{Binding DownloadPercent}" IsIndeterminate="{Binding DownloadIndeterminate}" Height="6" Margin="0,14,0,0" Foreground="#8ED5D2"/>
++              <ProgressBar Value="{Binding DownloadPercent, Mode=OneWay}" IsIndeterminate="{Binding DownloadIndeterminate, Mode=OneWay}" Height="6" Margin="0,14,0,0" Foreground="#8ED5D2"/>
 +              <TextBlock Text="{Binding DownloadStatus}" Foreground="#8ED5D2" TextWrapping="Wrap" FontSize="11" Margin="0,9,0,0"/>
 +              <TextBlock Text="ZIP and extracted files need free space together. Cancelled downloads restart from the beginning. Public links may change; no publisher checksums are available in this catalog." Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="11" Margin="0,8,0,0"/>
 +            <Button Content="Direct ZIP archive · source and credits ↗" Click="CatalogSource_Click" FontSize="11" Padding="8,5" HorizontalAlignment="Left" Margin="0,10,0,0"/>
