@@ -61,10 +61,10 @@ index 0000000..97de4e0
 +}
 diff --git a/launcher/Emilyfn.App/Emilyfn.App.csproj b/launcher/Emilyfn.App/Emilyfn.App.csproj
 new file mode 100644
-index 0000000..52dcea5
+index 0000000..9b38b6a
 --- /dev/null
 +++ b/launcher/Emilyfn.App/Emilyfn.App.csproj
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,29 @@
 +<Project Sdk="Microsoft.NET.Sdk">
 +  <PropertyGroup>
 +    <OutputType>WinExe</OutputType>
@@ -92,10 +92,121 @@ index 0000000..52dcea5
 +    <Resource Include="../assets/Emilyfn.ico" Link="Emilyfn.ico" />
 +    <Resource Include="../assets/Emilyfn-logo.png" Link="Emilyfn-logo.png" />
 +  </ItemGroup>
++  <ItemGroup><PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3537.50" /></ItemGroup>
 +</Project>
+diff --git a/launcher/Emilyfn.App/FortForgeDownloadWindow.cs b/launcher/Emilyfn.App/FortForgeDownloadWindow.cs
+new file mode 100644
+index 0000000..bfa61c9
+--- /dev/null
++++ b/launcher/Emilyfn.App/FortForgeDownloadWindow.cs
+@@ -0,0 +1,104 @@
++using Emilyfn.Core;
++using Microsoft.Web.WebView2.Core;
++using Microsoft.Web.WebView2.Wpf;
++using System.Diagnostics;
++using System.IO;
++using System.Windows;
++using System.Windows.Controls;
++using System.Windows.Media;
++using System.Windows.Threading;
++
++namespace Emilyfn.App;
++
++/// <summary>Uses FortForge's normal public page and queue; never caches temporary download URLs.</summary>
++public sealed class FortForgeDownloadWindow : Window
++{
++    public static async Task AcquireAsync(Window owner, string page, string destination, IProgress<DownloadProgress>? progress, CancellationToken token)
++    {
++        var uri = BuildDownloader.ValidateUrl(page);
++        if (uri.Host != "www.fortforge.co.uk" || !uri.AbsolutePath.StartsWith("/builds/", StringComparison.Ordinal)) throw new ArgumentException("Choose a FortForge build from the catalog.");
++        token.ThrowIfCancellationRequested();
++        var window = new FortForgeDownloadWindow { Owner = owner, Title = "Emilyfn · FortForge download", Width = 960, Height = 720, WindowStartupLocation = WindowStartupLocation.CenterOwner };
++        var web = new WebView2();
++        var panel = new DockPanel();
++        var caption = new TextBlock { Text = "FortForge manages the download queue. If needed, click Download Build below. Close this window to cancel.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(14), Foreground = Brushes.White };
++        DockPanel.SetDock(caption, Dock.Top); panel.Children.Add(caption); panel.Children.Add(web); window.Content = panel;
++        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
++        CoreWebView2DownloadOperation? operation = null;
++        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
++        var clock = Stopwatch.StartNew();
++        void Cancel() { try { operation?.Cancel(); } catch { } done.TrySetCanceled(token.IsCancellationRequested ? token : new CancellationToken(true)); }
++        window.Closed += (_, _) => Cancel();
++        using var cancellation = token.Register(() => window.Dispatcher.BeginInvoke(new Action(Cancel)));
++        try
++        {
++            window.Show();
++            var profile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Emilyfn", "FortForge-browser");
++            CoreWebView2Environment environment;
++            try { environment = await CoreWebView2Environment.CreateAsync(userDataFolder: profile); }
++            catch (WebView2RuntimeNotFoundException) { throw new IOException("FortForge downloads need Microsoft Edge WebView2 Runtime. Install it from https://developer.microsoft.com/microsoft-edge/webview2 and retry."); }
++            token.ThrowIfCancellationRequested();
++            if (done.Task.IsCompleted) await done.Task;
++            await web.EnsureCoreWebView2Async(environment);
++            if (done.Task.IsCompleted) await done.Task;
++            var core = web.CoreWebView2;
++            core.Settings.AreDevToolsEnabled = false;
++            core.Settings.AreDefaultContextMenusEnabled = false;
++            core.Settings.IsWebMessageEnabled = false;
++            core.Settings.IsPasswordAutosaveEnabled = false;
++            core.Settings.IsGeneralAutofillEnabled = false;
++            core.PermissionRequested += (_, e) => e.State = CoreWebView2PermissionState.Deny;
++            bool Allowed(string address) => Uri.TryCreate(address, UriKind.Absolute, out var target) && target.Scheme == "https" && (target.Host == "fortforge.co.uk" || target.Host.EndsWith(".fortforge.co.uk", StringComparison.OrdinalIgnoreCase));
++            core.NavigationStarting += (_, e) => { if (!Allowed(e.Uri)) { e.Cancel = true; caption.Text = "This window only opens FortForge pages. Close it to cancel."; } };
++            core.NewWindowRequested += (_, e) => { e.Handled = true; if (Allowed(e.Uri)) core.Navigate(e.Uri); };
++            core.ProcessFailed += (_, _) => done.TrySetException(new IOException("The download browser stopped unexpectedly. Retry the download."));
++            bool clicked = false;
++            core.NavigationCompleted += async (_, e) =>
++            {
++                if (!e.IsSuccess) { caption.Text = "FortForge could not load. Close this window and retry later."; return; }
++                if (!clicked && core.Source == page)
++                {
++                    clicked = true;
++                    try { await core.ExecuteScriptAsync("Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim().startsWith('Download Build'))?.click();"); }
++                    catch { caption.Text = "Click Download Build to continue."; }
++                }
++            };
++            core.DownloadStarting += (_, e) =>
++            {
++                if (operation is not null || !Path.GetExtension(e.ResultFilePath).Equals(".zip", StringComparison.OrdinalIgnoreCase) || !Uri.TryCreate(e.DownloadOperation.Uri, UriKind.Absolute, out var downloadUri) || downloadUri.Scheme != "https")
++                {
++                    e.Cancel = true;
++                    if (operation is null) done.TrySetException(new IOException("This FortForge download is not a HTTPS ZIP. RAR, 7z and split archives are not supported yet."));
++                    return;
++                }
++                operation = e.DownloadOperation;
++                if (operation.TotalBytesToReceive > 512UL * 1024 * 1024 * 1024) { e.Cancel = true; done.TrySetException(new IOException("The download exceeds the 512 GiB limit.")); return; }
++                var drive = new DriveInfo(Path.GetPathRoot(destination)!);
++                if (drive.AvailableFreeSpace < checked((long)(operation.TotalBytesToReceive ?? 0)) + 256L * 1024 * 1024) { e.Cancel = true; done.TrySetException(new IOException("Not enough free disk space for the download.")); return; }
++                e.ResultFilePath = destination; e.Handled = true;
++                clock.Restart(); caption.Text = "Downloading into Emilyfn. Keep this window open; installation follows automatically.";
++                operation.StateChanged += (_, _) =>
++                {
++                    if (operation.State == CoreWebView2DownloadState.Completed) done.TrySetResult();
++                    else if (operation.State == CoreWebView2DownloadState.Interrupted) done.TrySetException(new IOException($"FortForge download interrupted ({operation.InterruptReason}). Retry from Library."));
++                };
++            };
++            timer.Tick += (_, _) =>
++            {
++                if (operation is null) { progress?.Report(new("Waiting for FortForge queue", 0, null)); return; }
++                if (operation.State != CoreWebView2DownloadState.InProgress) return;
++                if (operation.BytesReceived > 512UL * 1024 * 1024 * 1024) { done.TrySetException(new IOException("Download exceeds the 512 GiB limit.")); operation.Cancel(); return; }
++                var state = new DownloadProgress("Downloading from FortForge", checked((long)operation.BytesReceived), operation.TotalBytesToReceive > 0 ? checked((long)operation.TotalBytesToReceive.Value) : null, operation.BytesReceived / Math.Max(.001, clock.Elapsed.TotalSeconds));
++                caption.Text = state.Label + " · Close to cancel"; progress?.Report(state);
++            };
++            timer.Start(); core.Navigate(page);
++            await done.Task;
++        }
++        finally
++        {
++            timer.Stop();
++            try { if (operation?.State == CoreWebView2DownloadState.InProgress) operation.Cancel(); } catch { }
++            web.Dispose(); window.Close();
++        }
++    }
++}
 diff --git a/launcher/Emilyfn.App/MainWindow.xaml b/launcher/Emilyfn.App/MainWindow.xaml
 new file mode 100644
-index 0000000..6570ad9
+index 0000000..3deb420
 --- /dev/null
 +++ b/launcher/Emilyfn.App/MainWindow.xaml
 @@ -0,0 +1,153 @@
@@ -184,7 +295,7 @@ index 0000000..6570ad9
 +          <StackPanel x:Name="LibraryPage" Visibility="Collapsed">
 +            <Border Background="{StaticResource Panel}" CornerRadius="14" Padding="20" Margin="0,0,0,16"><StackPanel>
 +              <TextBlock Text="Download a build" FontSize="20" FontWeight="SemiBold"/>
-+              <TextBlock Text="Choose a public build to download and install, or supply your own ZIP link." Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,8,0,14"/>
++              <TextBlock Text="Choose a FortForge build, a direct ZIP mirror, or your own download link. ZIP files install automatically." Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,8,0,14"/>
 +              <TextBlock Text="Public builds" FontSize="12" Margin="0,0,0,6"/>
 +              <ComboBox ItemsSource="{Binding Catalog}" SelectedItem="{Binding SelectedCatalog}" DisplayMemberPath="Label" IsEnabled="{Binding DownloadIdle}" Foreground="#101522" Background="White" Padding="10" Margin="0,0,0,12"/>
 +              <StackPanel IsEnabled="{Binding DownloadIdle}">
@@ -201,7 +312,7 @@ index 0000000..6570ad9
 +              <ProgressBar Value="{Binding DownloadPercent}" IsIndeterminate="{Binding DownloadIndeterminate}" Height="6" Margin="0,14,0,0" Foreground="#8ED5D2"/>
 +              <TextBlock Text="{Binding DownloadStatus}" Foreground="#8ED5D2" TextWrapping="Wrap" FontSize="11" Margin="0,9,0,0"/>
 +              <TextBlock Text="ZIP and extracted files need free space together. Cancelled downloads restart from the beginning. Public links may change; no publisher checksums are available in this catalog." Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="11" Margin="0,8,0,0"/>
-+            <Button Content="Public archive · source and credits ↗" Click="CatalogSource_Click" FontSize="11" Padding="8,5" HorizontalAlignment="Left" Margin="0,10,0,0"/>
++            <Button Content="Direct ZIP archive · source and credits ↗" Click="CatalogSource_Click" FontSize="11" Padding="8,5" HorizontalAlignment="Left" Margin="0,10,0,0"/>
 +            </StackPanel></Border>
 +            <Border Background="{StaticResource Panel}" CornerRadius="14" Padding="20" Margin="0,0,0,16"><StackPanel>
 +              <TextBlock Text="Find installed builds" FontSize="20" FontWeight="SemiBold"/>
@@ -254,10 +365,10 @@ index 0000000..6570ad9
 +</Window>
 diff --git a/launcher/Emilyfn.App/MainWindow.xaml.cs b/launcher/Emilyfn.App/MainWindow.xaml.cs
 new file mode 100644
-index 0000000..4eebb7c
+index 0000000..f194a66
 --- /dev/null
 +++ b/launcher/Emilyfn.App/MainWindow.xaml.cs
-@@ -0,0 +1,356 @@
+@@ -0,0 +1,360 @@
 +using Emilyfn.Core;
 +using Microsoft.Win32;
 +using System.Collections.ObjectModel;
@@ -295,7 +406,7 @@ index 0000000..4eebb7c
 +    public bool CanDownload => DownloadIdle && (SelectedCatalog.Custom || SelectedCatalog.Url is not null);
 +    public bool CanEditDownloadLink => DownloadIdle && SelectedCatalog.Custom;
 +    public IReadOnlyList<CatalogBuild> Catalog => BuildCatalog.Entries;
-+    private CatalogBuild selectedCatalog = BuildCatalog.Entries[2];
++    private CatalogBuild selectedCatalog = BuildCatalog.Entries[1];
 +    public CatalogBuild SelectedCatalog
 +    {
 +        get => selectedCatalog;
@@ -305,7 +416,7 @@ index 0000000..4eebb7c
 +            selectedCatalog = value;
 +            DownloadUrl = value.Url ?? ""; DownloadChecksum = "";
 +            if (!value.Custom) DownloadRelease = value.Release;
-+            DownloadStatus = value.Custom ? "Paste a direct HTTPS ZIP link." : value.Url is null ? value.Source : $"Public ZIP hosted by {value.Source}. Choose an installation folder and download.";
++            DownloadStatus = value.Custom ? "Paste a direct HTTPS ZIP link." : value.BrowserDownload ? "FortForge opens inside Emilyfn and manages its download queue. ZIP builds are installed automatically." : value.Url is null ? value.Source : $"Public ZIP hosted by {value.Source}. Choose an installation folder and download.";
 +            foreach (var property in new[] { nameof(SelectedCatalog), nameof(DownloadUrl), nameof(DownloadRelease), nameof(DownloadChecksum), nameof(DownloadStatus), nameof(CanDownload), nameof(CanEditDownloadLink) }) Notify(property);
 +        }
 +    }
@@ -578,7 +689,11 @@ index 0000000..4eebb7c
 +        try
 +        {
 +            using var downloader = new BuildDownloader();
-+            var install = await Task.Run(() => downloader.InstallAsync(url, folder, release, checksum, progress, cancellation.Token));
++            var catalog = SelectedCatalog;
++            var install = await Task.Run(() => catalog.BrowserDownload
++                ? downloader.InstallWithProviderAsync(folder, release, checksum,
++                    (file, ct) => Dispatcher.InvokeAsync(() => FortForgeDownloadWindow.AcquireAsync(this, url, file, progress, ct)).Task.Unwrap(), progress, cancellation.Token)
++                : downloader.InstallAsync(url, folder, release, checksum, progress, cancellation.Token));
 +            Installations.Add(install);
 +            if (!HostBusy && !ClientBusy) SelectedInstall = install;
 +            settings.Installations = Installations.ToList(); settings.SelectedId = SelectedInstall?.Id;
