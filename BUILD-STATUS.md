@@ -1,18 +1,24 @@
 # Emilyfn launcher and Fortnite component build status
 
-## Emilyfn 0.1.0 — compiled Windows launcher
+## Emilyfn 0.1.0 — compiled Windows launcher with Emily's logo
 
 The custom Emilyfn launcher is built and packaged with the existing backend,
 its Node runtime, the .NET desktop runtime, and all three Seasons 19–30 DLLs.
 
-- **Windows download:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/34998675224/artifacts/10409215693
-- **Corresponding source:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/34998675224/artifacts/10408334748
-- **Compiled UI preview:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/34998675224/artifacts/10408444281
-- **Successful build:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/34998675224
-- Workflow commit: `e53cda3500f641d954ed2ecdaefe1310f73105a9`
-- Windows package: 114,078,940 bytes; ZIP SHA256 `61a9fe3209c88b925844b88f439fd36ec559812cea1f21c658b6a06e6e2fc803`.
-- Emilyfn.exe: self-contained Windows x64, 139,961,951 bytes; SHA256 `20d91e2029e926d10b277369fb1cc76235eaf479da8056ec9552d2ff4b598f9f`.
-- Source package ZIP SHA256: `7fa7b5c6bc135d8b7ef7049861f0df6ea22951ae176a678c50a38d1dcdc1a50a`.
+- **Windows download:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35068680512/artifacts/10435123824
+- **Corresponding source:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35068680512/artifacts/10435650520
+- **Compiled UI preview:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35068680512/artifacts/10435034230
+- **Successful build:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35068680512
+- Workflow commit: `e4053ab1329122956de0fda62e6e896428ac49ef`
+- Windows package: 114,588,640 bytes; ZIP SHA256 `e6b0fc7eda2c407d80538225c1fbbd9a59e376fdabb6e33587e5a1ead657b531`.
+- Emilyfn.exe: self-contained Windows x64, 140,342,879 bytes; SHA256 `aebcc0b5ad5793d3b216e503a54fa1a39d542adea8bf30a119337b08cf1373aa`.
+- Source package ZIP SHA256: `9ce794f2262397c1ef5b358de7f839d63ca7c4c02a6166e9b0a91fa156d28e96`.
+
+Logo update, 2026-09-16: Emily's supplied artwork is embedded as the Windows
+executable/window icon at 16, 24, 32, 48, 64, 128 and 256 pixels. The in-app badge
+uses a separate high-resolution image. File version: `0.1.0.1`. The uploaded JPEG
+is preserved exactly in the source, with only its surrounding white margins
+excluded when fitting the icon. The compiled icon and WPF preview were inspected.
 
 ### Setup
 
@@ -42,7 +48,7 @@ while playing. Settings and diagnostic logs are under `%LOCALAPPDATA%\Emilyfn`.
   fixtures, launch ordering, host UDP ownership, failure cleanup, log redaction,
   and the actual bundled backend's first start, stop, restart and data retention.
 - The published executable ran its WPF preview successfully; the rendered UI was
-  visually inspected. Source patches reproduce all 24 launcher source files.
+  visually inspected. Source patches reproduce all 26 launcher source files.
 
 **Runtime limit:** the included Seasons 19–30 game components remain experimental.
 The tests use a synthetic game process and do not establish Fortnite match
