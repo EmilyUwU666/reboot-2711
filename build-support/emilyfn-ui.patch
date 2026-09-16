@@ -1581,10 +1581,10 @@ index 0000000..3c80f45
 +build-icon.ps1 fits the complete logo into seven Windows icon sizes.
 diff --git a/launcher/build-icon.ps1 b/launcher/build-icon.ps1
 new file mode 100644
-index 0000000..0ed2069
+index 0000000..6e44297
 --- /dev/null
 +++ b/launcher/build-icon.ps1
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,63 @@
 +param([string]$Output = "$PSScriptRoot/assets/Emilyfn.ico")
 +$ErrorActionPreference = 'Stop'
 +Add-Type -AssemblyName System.Drawing
@@ -1635,9 +1635,16 @@ index 0000000..0ed2069
 +        foreach ($frame in $frames) { $writer.Write([byte[]]$frame) }
 +    }
 +    finally { $writer.Dispose(); $stream.Dispose() }
-+    $check = [Drawing.Icon]::new($Output, 256, 256)
-+    try { if ($check.Width -ne 256 -or $check.Height -ne 256) { throw 'Icon validation failed.' } }
++    $check = [Drawing.Icon]::new($Output, 32, 32)
++    try { if ($check.Width -ne 32 -or $check.Height -ne 32) { throw 'Icon validation failed.' } }
 +    finally { $check.Dispose() }
++    # System.Drawing.Icon ranks the ICO directory's 0-byte width as zero, not 256.
++    # Validate the largest PNG directly and the taskbar-sized native icon above.
++    $largeStream = [IO.MemoryStream]::new($frames[$frames.Count-1], $false)
++    $large = [Drawing.Bitmap]::new($largeStream)
++    try { if ($large.Width -ne 256 -or $large.Height -ne 256) { throw 'Large icon frame validation failed.' } }
++    finally { $large.Dispose(); $largeStream.Dispose() }
++    Write-Host ('EMILYFN_ICON_BASE64=' + [Convert]::ToBase64String($frames[$frames.Count-1]))
 +    Write-Host 'Emilyfn user logo icon built: 16, 24, 32, 48, 64, 128 and 256 pixels.'
 +}
 +finally { $source.Dispose(); $imageStream.Dispose() }
