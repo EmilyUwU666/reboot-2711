@@ -1,3 +1,28 @@
+## Emilyfn 0.3.0 — public build downloader
+
+- **Windows download:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35136606000/artifacts/10464100705
+- **Source:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35136606000/artifacts/10463765998
+- **UI previews:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35136606000/artifacts/10464100712
+- **Successful build:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35136606000
+- Workflow commit: `47891aa4b4d2f34a289d3064cc4671a27aae4dd0`
+- Windows ZIP: 115,129,088 bytes; SHA256 `325e74bde7e830be56b4c7aa526655990f3a81cfdaf6054906f7209e30ff1c28`.
+- Emilyfn.exe: 141,552,992 bytes; SHA256 `046f770fbaf06eac0ae3ac4be0bbf4dfd3c8dc8281c8af7ae8340dbb79eaa60d`.
+
+Library now includes 69 FortForge PC entries covering 19.xx–30.xx, including
+30.40 CL-35235494, plus 13 direct ZIP mirrors and a custom URL option. FortForge
+opens in an embedded WebView2 window so its live queue can issue temporary download
+links. Completed ZIPs are extracted safely, checked against the selected Fortnite
+release and added to Library. Existing installations are never overwritten.
+
+**202 Windows checks passed**, covering download cancellation, checksums, version
+mismatch, truncated transfers, archive traversal/links/duplicates, cleanup and
+preserving existing installations. The compiled Library UI was rendered and
+inspected. A full 30.40 transfer is about 101 GB and was not downloaded in CI.
+FortForge availability and format can change; RAR/7z builds are rejected. Microsoft
+Edge WebView2 Runtime is required for FortForge downloads.
+
+---
+
 # Emilyfn launcher and Fortnite component build status
 
 ## Emilyfn 0.2.0 — automatic build detection and Discord Rich Presence
