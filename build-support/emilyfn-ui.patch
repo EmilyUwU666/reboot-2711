@@ -61,7 +61,7 @@ index 0000000..97de4e0
 +}
 diff --git a/launcher/Emilyfn.App/Emilyfn.App.csproj b/launcher/Emilyfn.App/Emilyfn.App.csproj
 new file mode 100644
-index 0000000..7f8892f
+index 0000000..98ad548
 --- /dev/null
 +++ b/launcher/Emilyfn.App/Emilyfn.App.csproj
 @@ -0,0 +1,28 @@
@@ -76,8 +76,8 @@ index 0000000..7f8892f
 +    <RootNamespace>Emilyfn.App</RootNamespace>
 +    <ApplicationIcon>../assets/Emilyfn.ico</ApplicationIcon>
 +    <ApplicationManifest>app.manifest</ApplicationManifest>
-+    <Version>0.1.0</Version>
-+    <FileVersion>0.1.0.1</FileVersion>
++    <Version>0.2.0</Version>
++    <FileVersion>0.2.0.0</FileVersion>
 +    <Description>Emilyfn private Fortnite launcher</Description>
 +    <Authors>Emilyfn</Authors>
 +    <PublishSingleFile>true</PublishSingleFile>
@@ -95,10 +95,10 @@ index 0000000..7f8892f
 +</Project>
 diff --git a/launcher/Emilyfn.App/MainWindow.xaml b/launcher/Emilyfn.App/MainWindow.xaml
 new file mode 100644
-index 0000000..1abcb26
+index 0000000..a8b2630
 --- /dev/null
 +++ b/launcher/Emilyfn.App/MainWindow.xaml
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,132 @@
 +<Window x:Class="Emilyfn.App.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
 +        Title="Emilyfn" Width="1200" Height="840" MinWidth="1050" MinHeight="740" WindowStartupLocation="CenterScreen" Background="#0D111C" Icon="Emilyfn.ico" Foreground="#F4F5FB" FontFamily="Segoe UI" Closing="Window_Closing">
 +  <Grid>
@@ -122,7 +122,7 @@ index 0000000..1abcb26
 +            <TextBlock Text="Host" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="{Binding HostLabel}" FontSize="11" Foreground="#A899D3" Margin="0,4,0,12"/>
 +            <TextBlock Text="Client" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="{Binding ClientLabel}" FontSize="11" Foreground="#A899D3" Margin="0,4,0,0"/>
 +          </StackPanel></Border>
-+          <TextBlock Text="v0.1.0  ·  Made for Emily" Foreground="#626E89" FontSize="10" Margin="4,17,0,0"/>
++          <TextBlock Text="v0.2.0  ·  Made for Emily" Foreground="#626E89" FontSize="10" Margin="4,17,0,0"/>
 +        </StackPanel>
 +      </Grid>
 +    </Border>
@@ -182,6 +182,12 @@ index 0000000..1abcb26
 +            <Border Background="#121827" BorderBrush="#252E43" BorderThickness="1" CornerRadius="12" Padding="18" Margin="0,19,0,0"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><TextBlock Text="SESSION ACTIVITY" FontSize="9" Foreground="#7E8BA5" Margin="0,0,0,8"/><TextBlock Text="{Binding LatestActivity}" TextWrapping="Wrap" Foreground="#B6C0D5" FontSize="12"/></StackPanel><Button Grid.Column="1" Content="View logs  →" Margin="18,0,0,0" Padding="12,8" FontSize="11" Click="LogsNav_Click"/></Grid></Border>
 +          </StackPanel>
 +          <StackPanel x:Name="LibraryPage" Visibility="Collapsed">
++            <Border Background="{StaticResource Panel}" CornerRadius="14" Padding="20" Margin="0,0,0,16"><StackPanel>
++              <TextBlock Text="Find installed builds" FontSize="20" FontWeight="SemiBold"/>
++              <TextBlock Text="Detect releases from Epic records and game files, or scan your own builds folder." Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,8,0,14"/>
++              <StackPanel Orientation="Horizontal"><Button Content="Detect builds" Style="{StaticResource Accent}" Click="Detect_Click" IsEnabled="{Binding CanDetect}"/><Button Content="Scan a folder…" Click="DetectFolder_Click" IsEnabled="{Binding CanDetect}" Margin="10,0,0,0"/><Button Content="Cancel" Click="CancelDetection_Click" IsEnabled="{Binding CanCancelDetection}" Margin="10,0,0,0"/></StackPanel>
++              <TextBlock Text="{Binding DetectionStatus}" Foreground="#8ED5D2" TextWrapping="Wrap" FontSize="11" Margin="0,12,0,0"/>
++            </StackPanel></Border>
 +            <Border Background="{StaticResource Panel}" CornerRadius="14" Padding="24"><StackPanel>
 +              <TextBlock Text="Add a Fortnite installation" FontSize="23" FontWeight="SemiBold"/>
 +              <TextBlock Text="Choose an existing Windows build between 19.xx and 30.xx." Foreground="{StaticResource Muted}" Margin="0,8,0,20"/>
@@ -201,12 +207,22 @@ index 0000000..1abcb26
 +              <TextBlock Text="Your local profile" FontSize="23" FontWeight="SemiBold"/>
 +              <TextBlock Text="Display name" FontSize="12" Margin="0,21,0,7"/><TextBox Text="{Binding DisplayName, UpdateSourceTrigger=PropertyChanged}" MaxLength="24"/>
 +              <TextBlock Text="Letters, numbers, underscores and hyphens. No Epic account is needed here." FontSize="11" Foreground="{StaticResource Muted}" Margin="0,8,0,14"/>
++              <CheckBox Content="Detect installed Fortnite builds when Emilyfn starts" IsChecked="{Binding AutoDetectBuilds}"/>
 +              <CheckBox Content="Start my host automatically when I press Play" IsChecked="{Binding AutoHost}"/>
 +              <CheckBox Content="Run the host without rendering a game window" IsChecked="{Binding HeadlessHost}"/>
 +              <Button Content="Save preferences" Style="{StaticResource Accent}" HorizontalAlignment="Left" Click="SaveSettings_Click" Margin="0,12,0,0"/>
 +            </StackPanel></Border>
++            <Border Background="{StaticResource Panel}" CornerRadius="14" Padding="24" Margin="0,20,0,0"><StackPanel>
++              <TextBlock Text="Discord Rich Presence" FontSize="21" FontWeight="SemiBold"/>
++              <CheckBox Content="Show my Emilyfn activity on Discord" IsChecked="{Binding DiscordEnabled}"/>
++              <TextBlock Text="Application ID" FontSize="12" Margin="0,5,0,7"/>
++              <TextBox Text="{Binding DiscordApplicationId, UpdateSourceTrigger=PropertyChanged}" MaxLength="20"/>
++              <TextBlock Text="Use an application named Emilyfn from your Discord Developer Portal. No bot token or password is needed. Keep Discord desktop open and activity sharing enabled." TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,8,0,12"/>
++              <TextBlock Text="{Binding DiscordStatus}" Foreground="#8ED5D2" FontSize="12" Margin="0,0,0,12"/>
++              <StackPanel Orientation="Horizontal"><Button Content="Save preferences" Style="{StaticResource Accent}" Click="SaveSettings_Click"/><Button Content="Open Developer Portal" Click="DiscordPortal_Click" Margin="12,0,0,0"/></StackPanel>
++            </StackPanel></Border>
 +            <Border Background="{StaticResource Panel}" CornerRadius="14" Padding="24" Margin="0,20,0,0"><StackPanel><TextBlock Text="Local backend" FontSize="21" FontWeight="SemiBold"/><TextBlock Text="Emilyfn starts its bundled backend, or uses a compatible one already running on port 3551." Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,10,0,18"/><Button Content="Start / check backend" HorizontalAlignment="Left" Click="Backend_Click"/></StackPanel></Border>
-+            <TextBlock Text="Emilyfn 0.1.0 · Experimental Seasons 19–30 support.&#10;A successful launch does not yet guarantee a complete match on every build." Foreground="#76829D" TextWrapping="Wrap" Margin="3,23,0,0" FontSize="12"/>
++            <TextBlock Text="Emilyfn 0.2.0 · Experimental Seasons 19–30 support.&#10;A successful launch does not yet guarantee a complete match on every build." Foreground="#76829D" TextWrapping="Wrap" Margin="3,23,0,0" FontSize="12"/>
 +          </StackPanel>
 +          <Grid x:Name="LogsPage" Visibility="Collapsed"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions><StackPanel Orientation="Horizontal" Margin="0,0,0,18"><Button Content="Export diagnostic ZIP" Style="{StaticResource Accent}" Click="ExportLogs_Click"/><Button Content="Open logs folder" Margin="12,0,0,0" Click="OpenLogs_Click"/></StackPanel><Border Grid.Row="1" Background="#090F19" CornerRadius="12" Padding="18" MinHeight="470"><TextBox Text="{Binding LogText, Mode=OneWay}" FontFamily="Consolas" FontSize="11" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Height="500" BorderThickness="0" Background="Transparent" Foreground="#B1C5D9"/></Border></Grid>
 +        </Grid>
@@ -217,10 +233,10 @@ index 0000000..1abcb26
 +</Window>
 diff --git a/launcher/Emilyfn.App/MainWindow.xaml.cs b/launcher/Emilyfn.App/MainWindow.xaml.cs
 new file mode 100644
-index 0000000..378ef68
+index 0000000..d67f2ed
 --- /dev/null
 +++ b/launcher/Emilyfn.App/MainWindow.xaml.cs
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,280 @@
 +using Emilyfn.Core;
 +using Microsoft.Win32;
 +using System.Collections.ObjectModel;
@@ -241,6 +257,10 @@ index 0000000..378ef68
 +    private readonly LauncherSettings settings;
 +    private readonly LauncherEngine engine;
 +    private readonly CancellationTokenSource lifetime = new();
++    private readonly DiscordPresence discord = new();
++    private readonly long presenceStarted = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
++    private CancellationTokenSource? detection;
++    private Task detectionTask = Task.CompletedTask;
 +    private readonly bool preview;
 +    private bool closing;
 +    private readonly List<string> lines = [];
@@ -255,6 +275,13 @@ index 0000000..378ef68
 +    public string DisplayName { get; set; } = "Emily";
 +    public bool AutoHost { get; set; } = true;
 +    public bool HeadlessHost { get; set; } = true;
++    public bool AutoDetectBuilds { get; set; } = true;
++    public bool DiscordEnabled { get; set; }
++    public string DiscordApplicationId { get; set; } = "";
++    public string DiscordStatus { get; private set; } = "Disabled";
++    public string DetectionStatus { get; private set; } = "Find builds in Epic records and common game folders.";
++    public bool CanDetect => detection is null && !closing;
++    public bool CanCancelDetection => detection is not null;
 +    public string BackendStatus { get; private set; } = "Not started";
 +    public string PageTitle { get; private set; } = "Let's play, Emily.";
 +    public string PageSubtitle { get; private set; } = "Your favorite chapters, in one place.";
@@ -280,9 +307,11 @@ index 0000000..378ef68
 +        store = new SettingsStore(data);
 +        settings = store.Load();
 +        DisplayName = settings.DisplayName; AutoHost = settings.AutoHost; HeadlessHost = settings.HeadlessHost;
++        AutoDetectBuilds = settings.AutoDetectBuilds; DiscordEnabled = settings.DiscordEnabled; DiscordApplicationId = settings.DiscordApplicationId ?? "";
 +        foreach (var install in settings.Installations) Installations.Add(install);
 +        SelectedInstall = Installations.FirstOrDefault(i => i.Id == settings.SelectedId) ?? Installations.FirstOrDefault();
 +        engine = new LauncherEngine(AppContext.BaseDirectory, data);
++        discord.Changed += value => UI(() => { DiscordStatus = value; Notify(nameof(DiscordStatus)); });
 +        engine.Logged += line => UI(() => { lines.Add(line); if (lines.Count > 250) lines.RemoveAt(0); Notify(nameof(LogText)); Notify(nameof(LatestActivity)); });
 +        engine.Backend.Changed += state => UI(() => { BackendStatus = state; Notify(nameof(BackendStatus)); });
 +        engine.StatusChanged += state => UI(() => { if (state.Role == GameRole.Host) host = state; else client = state; RefreshDashboard(); if (state.Stage == LaunchStage.Failed) ShowBanner(state.Detail); });
@@ -294,11 +323,13 @@ index 0000000..378ef68
 +        }
 +        DataContext = this;
 +        Navigate("Play");
++        if (!preview) Loaded += Startup_Loaded;
 +    }
 +    private void UI(Action action) { if (!Dispatcher.HasShutdownStarted) _ = Dispatcher.BeginInvoke(action); }
 +    private void Notify([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 +    private void RefreshDashboard()
 +    {
++        discord.Update(DiscordPresence.Describe(SelectedInstall, host, client, presenceStarted));
 +        foreach (var name in new[] { nameof(BuildHeadline), nameof(BuildSubline), nameof(HostLabel), nameof(ClientLabel), nameof(HostDetail), nameof(ClientDetail), nameof(HostBusy), nameof(ClientBusy), nameof(CanStartHost), nameof(CanStartClient) }) Notify(name);
 +    }
 +    private static string StageLabel(LaunchStage stage) => stage switch { LaunchStage.Idle => "Idle", LaunchStage.Listening => "Listening", LaunchStage.Active => "Active", LaunchStage.Failed => "Needs attention", LaunchStage.Login => "Signing in", LaunchStage.LoadingMap => "Loading island", _ => stage.ToString() };
@@ -307,6 +338,7 @@ index 0000000..378ef68
 +    {
 +        LaunchProtocol.ValidateName(DisplayName);
 +        settings.DisplayName = DisplayName; settings.AutoHost = AutoHost; settings.HeadlessHost = HeadlessHost;
++        settings.AutoDetectBuilds = AutoDetectBuilds; settings.DiscordEnabled = DiscordEnabled; settings.DiscordApplicationId = DiscordApplicationId.Trim();
 +        settings.Installations = Installations.ToList(); settings.SelectedId = SelectedInstall?.Id;
 +        if (!preview) store.Save(settings);
 +    }
@@ -346,29 +378,31 @@ index 0000000..378ef68
 +    private async void StopHost_Click(object sender, RoutedEventArgs e) => await ActionAsync(() => engine.StopAsync(GameRole.Host));
 +    private async void StopAll_Click(object sender, RoutedEventArgs e) => await ActionAsync(engine.StopAllAsync);
 +    private async void Backend_Click(object sender, RoutedEventArgs e) => await ActionAsync(() => engine.Backend.EnsureAsync(lifetime.Token));
-+    private async void SaveSettings_Click(object sender, RoutedEventArgs e) => await ActionAsync(() => { Save(); ShowBanner("Preferences saved."); return Task.CompletedTask; });
++    private async void SaveSettings_Click(object sender, RoutedEventArgs e) => await ActionAsync(async () => {
++        if (!string.IsNullOrWhiteSpace(DiscordApplicationId) && !DiscordPresence.ValidApplicationId(DiscordApplicationId.Trim())) throw new InvalidOperationException("Use the numeric Discord Application ID from the Developer Portal.");
++        Save(); await discord.ConfigureAsync(DiscordEnabled, settings.DiscordApplicationId); ShowBanner("Preferences saved.");
++    });
 +    private async void CopyJoin_Click(object sender, RoutedEventArgs e) => await ActionAsync(() => { Clipboard.SetText("open 127.0.0.1:7777"); ShowBanner("Copied. In Fortnite's console, paste the command to join your local host."); return Task.CompletedTask; });
-+    private async void Browse_Click(object sender, RoutedEventArgs e) => await ActionAsync(() =>
++    private async void Browse_Click(object sender, RoutedEventArgs e) => await ActionAsync(async () =>
 +    {
 +        var dialog = new OpenFolderDialog { Title = "Choose your Fortnite installation", Multiselect = false };
 +        if (dialog.ShowDialog(this) == true)
 +        {
-+            var result = Releases.Inspect(dialog.FolderName);
++            var result = await Task.Run(() => Releases.Inspect(dialog.FolderName, lifetime.Token), lifetime.Token);
 +            NewGamePath = result.Root; NewRelease = result.Release ?? "";
 +            Notify(nameof(NewGamePath)); Notify(nameof(NewRelease));
 +        }
-+        return Task.CompletedTask;
 +    });
-+    private async void AddBuild_Click(object sender, RoutedEventArgs e) => await ActionAsync(() =>
++    private async void AddBuild_Click(object sender, RoutedEventArgs e) => await ActionAsync(async () =>
 +    {
-+        var result = Releases.Inspect(NewGamePath.Trim());
++        var path = NewGamePath.Trim();
++        var result = await Task.Run(() => Releases.Inspect(path, lifetime.Token), lifetime.Token);
 +        var release = result.Release ?? NewRelease.Trim();
 +        if (!Releases.Valid(release)) throw new InvalidOperationException("Enter the installed release as 19.xx-30.xx, for example 27.11.");
 +        var existing = Installations.FirstOrDefault(i => string.Equals(i.Directory, result.Root, StringComparison.OrdinalIgnoreCase));
 +        if (existing is not null) SelectedInstall = existing;
 +        else { var item = new GameInstall(Guid.NewGuid().ToString("N"), result.Root, release); Installations.Add(item); SelectedInstall = item; }
 +        Save(); ShowBanner("Build added. You're ready to launch from Play.");
-+        return Task.CompletedTask;
 +    });
 +    private async void RemoveBuild_Click(object sender, RoutedEventArgs e) => await ActionAsync(() =>
 +    {
@@ -397,22 +431,90 @@ index 0000000..378ef68
 +        try
 +        {
 +            try { Save(); } catch (Exception error) { engine.Log(error.Message); }
++            await detectionTask;
++            await discord.DisposeAsync();
 +            await engine.StopAllAsync();
 +        }
 +        catch (Exception error) { engine.Log(error.Message); }
 +        finally { Close(); }
 +    }
++    private async void Startup_Loaded(object sender, RoutedEventArgs e)
++    {
++        Loaded -= Startup_Loaded;
++        await ActionAsync(async () =>
++        {
++            await discord.ConfigureAsync(DiscordEnabled, DiscordApplicationId.Trim());
++            if (AutoDetectBuilds) await DetectAsync(null);
++        });
++    }
++    private async void Detect_Click(object sender, RoutedEventArgs e) => await ActionAsync(() => DetectAsync(null));
++    private async void DetectFolder_Click(object sender, RoutedEventArgs e) => await ActionAsync(async () =>
++    {
++        var picker = new OpenFolderDialog { Title = "Choose a folder containing your Fortnite builds", Multiselect = false };
++        if (picker.ShowDialog(this) == true) await DetectAsync([picker.FolderName]);
++    });
++    private void CancelDetection_Click(object sender, RoutedEventArgs e) => detection?.Cancel();
++    private async void DiscordPortal_Click(object sender, RoutedEventArgs e) => await ActionAsync(() => { Process.Start(new ProcessStartInfo("https://discord.com/developers/applications") { UseShellExecute = true }); return Task.CompletedTask; });
++    private Task DetectAsync(string[]? roots)
++    {
++        if (detection is not null) return detectionTask;
++        detection = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
++        detection.CancelAfter(TimeSpan.FromSeconds(45));
++        detectionTask = DetectCoreAsync(roots, detection);
++        return detectionTask;
++    }
++    private async Task DetectCoreAsync(string[]? roots, CancellationTokenSource scan)
++    {
++        Notify(nameof(CanDetect)); Notify(nameof(CanCancelDetection));
++        DetectionStatus = "Looking for Fortnite builds…"; Notify(nameof(DetectionStatus));
++        var saved = Installations.ToArray();
++        try
++        {
++            var result = await Task.Run(() => BuildDetector.Scan(roots ?? BuildDetector.DefaultRoots(saved).ToArray(), scan.Token,
++                message => UI(() => { DetectionStatus = message; Notify(nameof(DetectionStatus)); })));
++            if (closing) return;
++            var added = 0;
++            foreach (var item in result.Builds)
++            {
++                if (Installations.Any(i => string.Equals(Path.TrimEndingDirectorySeparator(i.Directory), item.Directory, StringComparison.OrdinalIgnoreCase))) continue;
++                Installations.Add(item); added++;
++            }
++            SelectedInstall ??= Installations.FirstOrDefault();
++            if (result.Unknown.Count > 0 && string.IsNullOrWhiteSpace(NewGamePath))
++            {
++                NewGamePath = result.Unknown[0]; NewRelease = "";
++                Notify(nameof(NewGamePath)); Notify(nameof(NewRelease));
++            }
++            settings.Installations = Installations.ToList(); settings.SelectedId = SelectedInstall?.Id;
++            store.Save(settings);
++            DetectionStatus = $"{added} new build(s) added · {result.Builds.Count} supported build(s) found";
++            if (result.Unknown.Count > 0) DetectionStatus += $" · {result.Unknown.Count} need a release number";
++            if (result.Incomplete) DetectionStatus += " · scan stopped; you can scan a smaller folder";
++            Notify(nameof(DetectionStatus)); engine.Log(DetectionStatus);
++        }
++        finally
++        {
++            detection = null; scan.Dispose();
++            Notify(nameof(CanDetect)); Notify(nameof(CanCancelDetection));
++        }
++    }
 +    public void RenderPreview(string file)
 +    {
 +        System.Windows.Media.RenderOptions.ProcessRenderMode = System.Windows.Interop.RenderMode.SoftwareOnly;
 +        Show();
-+        Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
-+        UpdateLayout();
-+        var visual = (FrameworkElement)Content;
-+        var image = new RenderTargetBitmap((int)visual.ActualWidth, (int)visual.ActualHeight, 96, 96, PixelFormats.Pbgra32);
-+        image.Render(visual);
-+        var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(image));
-+        using var stream = File.Create(file); encoder.Save(stream);
++        foreach (var page in new[] { "Play", "Library", "Settings" })
++        {
++            Navigate(page);
++            Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
++            UpdateLayout();
++            var visual = (FrameworkElement)Content;
++            var bitmap = new RenderTargetBitmap((int)visual.ActualWidth, (int)visual.ActualHeight, 96, 96, PixelFormats.Pbgra32);
++            bitmap.Render(visual);
++            var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
++            var output = page == "Play" ? file : Path.Combine(Path.GetDirectoryName(file)!, Path.GetFileNameWithoutExtension(file) + "-" + page + ".png");
++            using var stream = File.Create(output); encoder.Save(stream);
++        }
++        Navigate("Play");
 +    }
 +}
 diff --git a/launcher/Emilyfn.App/app.manifest b/launcher/Emilyfn.App/app.manifest
