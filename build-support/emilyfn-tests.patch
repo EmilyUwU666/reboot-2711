@@ -13,12 +13,133 @@ index 0000000..3881743
 +  </PropertyGroup>
 +  <ItemGroup><ProjectReference Include="../Emilyfn.Core/Emilyfn.Core.csproj" /></ItemGroup>
 +</Project>
+diff --git a/launcher/Emilyfn.Tests/FeatureChecks.cs b/launcher/Emilyfn.Tests/FeatureChecks.cs
+new file mode 100644
+index 0000000..7d8242b
+--- /dev/null
++++ b/launcher/Emilyfn.Tests/FeatureChecks.cs
+@@ -0,0 +1,115 @@
++using Emilyfn.Core;
++using System.Buffers.Binary;
++using System.IO.Pipes;
++using System.Text;
++using System.Text.Json;
++
++internal static class FeatureChecks
++{
++    public static async Task<int> RunAsync(string root,string game,string executable)
++    {
++        var checks=0;
++        void Check(bool value,string message) { if(!value)throw new Exception(message); checks++; }
++        for(var season=19;season<=30;season++)
++        {
++            foreach(var encoding in new[]{Encoding.ASCII,Encoding.Unicode})
++            {
++                var tag=encoding.GetBytes($"5.4.0-1+++Fortnite+Release-{season}.11\0\0");
++                using var data=new MemoryStream(); data.WriteByte(1); data.Write(tag); data.Position=0;
++                Check(BuildDetector.ReadEmbeddedRelease(data)==$"{season}.11","compiled branch detects game release in both encodings");
++            }
++        }
++        using(var data=new MemoryStream())
++        {
++            data.Write(new byte[1024*1024+240]); data.Write(Encoding.Unicode.GetBytes("+++Fortnite+Release-27.11\0\0")); data.Position=0;
++            Check(BuildDetector.ReadEmbeddedRelease(data)=="27.11","branch tag across buffer boundary");
++        }
++        foreach(var text in new[]{"5.4.0-1234", "folder27.11", "+++Fortnite+Release-27.110\0\0", "+++Fortnite+Release-27.11\0\0+++Fortnite+Release-30.00\0\0"})
++        {
++            using var data=new MemoryStream(Encoding.ASCII.GetBytes(text));
++            Check(BuildDetector.ReadEmbeddedRelease(data) is null,"unrelated, malformed and ambiguous releases are not guessed");
++        }
++        Check(BuildDetector.NormalizeRoot(executable)==game,"executable normalizes to installation root");
++        Check(BuildDetector.NormalizeRoot(Path.Combine(game,"FortniteGame"))==game,"FortniteGame normalizes to root");
++        var result=BuildDetector.Scan([game,game+Path.DirectorySeparatorChar],CancellationToken.None);
++        Check(result.Builds.Count==1 && result.Builds[0].Release=="27.11","installation discovery validates and deduplicates roots");
++        Check(BuildDetector.Scan([root],new CancellationToken(true)).Incomplete,"scan cancellation returns partial result");
++        Check(BuildDetector.Scan([root],CancellationToken.None,maxDirectories:1).Incomplete,"scan directory budget is bounded");
++        var manifestDirectory=Path.Combine(root,"epic manifests"); Directory.CreateDirectory(manifestDirectory);
++        File.WriteAllText(Path.Combine(manifestDirectory,"fortnite.item"),JsonSerializer.Serialize(new {InstallLocation=game}));
++        File.WriteAllText(Path.Combine(manifestDirectory,"broken.item"),"{invalid");
++        File.WriteAllText(Path.Combine(manifestDirectory,"wrong-shape.item"),"[]");
++        var installed=Path.Combine(root,"LauncherInstalled.dat");
++        File.WriteAllText(installed,JsonSerializer.Serialize(new {InstallationList=new[]{new {InstallLocation=game}}}));
++        Check(BuildDetector.ManifestRoots(manifestDirectory,installed).Single()==game,"Epic manifest formats and malformed records");
++        var idleHost=new SessionStatus(GameRole.Host,LaunchStage.Idle,"Idle");
++        var idleClient=new SessionStatus(GameRole.Client,LaunchStage.Idle,"Idle");
++        var selected=new GameInstall("test",game,"19.40");
++        var activity=DiscordPresence.Describe(selected,new(GameRole.Host,LaunchStage.Listening,"Private path",123,"27.11"),idleClient,1234567);
++        Check(activity.Details=="Fortnite 27.11" && activity.State=="Hosting a local server","presence uses actual running build rather than newly selected build");
++        Check(DiscordPresence.Describe(selected,idleHost,new(GameRole.Client,LaunchStage.Active,"Private path",456,"30.00"),1234567).State=="Client active","presence does not invent match state");
++        var serialized=Encoding.UTF8.GetString(DiscordPresence.ActivityPayload(activity));
++        Check(!serialized.Contains(game) && !serialized.Contains("Private path"),"presence excludes paths and internal diagnostic details");
++        foreach(var id in new[]{"", "bot-token", "123", "000000000000000000", "123456789012345678901"})Check(!DiscordPresence.ValidApplicationId(id),"invalid application ID rejected");
++        Check(DiscordPresence.ValidApplicationId("123456789012345678"),"application ID accepted");
++        var badHeader=new byte[8];BinaryPrimitives.WriteInt32LittleEndian(badHeader.AsSpan(4),1024*1024+1);
++        try { await DiscordPresence.ReadFrameAsync(new MemoryStream(badHeader),CancellationToken.None); throw new Exception("Oversized frame was accepted"); }
++        catch(InvalidDataException) { checks++; }
++        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(15));
++        var token=timeout.Token;
++        var pipeName="emilyfn-rpc-test-"+Guid.NewGuid().ToString("N");
++        var pipe=new NamedPipeServerStream(pipeName,PipeDirection.InOut,1,PipeTransmissionMode.Byte,PipeOptions.Asynchronous);
++        await using var presence=new DiscordPresence([pipeName],TimeSpan.FromMilliseconds(100),TimeSpan.FromMilliseconds(80));
++        try
++        {
++            presence.Update(activity);
++            await presence.ConfigureAsync(true,"123456789012345678");
++            await pipe.WaitForConnectionAsync(token);
++            var handshake=await DiscordPresence.ReadFrameAsync(pipe,token);
++            using(var json=JsonDocument.Parse(handshake.Payload))Check(handshake.Opcode==0 && json.RootElement.GetProperty("client_id").GetString()=="123456789012345678","IPC handshake uses configured public app ID");
++            // Deliberately fragment READY across header/payload boundaries.
++            var ready=Encoding.UTF8.GetBytes("{\"cmd\":\"DISPATCH\",\"evt\":\"READY\",\"data\":{\"v\":1}}");
++            var header=new byte[8];BinaryPrimitives.WriteInt32LittleEndian(header,1);BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(4),ready.Length);
++            await pipe.WriteAsync(header.AsMemory(0,3),token);await pipe.WriteAsync(header.AsMemory(3),token);
++            await pipe.WriteAsync(ready.AsMemory(0,7),token);await pipe.WriteAsync(ready.AsMemory(7),token);
++            var first=await DiscordPresence.ReadFrameAsync(pipe,token);
++            using(var json=JsonDocument.Parse(first.Payload))Check(first.Opcode==1 && json.RootElement.GetProperty("args").GetProperty("activity").GetProperty("details").GetString()=="Fortnite 27.11","fragmented READY followed by correct SET_ACTIVITY");
++            await DiscordPresence.WriteFrameAsync(pipe,3,[1,2,3,4],token);
++            var pong=false;
++            while(!pong) { var frame=await DiscordPresence.ReadFrameAsync(pipe,token);if(frame.Opcode==4){Check(frame.Payload.SequenceEqual(new byte[]{1,2,3,4}),"PING payload echoed in PONG");pong=true;} }
++            await DiscordPresence.WriteFrameAsync(pipe,1,Encoding.UTF8.GetBytes("{\"cmd\":\"SET_ACTIVITY\",\"evt\":null,\"data\":{}}"),token);
++            while(presence.Status!="Connected")await Task.Delay(10,token);
++            Check(presence.Status=="Connected","presence connection reported after activity acknowledgement");
++            presence.Update(new("Fortnite 30.00","Client active",1234567));
++            var updated=false;
++            while(!updated)
++            {
++                var frame=await DiscordPresence.ReadFrameAsync(pipe,token);if(frame.Opcode!=1)continue;
++                using var json=JsonDocument.Parse(frame.Payload);
++                updated=json.RootElement.GetProperty("args").GetProperty("activity").GetProperty("details").GetString()=="Fortnite 30.00";
++            }
++            Check(updated,"presence changes follow the latest state");
++            pipe.Dispose();
++            pipe=new NamedPipeServerStream(pipeName,PipeDirection.InOut,1,PipeTransmissionMode.Byte,PipeOptions.Asynchronous);
++            await pipe.WaitForConnectionAsync(token);
++            Check((await DiscordPresence.ReadFrameAsync(pipe,token)).Opcode==0,"Discord reconnect sends a new handshake");
++            await DiscordPresence.WriteFrameAsync(pipe,1,ready,token);
++            var reconnect=await DiscordPresence.ReadFrameAsync(pipe,token);
++            using(var json=JsonDocument.Parse(reconnect.Payload))Check(json.RootElement.GetProperty("args").GetProperty("activity").GetProperty("details").GetString()=="Fortnite 30.00","reconnect restores latest presence");
++            var stop=presence.ConfigureAsync(false,"");
++            var cleared=false;
++            while(!cleared)
++            {
++                var frame=await DiscordPresence.ReadFrameAsync(pipe,token);if(frame.Opcode!=1)continue;
++                using var json=JsonDocument.Parse(frame.Payload);
++                cleared=json.RootElement.GetProperty("args").GetProperty("activity").ValueKind==JsonValueKind.Null;
++            }
++            await stop;
++            Check(cleared && presence.Status=="Disabled","disable clears presence before closing IPC");
++            await presence.ConfigureAsync(true,"not-an-id");
++            Check(presence.Status.Contains("Application ID"),"missing ID has a useful setup status");
++        }
++        finally { pipe.Dispose(); }
++        return checks;
++    }
++}
 diff --git a/launcher/Emilyfn.Tests/Program.cs b/launcher/Emilyfn.Tests/Program.cs
 new file mode 100644
-index 0000000..3098513
+index 0000000..93bf08b
 --- /dev/null
 +++ b/launcher/Emilyfn.Tests/Program.cs
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,152 @@
 +using Emilyfn.Core;
 +using System.Collections.Concurrent;
 +using System.Diagnostics;
@@ -91,6 +212,7 @@ index 0000000..3098513
 +    Directory.CreateDirectory(Path.Combine(game, "FortniteGame", "Content", "Paks"));
 +    File.WriteAllText(Path.Combine(game, "FortniteGame", "Content", "Paks", "synthetic.pak"), "This is a test marker, not game data.");
 +    Check(Releases.Inspect(game).Release == "27.11", "version resource and installation inspection");
++    checks += await FeatureChecks.RunAsync(root, game, executable);
 +    suspended = NativeWindows.StartSuspendedCompanion(executable);
 +    await Task.Delay(150);
 +    Check(!suspended.HasExited && !File.Exists(executable + ".started-" + suspended.Id), "companion stays suspended without running its entry point");
@@ -160,7 +282,7 @@ index 0000000..3098513
 +        Check(File.Exists(marker) && await bundled.HealthyAsync(CancellationToken.None), "restarting uses the existing backend data");
 +        await bundled.StopOwnedAsync();
 +    }
-+    Console.WriteLine($"{checks} Emilyfn checks passed, including native x64 DLL loading, staged launch, UDP ownership, crash reporting, process cleanup and backend lifecycle. Synthetic game fixtures only; Fortnite gameplay is not covered.");
++    Console.WriteLine($"{checks} Emilyfn checks passed, including native x64 DLL loading, staged launch, UDP ownership, crash reporting, process cleanup, backend lifecycle, automatic build detection and Discord IPC. Synthetic game and Discord fixtures only; Fortnite gameplay and live Discord presence are not covered.");
 +}
 +finally
 +{
