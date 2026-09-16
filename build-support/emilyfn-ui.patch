@@ -61,7 +61,7 @@ index 0000000..97de4e0
 +}
 diff --git a/launcher/Emilyfn.App/Emilyfn.App.csproj b/launcher/Emilyfn.App/Emilyfn.App.csproj
 new file mode 100644
-index 0000000..98ad548
+index 0000000..52dcea5
 --- /dev/null
 +++ b/launcher/Emilyfn.App/Emilyfn.App.csproj
 @@ -0,0 +1,28 @@
@@ -76,8 +76,8 @@ index 0000000..98ad548
 +    <RootNamespace>Emilyfn.App</RootNamespace>
 +    <ApplicationIcon>../assets/Emilyfn.ico</ApplicationIcon>
 +    <ApplicationManifest>app.manifest</ApplicationManifest>
-+    <Version>0.2.0</Version>
-+    <FileVersion>0.2.0.0</FileVersion>
++    <Version>0.3.0</Version>
++    <FileVersion>0.3.0.0</FileVersion>
 +    <Description>Emilyfn private Fortnite launcher</Description>
 +    <Authors>Emilyfn</Authors>
 +    <PublishSingleFile>true</PublishSingleFile>
@@ -95,10 +95,10 @@ index 0000000..98ad548
 +</Project>
 diff --git a/launcher/Emilyfn.App/MainWindow.xaml b/launcher/Emilyfn.App/MainWindow.xaml
 new file mode 100644
-index 0000000..a8b2630
+index 0000000..2f9bfd1
 --- /dev/null
 +++ b/launcher/Emilyfn.App/MainWindow.xaml
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,150 @@
 +<Window x:Class="Emilyfn.App.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
 +        Title="Emilyfn" Width="1200" Height="840" MinWidth="1050" MinHeight="740" WindowStartupLocation="CenterScreen" Background="#0D111C" Icon="Emilyfn.ico" Foreground="#F4F5FB" FontFamily="Segoe UI" Closing="Window_Closing">
 +  <Grid>
@@ -122,7 +122,7 @@ index 0000000..a8b2630
 +            <TextBlock Text="Host" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="{Binding HostLabel}" FontSize="11" Foreground="#A899D3" Margin="0,4,0,12"/>
 +            <TextBlock Text="Client" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="{Binding ClientLabel}" FontSize="11" Foreground="#A899D3" Margin="0,4,0,0"/>
 +          </StackPanel></Border>
-+          <TextBlock Text="v0.2.0  ·  Made for Emily" Foreground="#626E89" FontSize="10" Margin="4,17,0,0"/>
++          <TextBlock Text="v0.3.0  ·  Made for Emily" Foreground="#626E89" FontSize="10" Margin="4,17,0,0"/>
 +        </StackPanel>
 +      </Grid>
 +    </Border>
@@ -183,6 +183,24 @@ index 0000000..a8b2630
 +          </StackPanel>
 +          <StackPanel x:Name="LibraryPage" Visibility="Collapsed">
 +            <Border Background="{StaticResource Panel}" CornerRadius="14" Padding="20" Margin="0,0,0,16"><StackPanel>
++              <TextBlock Text="Download a build" FontSize="20" FontWeight="SemiBold"/>
++              <TextBlock Text="Install a complete Windows build from a direct HTTPS ZIP link. Use a source you trust." Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,8,0,14"/>
++              <StackPanel IsEnabled="{Binding CanDownload}">
++                <TextBlock Text="ZIP download link" FontSize="12" Margin="0,0,0,6"/>
++                <TextBox Text="{Binding DownloadUrl, UpdateSourceTrigger=PropertyChanged}"/>
++                <Grid Margin="0,12,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
++                  <StackPanel Margin="0,0,12,0"><TextBlock Text="Release" FontSize="12" Margin="0,0,0,6"/><TextBox Text="{Binding DownloadRelease, UpdateSourceTrigger=PropertyChanged}" MaxLength="5"/></StackPanel>
++                  <StackPanel Grid.Column="1"><TextBlock Text="Install into" FontSize="12" Margin="0,0,0,6"/><DockPanel><Button DockPanel.Dock="Right" Content="Browse…" Click="DownloadFolder_Click" Margin="10,0,0,0"/><TextBox Text="{Binding DownloadFolder, UpdateSourceTrigger=PropertyChanged}"/></DockPanel></StackPanel>
++                </Grid>
++                <TextBlock Text="SHA256 checksum (optional, from your download source)" FontSize="11" Foreground="{StaticResource Muted}" Margin="0,12,0,6"/>
++                <TextBox Text="{Binding DownloadChecksum, UpdateSourceTrigger=PropertyChanged}" MaxLength="64"/>
++              </StackPanel>
++              <StackPanel Orientation="Horizontal" Margin="0,14,0,0"><Button Content="Download and install" Style="{StaticResource Accent}" Click="DownloadBuild_Click" IsEnabled="{Binding CanDownload}"/><Button Content="Cancel" Click="CancelDownload_Click" IsEnabled="{Binding CanCancelDownload}" Margin="10,0,0,0"/></StackPanel>
++              <ProgressBar Value="{Binding DownloadPercent}" IsIndeterminate="{Binding DownloadIndeterminate}" Height="6" Margin="0,14,0,0" Foreground="#8ED5D2"/>
++              <TextBlock Text="{Binding DownloadStatus}" Foreground="#8ED5D2" TextWrapping="Wrap" FontSize="11" Margin="0,9,0,0"/>
++              <TextBlock Text="Creates a new Fortnite-release folder. ZIP and extracted files need free space together. Cancelled downloads restart from the beginning." Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="11" Margin="0,8,0,0"/>
++            </StackPanel></Border>
++            <Border Background="{StaticResource Panel}" CornerRadius="14" Padding="20" Margin="0,0,0,16"><StackPanel>
 +              <TextBlock Text="Find installed builds" FontSize="20" FontWeight="SemiBold"/>
 +              <TextBlock Text="Detect releases from Epic records and game files, or scan your own builds folder." Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,8,0,14"/>
 +              <StackPanel Orientation="Horizontal"><Button Content="Detect builds" Style="{StaticResource Accent}" Click="Detect_Click" IsEnabled="{Binding CanDetect}"/><Button Content="Scan a folder…" Click="DetectFolder_Click" IsEnabled="{Binding CanDetect}" Margin="10,0,0,0"/><Button Content="Cancel" Click="CancelDetection_Click" IsEnabled="{Binding CanCancelDetection}" Margin="10,0,0,0"/></StackPanel>
@@ -222,7 +240,7 @@ index 0000000..a8b2630
 +              <StackPanel Orientation="Horizontal"><Button Content="Save preferences" Style="{StaticResource Accent}" Click="SaveSettings_Click"/><Button Content="Open Developer Portal" Click="DiscordPortal_Click" Margin="12,0,0,0"/></StackPanel>
 +            </StackPanel></Border>
 +            <Border Background="{StaticResource Panel}" CornerRadius="14" Padding="24" Margin="0,20,0,0"><StackPanel><TextBlock Text="Local backend" FontSize="21" FontWeight="SemiBold"/><TextBlock Text="Emilyfn starts its bundled backend, or uses a compatible one already running on port 3551." Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,10,0,18"/><Button Content="Start / check backend" HorizontalAlignment="Left" Click="Backend_Click"/></StackPanel></Border>
-+            <TextBlock Text="Emilyfn 0.2.0 · Experimental Seasons 19–30 support.&#10;A successful launch does not yet guarantee a complete match on every build." Foreground="#76829D" TextWrapping="Wrap" Margin="3,23,0,0" FontSize="12"/>
++            <TextBlock Text="Emilyfn 0.3.0 · Experimental Seasons 19–30 support.&#10;A successful launch does not yet guarantee a complete match on every build." Foreground="#76829D" TextWrapping="Wrap" Margin="3,23,0,0" FontSize="12"/>
 +          </StackPanel>
 +          <Grid x:Name="LogsPage" Visibility="Collapsed"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions><StackPanel Orientation="Horizontal" Margin="0,0,0,18"><Button Content="Export diagnostic ZIP" Style="{StaticResource Accent}" Click="ExportLogs_Click"/><Button Content="Open logs folder" Margin="12,0,0,0" Click="OpenLogs_Click"/></StackPanel><Border Grid.Row="1" Background="#090F19" CornerRadius="12" Padding="18" MinHeight="470"><TextBox Text="{Binding LogText, Mode=OneWay}" FontFamily="Consolas" FontSize="11" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Height="500" BorderThickness="0" Background="Transparent" Foreground="#B1C5D9"/></Border></Grid>
 +        </Grid>
@@ -233,10 +251,10 @@ index 0000000..a8b2630
 +</Window>
 diff --git a/launcher/Emilyfn.App/MainWindow.xaml.cs b/launcher/Emilyfn.App/MainWindow.xaml.cs
 new file mode 100644
-index 0000000..d67f2ed
+index 0000000..6db804b
 --- /dev/null
 +++ b/launcher/Emilyfn.App/MainWindow.xaml.cs
-@@ -0,0 +1,280 @@
+@@ -0,0 +1,337 @@
 +using Emilyfn.Core;
 +using Microsoft.Win32;
 +using System.Collections.ObjectModel;
@@ -261,6 +279,17 @@ index 0000000..d67f2ed
 +    private readonly long presenceStarted = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 +    private CancellationTokenSource? detection;
 +    private Task detectionTask = Task.CompletedTask;
++    private CancellationTokenSource? download;
++    private Task downloadTask = Task.CompletedTask;
++    public string DownloadUrl { get; set; } = "";
++    public string DownloadRelease { get; set; } = "30.40";
++    public string DownloadFolder { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Emilyfn", "Builds");
++    public string DownloadChecksum { get; set; } = "";
++    public string DownloadStatus { get; private set; } = "Paste a direct HTTPS ZIP link to a complete Windows build.";
++    public double DownloadPercent { get; private set; }
++    public bool DownloadIndeterminate { get; private set; }
++    public bool CanDownload => download is null && detection is null && !closing;
++    public bool CanCancelDownload => download is not null;
 +    private readonly bool preview;
 +    private bool closing;
 +    private readonly List<string> lines = [];
@@ -280,7 +309,7 @@ index 0000000..d67f2ed
 +    public string DiscordApplicationId { get; set; } = "";
 +    public string DiscordStatus { get; private set; } = "Disabled";
 +    public string DetectionStatus { get; private set; } = "Find builds in Epic records and common game folders.";
-+    public bool CanDetect => detection is null && !closing;
++    public bool CanDetect => detection is null && download is null && !closing;
 +    public bool CanCancelDetection => detection is not null;
 +    public string BackendStatus { get; private set; } = "Not started";
 +    public string PageTitle { get; private set; } = "Let's play, Emily.";
@@ -431,9 +460,9 @@ index 0000000..d67f2ed
 +        try
 +        {
 +            try { Save(); } catch (Exception error) { engine.Log(error.Message); }
-+            await detectionTask;
-+            await discord.DisposeAsync();
-+            await engine.StopAllAsync();
++            try { await detectionTask; } catch (Exception error) { engine.Log(error.Message); }
++            try { await downloadTask; } catch (Exception error) { engine.Log(error.Message); }
++            try { await discord.DisposeAsync(); } finally { await engine.StopAllAsync(); }
 +        }
 +        catch (Exception error) { engine.Log(error.Message); }
 +        finally { Close(); }
@@ -465,7 +494,7 @@ index 0000000..d67f2ed
 +    }
 +    private async Task DetectCoreAsync(string[]? roots, CancellationTokenSource scan)
 +    {
-+        Notify(nameof(CanDetect)); Notify(nameof(CanCancelDetection));
++        Notify(nameof(CanDetect)); Notify(nameof(CanCancelDetection)); Notify(nameof(CanDownload));
 +        DetectionStatus = "Looking for Fortnite builds…"; Notify(nameof(DetectionStatus));
 +        var saved = Installations.ToArray();
 +        try
@@ -495,7 +524,53 @@ index 0000000..d67f2ed
 +        finally
 +        {
 +            detection = null; scan.Dispose();
-+            Notify(nameof(CanDetect)); Notify(nameof(CanCancelDetection));
++            Notify(nameof(CanDetect)); Notify(nameof(CanCancelDetection)); Notify(nameof(CanDownload));
++        }
++    }
++    private async void DownloadFolder_Click(object sender, RoutedEventArgs e) => await ActionAsync(() =>
++    {
++        var dialog = new OpenFolderDialog { Title = "Choose where to install downloaded builds", Multiselect = false };
++        if (dialog.ShowDialog(this) == true) { DownloadFolder = dialog.FolderName; Notify(nameof(DownloadFolder)); }
++        return Task.CompletedTask;
++    });
++    private void CancelDownload_Click(object sender, RoutedEventArgs e) => download?.Cancel();
++    private async void DownloadBuild_Click(object sender, RoutedEventArgs e) => await ActionAsync(async () =>
++    {
++        if (!CanDownload) return;
++        download = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
++        downloadTask = DownloadCoreAsync(download);
++        await downloadTask;
++    });
++    private async Task DownloadCoreAsync(CancellationTokenSource cancellation)
++    {
++        var url = DownloadUrl.Trim(); var folder = DownloadFolder.Trim(); var release = DownloadRelease.Trim(); var checksum = DownloadChecksum.Trim();
++        Notify(nameof(CanDownload)); Notify(nameof(CanCancelDownload)); Notify(nameof(CanDetect));
++        DownloadPercent = 0; DownloadIndeterminate = true; DownloadStatus = "Preparing download…";
++        Notify(nameof(DownloadPercent)); Notify(nameof(DownloadIndeterminate)); Notify(nameof(DownloadStatus));
++        var progress = new Progress<DownloadProgress>(state =>
++        {
++            if (download != cancellation || closing) return;
++            DownloadStatus = state.Label; DownloadPercent = state.Percent; DownloadIndeterminate = state.Total is null;
++            Notify(nameof(DownloadStatus)); Notify(nameof(DownloadPercent)); Notify(nameof(DownloadIndeterminate));
++        });
++        try
++        {
++            using var downloader = new BuildDownloader();
++            var install = await Task.Run(() => downloader.InstallAsync(url, folder, release, checksum, progress, cancellation.Token));
++            Installations.Add(install);
++            if (!HostBusy && !ClientBusy) SelectedInstall = install;
++            settings.Installations = Installations.ToList(); settings.SelectedId = SelectedInstall?.Id;
++            store.Save(settings);
++            DownloadPercent = 100; DownloadStatus = $"Fortnite {install.Release} installed and added to Library.";
++            DownloadUrl = ""; Notify(nameof(DownloadUrl));
++            engine.Log(DownloadStatus);
++        }
++        catch (OperationCanceledException) { DownloadStatus = "Download cancelled. Temporary files removed; retry starts from the beginning."; }
++        catch (Exception error) { DownloadStatus = "Download failed: " + error.Message; throw; }
++        finally
++        {
++            download = null; cancellation.Dispose(); DownloadIndeterminate = false;
++            foreach (var property in new[] { nameof(CanDownload), nameof(CanCancelDownload), nameof(CanDetect), nameof(DownloadIndeterminate), nameof(DownloadStatus), nameof(DownloadPercent) }) Notify(property);
 +        }
 +    }
 +    public void RenderPreview(string file)
