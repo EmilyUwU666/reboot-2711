@@ -1,3 +1,39 @@
+## Emilyfn 0.3.1 — protected executable diagnosis
+
+- **Windows download:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35183004733/artifacts/10480194219
+- **Source and 30.40 analysis:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35183004733/artifacts/10480284128
+- **Successful build:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35183004733
+- Workflow commit: `10231fb8a958cfd15c9893e9bbf53543dbe4607f`
+- Windows ZIP: 115,558,665 bytes; SHA256 `6a0a26c0521f06ddecf505eac73a27a80c80c3bd9783cdcd01be8b2703bb5a97`.
+- Emilyfn.exe: 141,987,168 bytes; SHA256 `61aa1583f55e612221bc2467030d18e0c8d29564772ccb4606b68e33be573152`.
+
+**223 Windows checks passed**, including 21 new startup checks. The compiled
+preflight detector was also run locally against the actual uploaded executable.
+
+The supplied executable has an Epic-launcher-only TLS startup stub. Its callback
+displays the Epic Launcher message before terminating; its normal entry point and
+import table are absent and the main payload is opaque. The three reported timeouts
+occurred while loading authentication, before login or server SDK initialization.
+The upload's exact release cannot be independently established from its readable
+metadata. Its SHA256 is
+`81302ab997ce7a4015ded4cd60cbbf94a4ecd5810c4b8a1c8a2147aec3053c98`.
+
+The launcher now identifies this specific stub before starting the game and names
+the DLL in other loader timeout messages. This is a diagnosis/preflight update:
+it does not unpack the game or make 30.40 playable. Suppressing the message would
+not restore the encrypted game code or its original entry point. No verified loader
+for this exact file was established in the follow-up investigation.
+
+**LEGO Fortnite and Fortnite Festival remain unimplemented.** The executable's
+opaque payload provides no usable mode reflection/asset information. The current
+server selects Helios/Battle Royale and uses Athena game-state/player classes.
+A compatible readable/unpacked 30.40 executable or matching runtime/SDK dump,
+followed by the relevant mode assets and backend implementation, is still needed.
+The full findings are in `30.40-ANALYSIS.md` in the package. The permanent logo and
+existing downloader remain included; native game DLLs are unchanged.
+
+---
+
 ## Emilyfn 0.3.0.1 — permanent logo
 
 - **Windows download:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35137386465/artifacts/10463422669
@@ -104,8 +140,9 @@ Implementation needs an exact Chapter 5 build and its mode assets/reflection dat
 then mode-specific host startup, player spawning and backend contracts. LEGO world
 creation/save/reload and Festival stage/song/session behavior need separate runtime
 tests. First verify one release before extending to other Chapter 5 releases.
-No Chapter 5 executable, asset inventory or reflection dump was supplied here;
-the uploaded game logs concern the earlier 27.11 investigation. These modes remain
+The 30.40 executable supplied on 2026-09-17 was inspected, but its protected
+payload provides no readable mode reflection or asset data. See the 0.3.1
+investigation above and the analysis included in its package. These modes remain
 unavailable, and support for 31.xx is outside the existing 19.xx–30.xx package.
 
 ### Behavior and validation
