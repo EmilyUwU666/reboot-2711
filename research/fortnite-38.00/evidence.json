@@ -1,0 +1,424 @@
+{
+  "schema": 1,
+  "gameplay_support": "unimplemented",
+  "executed": false,
+  "sha256": "f4ddac1044edd0e8cc123f586f7204de8724989b6adcf25b2e34b4855747a5c0",
+  "size": 411324416,
+  "offsets_source_sha256": "7ac8538c5926d1ba1f246cd698760f43d3bfe5aa9823d5ad36fc77595af7a9aa",
+  "entry_rva": 164385160,
+  "sections": [
+    {
+      "name": ".text",
+      "virtual_size": 287428608,
+      "rva": 4096,
+      "raw_size": 287428608,
+      "raw": 4096
+    },
+    {
+      "name": ".rdata",
+      "virtual_size": 92143616,
+      "rva": 287432704,
+      "raw_size": 92143616,
+      "raw": 287432704
+    },
+    {
+      "name": ".data",
+      "virtual_size": 8331264,
+      "rva": 379576320,
+      "raw_size": 8331264,
+      "raw": 379576320
+    },
+    {
+      "name": ".pdata",
+      "virtual_size": 10203136,
+      "rva": 387907584,
+      "raw_size": 10203136,
+      "raw": 387907584
+    },
+    {
+      "name": ".msvcjmc",
+      "virtual_size": 4096,
+      "rva": 398110720,
+      "raw_size": 4096,
+      "raw": 398110720
+    },
+    {
+      "name": ".tls",
+      "virtual_size": 8192,
+      "rva": 398114816,
+      "raw_size": 8192,
+      "raw": 398114816
+    },
+    {
+      "name": "_RDATA",
+      "virtual_size": 4096,
+      "rva": 398123008,
+      "raw_size": 4096,
+      "raw": 398123008
+    },
+    {
+      "name": "la_upb_A",
+      "virtual_size": 4096,
+      "rva": 398127104,
+      "raw_size": 4096,
+      "raw": 398127104
+    },
+    {
+      "name": "protodes",
+      "virtual_size": 598016,
+      "rva": 398131200,
+      "raw_size": 598016,
+      "raw": 398131200
+    },
+    {
+      "name": ".rsrc",
+      "virtual_size": 49152,
+      "rva": 398729216,
+      "raw_size": 49152,
+      "raw": 398729216
+    },
+    {
+      "name": ".reloc",
+      "virtual_size": 9744384,
+      "rva": 398778368,
+      "raw_size": 9744384,
+      "raw": 398778368
+    },
+    {
+      "name": "",
+      "virtual_size": 1957888,
+      "rva": 408522752,
+      "raw_size": 1957888,
+      "raw": 408522752
+    }
+  ],
+  "markers": {
+    "++Fortnite+Release-38.00-CL-47722112": {
+      "ascii": 364339439,
+      "utf-16le": 373626668
+    },
+    "Unreal Engine 5.7.0": {
+      "ascii": -1,
+      "utf-16le": 373690266
+    },
+    "JunoRootPlayspace": {
+      "ascii": 358795337,
+      "utf-16le": 365634198
+    },
+    "PilgrimQuickplayPlayspace": {
+      "ascii": -1,
+      "utf-16le": 368017958
+    },
+    "SparksSongCatalog": {
+      "ascii": 358645630,
+      "utf-16le": 364703708
+    }
+  },
+  "literal_signature_inventory": [
+    {
+      "source_line": 62,
+      "signature": "40 53 48 83 EC 20 48 8B D9 E8 ? ? ? ? 48 8B C8 41 B8 04 ? ? ? 48 8B D3",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 65,
+      "signature": "48 89 5C 24 ? 57 48 83 EC ? 65 48 8B 04 25 ? ? ? ? 48 8B D9 B9 ? ? ? ? 48 8B 10 8B 04 11 39 05 ? ? ? ? 7E ? 48 8D 0D ? ? ? ? E8 ? ? ? ? 83 3D ? ? ? ? ? 75 ? 48 8D 3D ? ? ? ? 48 8B CF E8 ? ? ? ? 48 8D 0D ? ? ? ? 48 89 3D ? ? ? ? E8 ? ? ? ? 48 8D 0D ? ? ? ? E8 ? ? ? ? 48 8B 0D ? ? ? ? 41 B8",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 74,
+      "signature": "40 53 48 83 EC ? 33 C0 49 8B D8 48 39 42 ? 0F 95 C0 48 01 42 ? E8 ? ? ? ? 41 B8",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 173,
+      "signature": "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC ? 48 8B F1 41 8B D8 48 8B 0D ? ? ? ?",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 196,
+      "signature": "48 8B C4 48 89 58 ? 48 89 70 ? 48 89 78 ? 55 41 54 41 55 41 56 41 57 48 8D A8 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 45 33 ED 48 8B FA 4C 89 2A",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 202,
+      "signature": "48 89 5C 24 ? 48 89 6C 24 ? 48 89 74 24 ? 57 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 84 24 ? ? ? ? 33 ED 48 8B FA 48 89 2A 48 89 6A ? 8B 19",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 210,
+      "signature": "40 55 56 57 41 54 41 55 41 56 41 57 48 81 EC ? ? ? ? 48 8D 6C 24 ? 48 89 9D ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C5 48 89 85 ? ? ? ? 45 33 E4 4C 89 45 ? 4D 8B F8",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 212,
+      "signature": "40 55 56 57 41 54 41 55 41 56 41 57 48 81 EC ? ? ? ? 48 8D 6C 24 ? 48 89 9D ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C5 48 89 85 ? ? ? ? 45 33 F6",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 215,
+      "signature": "48 85 C9 0F 85 ? ? ? ? F7 87 ? ? ? ? ? ? ? ? ? 8B ?",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 217,
+      "signature": "41 FF 92 ? ? ? ? E9 ? ? ? ? 49 8B C8",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 235,
+      "signature": "48 8B 05 ? ? ? ? 48 8D 14 C8 EB 03 49 8B D6 8B 42 08 C1 E8 1D A8 01 0F 85 ? ? ? ? F7 86 ? ? ? ? ? ? ? ?",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 237,
+      "signature": "48 8B 05 ? ? ? ? 48 8D 1C C8 81 4B ? ? ? ? ? 49 63 76 30",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 242,
+      "signature": "48 8B 41 20 4C 8B D2 48 8B D1 44 0F B6 08 48 FF",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 244,
+      "signature": "48 8B 41 ? 4C 8B DA 44 0F B6 08",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 247,
+      "signature": "41 8B 40 ? 4D 8B C8 48 0F BA E0",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 249,
+      "signature": "48 8B C4 48 89 58 ? 48 89 68 ? 48 89 70 ? 48 89 78 ? 41 54 41 56 41 57 48 83 EC ? 41 8B 40 ? 49 8B D8 48 8B F2",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 251,
+      "signature": "48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC ? 41 8B 40 ? 49 8B D8 48 8B F2",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 253,
+      "signature": "41 8B 40 ? 4D 8B C8",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 256,
+      "signature": "48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC 20 33 FF 48 8B DA 48 8B F1 48",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 259,
+      "signature": "48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC 20 33 DB 48 8B FA 48 8B F1 48 85 D2 0F 84 ? ? ? ? 8B 82 ? ? ? ? C1 E8",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 263,
+      "signature": "48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC ? 33 DB 48 8B FA 48 8B F1 48 85 D2 74 ? F7 82",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 267,
+      "signature": "48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC ? 33 DB 48 8B FA 48 8B F1 48 85 D2 0F 84 ? ? ? ? F7 82",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 270,
+      "signature": "48 8B C4 48 89 58 ? 48 89 68 ? 48 89 70 ? 48 89 78 ? 41 56 48 83 EC ? 33 DB 48 8B FA 48 8B E9",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 273,
+      "signature": "4C 8B DC 49 89 5B ? 49 89 73 ? 57 48 83 EC ? 33 DB 48 8B FA 48 8B F1",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 276,
+      "signature": "48 89 5C 24 ? 48 89 74 24 ? 57 48 81 EC ? ? ? ? 33 DB 48 8B FA",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 283,
+      "signature": "48 89 74 24 ? 48 89 7C 24 ? 55 41 54 41 55 41 56 41 57 48 8B EC 48 83 EC ? 4C 8B E9 48 8D 4D",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 286,
+      "signature": "48 89 5C 24 ? 48 89 74 24 ? 55 41 54 41 55 41 56 41 57 48 8B EC 48 83 EC ? 4C 8B E9",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 290,
+      "signature": "48 89 5C 24 ? 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 48 83 FA FF",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 293,
+      "signature": "48 89 5C 24 ? 48 89 74 24 ? 48 89 7C 24 ? 55 41 56 41 57 48 8B EC 48 83 EC ? 33 DB 4C 8B F9",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 297,
+      "signature": "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 33 F6 4C 8B E1 48 83 CB",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 300,
+      "signature": "48 89 5C 24 ? 48 89 74 24 ? 55 57 41 56 48 8B EC 48 83 EC 60 33 DB 4C 8B F1 48 8D 4D E8 41 8A F1",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 303,
+      "signature": "48 89 5C 24 ? 48 89 74 24 ? 48 89 7C 24 ? 55 41 56 41 57 48 8B EC 48 83 EC 60 33 DB 4C 8B F9 48 8D 4D E8 45",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 307,
+      "signature": "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 45 33 F6 4C 8B E1 45 0F B6 E9 49 8B F8 41 8B C6",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 314,
+      "signature": "48 89 5C 24 ? 48 89 74 24 ? 4C 89 64 24 ? 55 41 55 41 57 48 8B EC 48 83 EC 60 45 8A E1 4C 8B E9 48 83 FA",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 318,
+      "signature": "48 89 5C 24 ? 48 89 74 24 ? 4C 89 64 24 ? 55 41 55 41 57 48 8B EC 48 83 EC 50 4C 8B E9",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 321,
+      "signature": "48 89 5C 24 ? 48 89 7C 24 ? 4C 89 64 24 ? 55 41 56 41 57 48 8B EC 48 83 EC 60 33 FF 4C 8B E1 48 8D 4D E8 45 8A",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 325,
+      "signature": "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 33 F6 4C 8B E1 48 83 CB",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 333,
+      "signature": "48 89 5C 24 ? 48 89 74 24 ? 48 89 7C 24 ? 55 41 54 41 55 41 56 41 57 48 8B EC 48 83 EC 60 45 33 ED 45 8A F9 44 38 2D ? ? ? ? 49 8B F8 48 8B",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 336,
+      "signature": "48 89 5C 24 ? 48 89 74 24 ? 48 89 7C 24 ? 55 41 54 41 55 41 56 41 57 48 8B EC 48 83 EC 60 45 33 ED 45 8A F9 44 38 2D ? ? ? ? 49 8B F8 48 8B F2 4C 8B E1",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 339,
+      "signature": "40 55 53 57 41 54 41 55 41 57 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 342,
+      "signature": "4C 8B DC 57 48 81 EC ? ? ? ? 80 3D ? ? ? ? ? 49 89 6B F0 49 89 73 E8",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 345,
+      "signature": "48 89 5C 24 ? 48 89 74 24 ? 55 57 41 54 41 56 41 57 48 8B EC 48 83 EC 60 80 3D ? ? ? ? ? 45 0F B6 F1 49 8B F8",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 348,
+      "signature": "4C 8B DC 49 89 5B 08 49 89 6B 18 49 89 73 20 57 41 56 41 57 48 83 EC 60 80 3D",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 369,
+      "signature": "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 8B 85 ? ? ? ? 33 FF 8B 35",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 373,
+      "signature": "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ? ? ? ? B8 ? ? ? ? E8 ? ? ? ? 48 2B E0 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 8B 85",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 377,
+      "signature": "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 48 8B 85 ? ? ? ? 33 FF 48 8B B5",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 380,
+      "signature": "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 48 8B 85 ? ? ? ? 45 33 FF 4C 8B B5 ? ? ? ? 49 8B D8",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 385,
+      "signature": "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 48 8B 85 ? ? ? ? 45 33 E4 4C 8B B5 ? ? ? ? 49 8B D8",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 390,
+      "signature": "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 48 8B 85 ? ? ? ? 45 33 FF 48 8B B5 ? ? ? ? 49 8B D8",
+      "match_count": 0,
+      "candidate_rvas": []
+    },
+    {
+      "source_line": 395,
+      "signature": "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 85 ? ? ? ? 48 8B 85 ? ? ? ? 33 FF 4C 8B B5 ? ? ? ? 49 8B D8",
+      "match_count": 0,
+      "candidate_rvas": []
+    }
+  ],
+  "limitations": [
+    "Substring presence does not establish class availability.",
+    "Static matches do not establish ABI or runtime compatibility.",
+    "Conditional, reference-based, and generated scanners are not evaluated."
+  ]
+}
