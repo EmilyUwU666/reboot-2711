@@ -1,3 +1,23 @@
+## Emilyfn 0.3.0.1 — permanent logo
+
+- **Windows download:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35137386465/artifacts/10463422669
+- **Source:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35137386465/artifacts/10463562306
+- **UI previews:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35137386465/artifacts/10463362897
+- **Successful build:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35137386465
+- Workflow commit: `178f807e7502efcd8f4b532e1d819f8d677aa304`
+- Windows ZIP: 115,553,708 bytes; SHA256 `4a87d4d58a21ccd2240eae576c4d021bbc7deaeaf49ab52c258b501ecd426a8e`.
+
+Emily's new square artwork is the permanent default Windows executable/window icon
+and in-app badge. The complete uploaded image is preserved in the source and fitted
+into the icon without cropping. The FortForge window inherits the launcher icon.
+Application version remains 0.3.0; Windows file version is 0.3.0.1.
+
+**202 Windows checks passed.** The compiled icon and launcher preview were inspected.
+This update changes branding; the native game DLLs are unchanged. Fortnite 30.40
+runtime compatibility remains unverified, including the reported module timeout.
+
+---
+
 ## Emilyfn 0.3.0 — public build downloader
 
 - **Windows download:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35136606000/artifacts/10464100705
