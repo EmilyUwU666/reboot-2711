@@ -81,3 +81,20 @@ The checked-in report records executable and SDK source hashes, PE sections,
 marker locations and all signature results. Marker offsets are byte offsets;
 signature candidates are RVAs. The checker is an offline investigation tool,
 not an executable authenticity validator or a runtime compatibility test.
+
+## Version binding follow-up
+
+`build-support/modern-version-binding.patch` adds a fallback version binding
+without enabling gameplay. The exact `GetEngineVersion` name at RVA 0x158854c8
+is paired with exec wrapper RVA 0x0c38d3ac in the registration table at RVA
+0x11c5e3f0. Disassembly of the wrapper shows relative calls at offsets 40 and 62
+to storage getter 0x090866a2 and version formatter 0x0029d7e2, passing format
+argument 4. The getter initializes storage through 0x09cf8dc4, whose constructor
+writes major/minor 5/7 and patch 0. The formatter reads version fields and builds
+an FString. These observations establish the purpose of the candidate calls.
+
+The implementation uses a unique wrapper signature and bounded relative-call
+resolution rather than fixed addresses. Thirteen portable checks passed,
+including actual-image resolution and negative tests. Calling the functions in
+a running game remains untested. The existing gameplay compatibility gate still
+rejects 38.00. Versions 31-37 have not been examined.

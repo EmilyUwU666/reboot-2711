@@ -144,7 +144,7 @@ index 948e289..a2d2769 100644
          if (!OutVar.Data || OutVar.NumElements < 2 || OutVar.NumElements > 1024 || OutVar.NumElements > OutVar.MaxElements
 diff --git a/tests/modern_version_binding_tests.cpp b/tests/modern_version_binding_tests.cpp
 new file mode 100644
-index 0000000..619d041
+index 0000000..3f51bc6
 --- /dev/null
 +++ b/tests/modern_version_binding_tests.cpp
 @@ -0,0 +1,50 @@
@@ -179,7 +179,7 @@ index 0000000..619d041
 +    check(found && found->Storage == 70 && found->Format == 800);
 +    install(300, 70, 800);
 +    check(!FindModernVersionBinding(b.data(), 1024, 64, 900));
-+    std::fill(b.begin(), b.end(), 0xcc);
++    std::fill(b.begin(), b.end(), static_cast<std::uint8_t>(0xcc));
 +    install(100, 63, 800);
 +    check(!FindModernVersionBinding(b.data(), 1024, 64, 900));
 +    install(100, 70, 964);
