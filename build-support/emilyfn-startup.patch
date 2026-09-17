@@ -1,0 +1,510 @@
+diff --git a/launcher/30.40-ANALYSIS.md b/launcher/30.40-ANALYSIS.md
+new file mode 100644
+index 0000000..12301cb
+--- /dev/null
++++ b/launcher/30.40-ANALYSIS.md
+@@ -0,0 +1,86 @@
++# Supplied 30.40 executable and startup investigation
++
++Inspected 2026-09-17. The upload was described as Fortnite 30.40; its protected
++contents do not expose a release string that independently verifies that label.
++
++## File examined
++
++- Filename: `FortniteClient-Win64-Shipping.exe`
++- Size: 320,059,920 bytes
++- SHA256: `81302ab997ce7a4015ded4cd60cbbf94a4ecd5810c4b8a1c8a2147aec3053c98`
++- Format: x64 PE32+, three unnamed sections, image base `0x140000000`.
++- Entry-point RVA: zero. Import directory: absent. TLS callback RVA: `0x1312ec00`.
++- The large payload section is opaque; a sampled 1 MiB has approximately
++  8 bits of entropy per byte. No ASCII/UTF-16 Fortnite release marker was found.
++- The ZIP contains only the executable, with no game assets or runtime dump.
++
++The executable was inspected as data. It was not run, modified, decrypted or
++published with this source. Regression tests use a small synthetic PE fixture.
++The compiled C# preflight detector was also run against the actual uploaded file
++and recognized this stub. All 21 new startup checks passed locally before the
++Windows package build.
++
++## Why Emilyfn reports a module timeout
++
++The diagnostic ZIP contains three new host attempts that stop at **Loading local
++authentication**, exactly 20 seconds after process creation. None of their process
++IDs appears in the authentication startup log. That log is left over from an older
++24.40 attempt; the server/client logs record successful SDK initialization only
++for earlier 27.11 and 24.40 sessions. No new login or server-module initialization
++is recorded for the failing attempts.
++
++Static disassembly of the supplied executable's TLS callback shows it constructs
++the message **"Please launch the game through the Epic Games launcher."** using
++stack byte writes. It resolves `LoadLibraryA`, loads `user32.dll`, resolves and
++calls `MessageBoxA`, then calls `ZwTerminateProcess` after the dialog returns.
++There is no normal direct-launch entry point in this file.
++
++This is consistent with the new process being blocked inside its own startup
++dialog before Emilyfn's authentication loader thread can run. Windows serializes
++new thread startup with process/DLL initialization; see Microsoft's
++[CreateRemoteThread documentation](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createremotethread).
++We did not capture a live thread stack, so the user's exact waiting instruction
++has not been observed. The incompatible startup stub itself is confirmed from
++the supplied file. Increasing the timeout does not provide the missing startup
++preparation or a compatible game image.
++
++Emilyfn 0.3.1 checks for this specific combination of PE headers, executable TLS
++callback and complete startup-message instructions before import, installation
++or launch. It does not reject a file merely for using TLS or having missing version
++metadata. A saved manual release label cannot override the check. Other loader
++timeouts now name the DLL, process ID and wait duration. Game DLLs are unchanged.
++
++This is an executable compatibility/error-reporting fix, not a claim that Fortnite
++30.40 is playable. A compatible installation of the same exact release is still
++required before native SDK and match behavior can be tested.
++
++## LEGO Fortnite and Fortnite Festival
++
++**Neither mode is implemented or validated in the current Emilyfn game server.**
++
++The supplied executable has no readable ASCII or UTF-16 matches for `LEGO`,
++`LegoFortnite`, `FortniteFestival`, `Festival`, `Juno`, `JunoGame`, or `Sparks`.
++The same scan also finds no `AthenaGameMode`, `Helios_Terrain`, or release marker.
++Because the main payload is opaque, these negative results do **not** prove
++that the underlying Fortnite build lacks either mode. They provide no usable
++class layouts, function addresses, playlists or asset paths for implementing them.
++
++The current source establishes the following separate limitations:
++
++| Area | Current implementation | Work still required |
++| --- | --- | --- |
++| Chapter 5 startup | `Reboot2711/RuntimeProfile.h` selects `Helios_Terrain` | Exact mode-specific startup and content loading |
++| Playlist | `Erbium/Erbium/Public/Configuration.h` selects Battle Royale Solo | Verified playlists and compatible game-mode classes |
++| Game state and players | `Erbium/FortniteGame/Private/FortGameMode.cpp` expects Athena state, controllers and pawns | Mode-specific spawning, state and replication |
++| LEGO worlds | No LEGO-specific implementation found in server/client/SDK source | World creation, loading, persistence, inventory and join behavior |
++| Festival sessions | No Festival-specific implementation found in server/client/SDK source | Stage/session state, song content, timing and player behavior |
++
++The older Athena concert references in the source are not a Fortnite Festival
++implementation. Accepting a release number or adding a mode button would not
++implement these systems.
++
++The next useful inputs are a readable/unpacked executable or matching SDK/reflection
++dump from the exact 30.40 build, plus its relevant asset inventory. Asset names
++alone are not sufficient to run the modes; the corresponding content and backend
++contracts must then be implemented and tested on Windows. This update does not
++add a guessed mode selector or claim that either mode works.
+diff --git a/launcher/Emilyfn.App/Emilyfn.App.csproj b/launcher/Emilyfn.App/Emilyfn.App.csproj
+index a284a76..61417d9 100644
+--- a/launcher/Emilyfn.App/Emilyfn.App.csproj
++++ b/launcher/Emilyfn.App/Emilyfn.App.csproj
+@@ -9,8 +9,8 @@
+     <RootNamespace>Emilyfn.App</RootNamespace>
+     <ApplicationIcon>../assets/Emilyfn.ico</ApplicationIcon>
+     <ApplicationManifest>app.manifest</ApplicationManifest>
+-    <Version>0.3.0</Version>
+-    <FileVersion>0.3.0.1</FileVersion>
++    <Version>0.3.1</Version>
++    <FileVersion>0.3.1.0</FileVersion>
+     <Description>Emilyfn private Fortnite launcher</Description>
+     <Authors>Emilyfn</Authors>
+     <PublishSingleFile>true</PublishSingleFile>
+diff --git a/launcher/Emilyfn.App/MainWindow.xaml b/launcher/Emilyfn.App/MainWindow.xaml
+index 6548820..eefd2a7 100644
+--- a/launcher/Emilyfn.App/MainWindow.xaml
++++ b/launcher/Emilyfn.App/MainWindow.xaml
+@@ -21,7 +21,7 @@
+             <TextBlock Text="Host" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="{Binding HostLabel}" FontSize="11" Foreground="#A899D3" Margin="0,4,0,12"/>
+             <TextBlock Text="Client" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="{Binding ClientLabel}" FontSize="11" Foreground="#A899D3" Margin="0,4,0,0"/>
+           </StackPanel></Border>
+-          <TextBlock Text="v0.3.0  ·  Made for Emily" Foreground="#626E89" FontSize="10" Margin="4,17,0,0"/>
++          <TextBlock Text="v0.3.1  ·  Made for Emily" Foreground="#626E89" FontSize="10" Margin="4,17,0,0"/>
+         </StackPanel>
+       </Grid>
+     </Border>
+@@ -142,7 +142,7 @@
+               <StackPanel Orientation="Horizontal"><Button Content="Save preferences" Style="{StaticResource Accent}" Click="SaveSettings_Click"/><Button Content="Open Developer Portal" Click="DiscordPortal_Click" Margin="12,0,0,0"/></StackPanel>
+             </StackPanel></Border>
+             <Border Background="{StaticResource Panel}" CornerRadius="14" Padding="24" Margin="0,20,0,0"><StackPanel><TextBlock Text="Local backend" FontSize="21" FontWeight="SemiBold"/><TextBlock Text="Emilyfn starts its bundled backend, or uses a compatible one already running on port 3551." Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,10,0,18"/><Button Content="Start / check backend" HorizontalAlignment="Left" Click="Backend_Click"/></StackPanel></Border>
+-            <TextBlock Text="Emilyfn 0.3.0 · Experimental Seasons 19–30 support.&#10;A successful launch does not yet guarantee a complete match on every build." Foreground="#76829D" TextWrapping="Wrap" Margin="3,23,0,0" FontSize="12"/>
++            <TextBlock Text="Emilyfn 0.3.1 · Experimental Seasons 19–30 support.&#10;A successful launch does not yet guarantee a complete match on every build." Foreground="#76829D" TextWrapping="Wrap" Margin="3,23,0,0" FontSize="12"/>
+           </StackPanel>
+           <Grid x:Name="LogsPage" Visibility="Collapsed"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions><StackPanel Orientation="Horizontal" Margin="0,0,0,18"><Button Content="Export diagnostic ZIP" Style="{StaticResource Accent}" Click="ExportLogs_Click"/><Button Content="Open logs folder" Margin="12,0,0,0" Click="OpenLogs_Click"/></StackPanel><Border Grid.Row="1" Background="#090F19" CornerRadius="12" Padding="18" MinHeight="470"><TextBox Text="{Binding LogText, Mode=OneWay}" FontFamily="Consolas" FontSize="11" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Height="500" BorderThickness="0" Background="Transparent" Foreground="#B1C5D9"/></Border></Grid>
+         </Grid>
+diff --git a/launcher/Emilyfn.Core/BuildDetector.cs b/launcher/Emilyfn.Core/BuildDetector.cs
+index 053fcef..6ee2286 100644
+--- a/launcher/Emilyfn.Core/BuildDetector.cs
++++ b/launcher/Emilyfn.Core/BuildDetector.cs
+@@ -137,7 +137,9 @@ public static class BuildDetector
+                     if (File.Exists(exe))
+                     {
+                         progress?.Invoke("Checking " + directory);
+-                        var inspected = Releases.Inspect(directory, cancellation);
++                        (string Root, string? Release) inspected;
++                        try { inspected = Releases.Inspect(directory, cancellation); }
++                        catch (InvalidDataException error) { progress?.Invoke(error.Message); continue; }
+                         if (inspected.Release is { } release) found.Add(new(Guid.NewGuid().ToString("N"), inspected.Root, release));
+                         else unknown.Add(inspected.Root);
+                         continue; // Do not descend into game content.
+diff --git a/launcher/Emilyfn.Core/GameExecutable.cs b/launcher/Emilyfn.Core/GameExecutable.cs
+new file mode 100644
+index 0000000..773ed2a
+--- /dev/null
++++ b/launcher/Emilyfn.Core/GameExecutable.cs
+@@ -0,0 +1,101 @@
++using System.Buffers.Binary;
++using System.Reflection.PortableExecutable;
++
++namespace Emilyfn.Core;
++
++public static class GameExecutable
++{
++    public const string EpicLauncherMessage = "Please launch the game through the Epic Games launcher.";
++    public const string UnsupportedMessage = "This Fortnite executable contains an Epic-launcher-only startup stub. Emilyfn cannot start this copy. Use a compatible installation of the same Fortnite release; changing the release number or DLL timeout will not make this file compatible.";
++
++    public static void RequireDirectLaunch(string executable)
++    {
++        try
++        {
++            if (HasEpicLauncherStub(executable)) throw new InvalidDataException(UnsupportedMessage);
++        }
++        catch (BadImageFormatException error)
++        {
++            throw new InvalidDataException("The selected game executable has invalid PE headers. Check the installation files.", error);
++        }
++    }
++
++    // Recognize the specific startup stub found in the supplied file. TLS, missing
++    // version metadata, packing, or a zero entry point alone are not proof of it.
++    // This reads bounded file ranges only; it never loads or modifies the executable.
++    public static bool HasEpicLauncherStub(string executable)
++    {
++        using var stream = File.OpenRead(executable);
++        using var image = new PEReader(stream, PEStreamOptions.LeaveOpen);
++        var headers = image.PEHeaders;
++        var pe = headers.PEHeader ?? throw new InvalidDataException("The game executable has no PE optional header.");
++        if (pe.Magic != PEMagic.PE32Plus || pe.AddressOfEntryPoint != 0
++            || pe.ImportTableDirectory.RelativeVirtualAddress != 0
++            || pe.ThreadLocalStorageTableDirectory.RelativeVirtualAddress == 0
++            || pe.ThreadLocalStorageTableDirectory.Size < 40) return false;
++
++        byte[] ReadRva(ulong rva, int count, bool executableSection = false)
++        {
++            foreach (var section in headers.SectionHeaders)
++            {
++                if (section.VirtualAddress < 0 || section.PointerToRawData < 0 || section.SizeOfRawData <= 0) continue;
++                if (executableSection && (section.SectionCharacteristics & SectionCharacteristics.MemExecute) == 0) continue;
++                var start = (ulong)section.VirtualAddress;
++                if (rva < start || rva - start >= (ulong)section.SizeOfRawData) continue;
++                var delta = rva - start;
++                var offset = (long)section.PointerToRawData + (long)delta;
++                if (offset < 0 || offset >= stream.Length) return [];
++                var available = Math.Min((long)section.SizeOfRawData - (long)delta, stream.Length - offset);
++                var bytes = new byte[(int)Math.Min(count, available)];
++                stream.Position = offset;
++                stream.ReadExactly(bytes);
++                return bytes;
++            }
++            return [];
++        }
++
++        var tls = ReadRva((uint)pe.ThreadLocalStorageTableDirectory.RelativeVirtualAddress, 40);
++        if (tls.Length < 40) return false;
++        var callbackTable = BinaryPrimitives.ReadUInt64LittleEndian(tls.AsSpan(24));
++        if (callbackTable < pe.ImageBase) return false;
++        var callbacks = ReadRva(callbackTable - pe.ImageBase, 8 * 16);
++        for (var index = 0; index + 8 <= callbacks.Length; index += 8)
++        {
++            var callback = BinaryPrimitives.ReadUInt64LittleEndian(callbacks.AsSpan(index));
++            if (callback == 0) break;
++            if (callback < pe.ImageBase) continue;
++            if (ContainsStackMessage(ReadRva(callback - pe.ImageBase, 8192, true))) return true;
++        }
++        return false;
++    }
++
++    private static bool ContainsStackMessage(ReadOnlySpan<byte> code)
++    {
++        // The message is built using consecutive mov byte ptr [rsp+disp], imm8
++        // instructions, with short and long stack displacements. Match the entire
++        // NUL-terminated literal and consecutive destinations, not stray text.
++        for (var start = 0; start < code.Length; start++)
++        {
++            var position = start;
++            long previous = -1;
++            for (var character = 0; character <= EpicLauncherMessage.Length; character++)
++            {
++                var remaining = code[position..];
++                int length, displacement;
++                byte value;
++                if (remaining.Length >= 5 && remaining[0] == 0xc6 && remaining[1] == 0x44 && remaining[2] == 0x24)
++                { length = 5; displacement = (sbyte)remaining[3]; value = remaining[4]; }
++                else if (remaining.Length >= 8 && remaining[0] == 0xc6 && remaining[1] == 0x84 && remaining[2] == 0x24)
++                { length = 8; displacement = BinaryPrimitives.ReadInt32LittleEndian(remaining[3..]); value = remaining[7]; }
++                else break;
++                if (displacement < 0 || displacement > 4096 || (character > 0 && displacement != previous + 1)) break;
++                var expected = character < EpicLauncherMessage.Length ? (byte)EpicLauncherMessage[character] : (byte)0;
++                if (value != expected) break;
++                if (character == EpicLauncherMessage.Length) return true;
++                previous = displacement;
++                position += length;
++            }
++        }
++        return false;
++    }
++}
+diff --git a/launcher/Emilyfn.Core/LauncherEngine.cs b/launcher/Emilyfn.Core/LauncherEngine.cs
+index 796531e..b233f54 100644
+--- a/launcher/Emilyfn.Core/LauncherEngine.cs
++++ b/launcher/Emilyfn.Core/LauncherEngine.cs
+@@ -71,7 +71,7 @@ public sealed class LauncherEngine
+         foreach (var other in sessions.Values) LaunchProtocol.RequireMatching(install, other.Install);
+         var session = new Session(role, install);
+         if (!sessions.TryAdd(role, session)) throw new InvalidOperationException("That instance is already starting.");
+-        State(session, LaunchStage.Checking, "Checking installation");
++        State(session, LaunchStage.Checking, $"Checking Fortnite {install.Release} installation");
+         session.Work = RunAsync(session, settings.DisplayName, settings.HeadlessHost);
+         await session.Ready.Task;
+     }
+@@ -84,6 +84,7 @@ public sealed class LauncherEngine
+         {
+             await launchGate.WaitAsync(token); gateHeld = true;
+             foreach (var other in sessions.Values) LaunchProtocol.RequireMatching(session.Install, other.Install);
++            Log($"{session.Role}: Executable: {session.Install.Executable}");
+             var inspected = await Task.Run(() => Releases.Inspect(session.Install.Directory, token), token);
+             if (inspected.Release is not null && inspected.Release != session.Install.Release) throw new InvalidOperationException("The executable metadata differs from the saved release. Remove and add this installation again.");
+             if (compatibility.Length == 0) throw new FileNotFoundException("Compatibility settings are missing. Extract the full Emilyfn package.");
+diff --git a/launcher/Emilyfn.Core/Models.cs b/launcher/Emilyfn.Core/Models.cs
+index 0e06867..2f9d338 100644
+--- a/launcher/Emilyfn.Core/Models.cs
++++ b/launcher/Emilyfn.Core/Models.cs
+@@ -55,6 +55,7 @@ public static partial class Releases
+         var exe = Path.Combine(root, "FortniteGame", "Binaries", "Win64", "FortniteClient-Win64-Shipping.exe");
+         if (!File.Exists(exe)) throw new IOException("Choose the Fortnite folder containing FortniteGame and Engine.");
+         PeImage.RequireX64(exe, false);
++        GameExecutable.RequireDirectLaunch(exe);
+         var paks = Path.Combine(root, "FortniteGame", "Content", "Paks");
+         if (!System.IO.Directory.Exists(paks) || !System.IO.Directory.EnumerateFiles(paks).Any(p => Path.GetExtension(p) is ".pak" or ".utoc"))
+             throw new IOException("The selected installation has no .pak or .utoc game content.");
+diff --git a/launcher/Emilyfn.Core/NativeWindows.cs b/launcher/Emilyfn.Core/NativeWindows.cs
+index f83e31e..d9810e5 100644
+--- a/launcher/Emilyfn.Core/NativeWindows.cs
++++ b/launcher/Emilyfn.Core/NativeWindows.cs
+@@ -47,7 +47,7 @@ public static class NativeWindows
+                 if (remoteOwner is not null) break;
+                 Thread.Sleep(50);
+             }
+-            if (remoteOwner is null) throw new TimeoutException("The game's Windows module loader did not become available.");
++            if (remoteOwner is null) throw new TimeoutException($"Windows loader unavailable for {Path.GetFileName(dll)} (PID {process.Id}). Open Logs and export the diagnostic ZIP.");
+             // Resolve the function relative to its actual owning DLL, including forwarded exports.
+             var offset = localLoadLibrary.ToInt64() - localOwner.ToInt64();
+             if (offset < 0 || offset >= remoteOwner.ModuleMemorySize) throw new InvalidOperationException("Unexpected Windows loader address.");
+@@ -61,11 +61,12 @@ public static class NativeWindows
+             while (clock.ElapsedMilliseconds < timeoutMilliseconds)
+             {
+                 cancellation.ThrowIfCancellationRequested();
++                if (process.HasExited) throw new InvalidOperationException($"Game exited while loading {Path.GetFileName(dll)} · code 0x{unchecked((uint)process.ExitCode):X8}.");
+                 var status = WaitForSingleObject(thread, 50);
+                 if (status == 0) { completed = true; break; }
+                 if (status != 258) throw Error("The module loader wait failed");
+             }
+-            if (!completed) throw new TimeoutException("The game's module loader timed out. Close this instance before retrying.");
++            if (!completed) throw new TimeoutException($"Loading {Path.GetFileName(dll)} timed out after {timeoutMilliseconds / 1000.0:0.#} seconds (PID {process.Id}). The game may be blocked during its own startup. Check for a game error dialog, then export the diagnostic ZIP from Logs.");
+             process.Refresh();
+             if (process.HasExited) throw new InvalidOperationException("The game exited while loading its module.");
+             // Thread exit codes are 32-bit; confirm the full module path instead of truncating HMODULE.
+diff --git a/launcher/Emilyfn.Tests/Program.cs b/launcher/Emilyfn.Tests/Program.cs
+index d7b902c..3be7a27 100644
+--- a/launcher/Emilyfn.Tests/Program.cs
++++ b/launcher/Emilyfn.Tests/Program.cs
+@@ -70,6 +70,7 @@ try
+     Directory.CreateDirectory(Path.Combine(game, "FortniteGame", "Content", "Paks"));
+     File.WriteAllText(Path.Combine(game, "FortniteGame", "Content", "Paks", "synthetic.pak"), "This is a test marker, not game data.");
+     Check(Releases.Inspect(game).Release == "27.11", "version resource and installation inspection");
++    checks += await StartupChecks.RunAsync(root, executable, package, setting);
+     checks += await FeatureChecks.RunAsync(root, game, executable);
+     checks += await DownloadChecks.RunAsync(root, executable);
+     suspended = NativeWindows.StartSuspendedCompanion(executable);
+diff --git a/launcher/Emilyfn.Tests/StartupChecks.cs b/launcher/Emilyfn.Tests/StartupChecks.cs
+new file mode 100644
+index 0000000..bcb5605
+--- /dev/null
++++ b/launcher/Emilyfn.Tests/StartupChecks.cs
+@@ -0,0 +1,124 @@
++using Emilyfn.Core;
++using System.Buffers.Binary;
++using System.IO.Compression;
++using System.Net;
++using System.Security.Cryptography;
++using System.Text;
++
++internal static class StartupChecks
++{
++    // A small, non-runnable PE fixture. No Fortnite executable/code is included.
++    private static byte[] ProtectedFixture(bool longDisplacements = false)
++    {
++        var bytes = new byte[0x3400];
++        void U16(int offset, ushort value) => BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(offset), value);
++        void U32(int offset, uint value) => BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(offset), value);
++        void U64(int offset, ulong value) => BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(offset), value);
++        U16(0, 0x5a4d); U32(0x3c, 0x80); U32(0x80, 0x4550);
++        U16(0x84, 0x8664); U16(0x86, 1); U16(0x94, 240); U16(0x96, 0x22);
++        const int optional = 0x98;
++        U16(optional, 0x20b); U64(optional + 24, 0x140000000);
++        U32(optional + 32, 0x1000); U32(optional + 36, 0x200);
++        U32(optional + 56, 0x4000); U32(optional + 60, 0x400); U16(optional + 68, 2);
++        U32(optional + 108, 16); U32(optional + 112 + 9 * 8, 0x1000); U32(optional + 116 + 9 * 8, 40);
++        const int section = optional + 240;
++        Encoding.ASCII.GetBytes(".text").CopyTo(bytes, section);
++        U32(section + 8, 0x3000); U32(section + 12, 0x1000);
++        U32(section + 16, 0x3000); U32(section + 20, 0x400); U32(section + 36, 0x60000020);
++        U64(0x400 + 24, 0x140001040); U64(0x440, 0x140001100);
++        var position = 0x500;
++        var displacement = longDisplacements ? 0x200 : 0x68;
++        foreach (var value in Encoding.ASCII.GetBytes(GameExecutable.EpicLauncherMessage + '\0'))
++        {
++            if (displacement <= 127)
++            { bytes[position++] = 0xc6; bytes[position++] = 0x44; bytes[position++] = 0x24; bytes[position++] = (byte)displacement; }
++            else
++            { bytes[position++] = 0xc6; bytes[position++] = 0x84; bytes[position++] = 0x24; U32(position, (uint)displacement); position += 4; }
++            bytes[position++] = value;
++            displacement++;
++        }
++        return bytes;
++    }
++
++    private sealed class ArchiveHandler(byte[] archive) : HttpMessageHandler
++    {
++        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
++            => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(archive) });
++    }
++
++    public static async Task<int> RunAsync(string root, string normalExecutable, string package, LauncherSettings settings)
++    {
++        var checks = 0;
++        void Check(bool value, string message) { if (!value) throw new Exception(message); checks++; }
++        var path = Path.Combine(root, "protected-fixture.exe");
++        bool Detect(byte[] bytes) { File.WriteAllBytes(path, bytes); return GameExecutable.HasEpicLauncherStub(path); }
++        Check(!GameExecutable.HasEpicLauncherStub(normalExecutable), "ordinary x64 executable passes protected-stub inspection");
++        Check(Detect(ProtectedFixture()), "recognizes startup message spanning short and long stack displacements");
++        Check(Detect(ProtectedFixture(true)), "recognizes long stack displacements");
++        foreach (var (offset, value, description) in new[] {
++            (0x98 + 16, 0x1100U, "normal entry point"),
++            (0x98 + 120, 0x1200U, "ordinary imports"),
++            (0x98 + 112 + 9 * 8, 0U, "no TLS"),
++            (0x98 + 116 + 9 * 8, 12U, "truncated TLS directory"),
++            (0x98 + 240 + 36, 0x40000040U, "message only in a non-executable section") })
++        {
++            var bytes = ProtectedFixture(); BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(offset), value);
++            Check(!Detect(bytes), description + " does not falsely match the protected startup stub");
++        }
++        var differentMessage = ProtectedFixture(); differentMessage[0x504] = (byte)'X';
++        Check(!Detect(differentMessage), "partial message is not sufficient");
++        var wrongDestination = ProtectedFixture(); wrongDestination[0x508]++;
++        Check(!Detect(wrongDestination), "nonconsecutive stack writes are not treated as a message");
++        var noTlsCallback = ProtectedFixture(); Array.Clear(noTlsCallback, 0x440, 8);
++        Check(!Detect(noTlsCallback), "unused code outside a TLS callback is not matched");
++        var invalidCallback = ProtectedFixture(); BinaryPrimitives.WriteUInt64LittleEndian(invalidCallback.AsSpan(0x440), ulong.MaxValue);
++        Check(!Detect(invalidCallback), "out-of-range callback is bounded");
++        Check(!Detect(ProtectedFixture()[..0x580]), "truncated callback code cannot match the full message");
++        var plainText = ProtectedFixture(); Array.Clear(plainText, 0x500, 1000);
++        Encoding.ASCII.GetBytes(GameExecutable.EpicLauncherMessage).CopyTo(plainText, 0x500);
++        Check(!Detect(plainText), "plain diagnostic text alone does not trigger the instruction signature");
++
++        var game = Path.Combine(root, "protected installation");
++        var executable = Path.Combine(game, "FortniteGame", "Binaries", "Win64", "FortniteClient-Win64-Shipping.exe");
++        Directory.CreateDirectory(Path.GetDirectoryName(executable)!);
++        Directory.CreateDirectory(Path.Combine(game, "FortniteGame", "Content", "Paks"));
++        File.WriteAllText(Path.Combine(game, "FortniteGame", "Content", "Paks", "test.pak"), "synthetic");
++        var protectedBytes = ProtectedFixture(); File.WriteAllBytes(executable, protectedBytes);
++        var blocked = false;
++        try { Releases.Inspect(game); }
++        catch (InvalidDataException error) { blocked = error.Message == GameExecutable.UnsupportedMessage; }
++        Check(blocked, "browse/import fails with an actionable protected-executable explanation");
++        var progress = new List<string>();
++        Check(BuildDetector.Scan([game], CancellationToken.None, progress.Add).Builds.Count == 0 && progress.Any(p => p == GameExecutable.UnsupportedMessage), "automatic detection reports why the installation was skipped");
++
++        var states = new List<SessionStatus>();
++        var engine = new LauncherEngine(package, Path.Combine(root, "protected launch diagnostics"));
++        engine.StatusChanged += states.Add;
++        blocked = false;
++        try { await engine.StartAsync(GameRole.Host, new("protected", game, "30.40"), settings); }
++        catch (InvalidDataException error) { blocked = error.Message == GameExecutable.UnsupportedMessage; }
++        finally { await engine.StopAllAsync(); }
++        Check(blocked && states.All(s => s.Pid is null) && !states.Any(s => s.Stage == LaunchStage.Authentication), "saved manual release cannot start a protected image or reach authentication");
++        Check(states.Any(s => s.Stage == LaunchStage.Failed && s.Detail == GameExecutable.UnsupportedMessage), "preflight failure reaches launcher status");
++        Check(SHA256.HashData(File.ReadAllBytes(executable)).SequenceEqual(SHA256.HashData(protectedBytes)), "inspection leaves the executable unchanged");
++        var exported = Path.Combine(root, "protected-diagnostics.zip");
++        await engine.ExportLogsAsync(exported);
++        using (var diagnostics = ZipFile.OpenRead(exported))
++        using (var text = new StreamReader(diagnostics.GetEntry("launcher/Emilyfn.log")!.Open()))
++            Check((await text.ReadToEndAsync()).Contains(GameExecutable.UnsupportedMessage), "exported diagnostics retain the preflight cause");
++
++        using var archive = new MemoryStream();
++        using (var zip = new ZipArchive(archive, ZipArchiveMode.Create, true))
++        {
++            using (var entry = zip.CreateEntry("FortniteGame/Binaries/Win64/FortniteClient-Win64-Shipping.exe").Open()) entry.Write(protectedBytes);
++            using (var entry = zip.CreateEntry("FortniteGame/Content/Paks/test.pak").Open()) entry.WriteByte(1);
++        }
++        var parent = Path.Combine(root, "protected download");
++        using var downloader = new BuildDownloader(new ArchiveHandler(archive.ToArray()));
++        blocked = false;
++        try { await downloader.InstallAsync("https://builds.example/protected.zip", parent, "30.40", "", null, CancellationToken.None); }
++        catch (InvalidDataException error) { blocked = error.Message == GameExecutable.UnsupportedMessage; }
++        Check(blocked && !Directory.EnumerateFileSystemEntries(parent).Any(), "protected downloads are rejected without installing or leaving partial files");
++        return checks;
++    }
++}
+diff --git a/launcher/README.md b/launcher/README.md
+index a1de3af..4b9ea9f 100644
+--- a/launcher/README.md
++++ b/launcher/README.md
+@@ -28,6 +28,12 @@ Build selection is saved, and the host and client must use the same selected ins
+ 
+ Read the last stage in **Logs** and export a diagnostic ZIP. Authentication, login, module initialization and host listening have time limits. A process that exits is reported with its exit code.
+ 
++Version 0.3.1 detects the Epic-launcher-only startup stub found in the supplied
++30.40 executable before starting the backend or game. It also names the affected
++DLL in loader timeout errors. This resolves a misleading timeout message; it does
++not make that protected executable playable. A compatible installation of the
++same release is needed. Manual release entry does not override this check.
++
+ The backend uses loopback ports 3551, 80 and 8080. The host uses UDP 7777. If a port is occupied by an incompatible program, Emilyfn reports the problem; it does not stop that program or change Windows services.
+ 
+ **Listening** means the launched host owns UDP port 7777. **Client active** means login and client SDK initialization completed. These states do not prove that a match loaded successfully. A client stuck at Connecting can still require a server/DLL fix.
+@@ -36,7 +42,16 @@ The backend uses loopback ports 3551, 80 and 8080. The host uses UDP 7777. If a
+ 
+ This release bundles the existing **experimental Seasons 19–30 candidate 1** components. The launcher accepts installed releases from 19.xx through 30.xx; this does not certify every patch for complete gameplay. The earlier 27.11 host crash/client Connecting issue has not been confirmed resolved by a live Fortnite test.
+ 
+-This is a local private-session launcher. It does not join Epic's live matchmaking, download Fortnite, or ask for a real Epic password. Use the game files you already have. Windows x64 is required.
++This is a local private-session launcher. It does not join Epic's live matchmaking
++or ask for a real Epic password. Its optional build downloader installs supported
++ZIP archives; a catalog entry alone does not establish game compatibility. Windows
++x64 is required.
++
++LEGO Fortnite and Fortnite Festival are not implemented in the bundled server.
++Its Chapter 5 startup selects Helios and the Battle Royale Solo playlist, and its
++player/game-state logic expects Athena classes. The supplied protected executable
++does not expose the class or asset information needed to implement those modes.
++See `30.40-ANALYSIS.md` for the inspected file and remaining requirements.
+ 
+ ## Data
+ 
+diff --git a/launcher/build.ps1 b/launcher/build.ps1
+index 096b271..23bece2 100644
+--- a/launcher/build.ps1
++++ b/launcher/build.ps1
+@@ -26,7 +26,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Emilyfn publish failed.' }
+ $null = New-Item -ItemType Directory -Path "$out/resources"
+ Copy-Item $dllRoot "$out/resources/dlls" -Recurse
+ Copy-Item $backendRoot "$out/resources/backend" -Recurse
+-foreach ($name in @('compatibility-args.json', 'README.md', 'PROVENANCE.md', 'LICENSE')) { Copy-Item "$PSScriptRoot/$name" $out }
++foreach ($name in @('compatibility-args.json', 'README.md', '30.40-ANALYSIS.md', 'PROVENANCE.md', 'LICENSE')) { Copy-Item "$PSScriptRoot/$name" $out }
+ $sdk = dotnet --version
+ $assets = Get-Content "$PSScriptRoot/Emilyfn.App/obj/project.assets.json" -Raw | ConvertFrom-Json
+ $runtime = $assets.libraries.PSObject.Properties.Name | Where-Object { $_ -match 'Microsoft\.(NETCore|WindowsDesktop)\.App\.Runtime\.win-x64/' }
+@@ -41,7 +41,7 @@ foreach ($id in $notices) {
+     }
+ }
+ @"
+-Emilyfn 0.3.0 - Windows x64
++Emilyfn 0.3.1 - Windows x64
+ SDK: $sdk
+ Published runtimes: $($runtime -join ', ')
+ Workflow commit: $env:GITHUB_SHA
