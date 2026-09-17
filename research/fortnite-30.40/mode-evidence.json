@@ -1,0 +1,611 @@
+{
+  "schema_version": 1,
+  "purpose": "reference inventory; not a runtime support profile",
+  "dump_metadata": {
+    "version": "Fortnite-Release-30.40",
+    "build_date": "2024-08-02T23:01:14.134Z"
+  },
+  "exact_executable_match": "not established",
+  "gameplay_support": "not implemented or tested by this audit",
+  "native_class_counts_by_module_prefix": {
+    "Juno": 1014,
+    "Sparks": 101,
+    "Pilgrim": 169
+  },
+  "classes": [
+    {
+      "reflection_name": "JunoGameNative.JunoPlayerPersistenceComponent",
+      "cpp_type": "UJunoPlayerPersistenceComponent",
+      "cpp_base": "UFortPlayspaceComponent",
+      "source": "dump/JunoGameNative_classes.h",
+      "line": 4697,
+      "fields": [],
+      "functions": [
+        "OnRemoveDuplicatePlayer",
+        "OnControllerBeginDestroy",
+        "OnAnyPlayerLoggedIn"
+      ],
+      "object_dump_lines": [
+        14250
+      ]
+    },
+    {
+      "reflection_name": "JunoGameNative.JunoPlayerSpawningComponent",
+      "cpp_type": "UJunoPlayerSpawningComponent",
+      "cpp_base": "UPlayspaceComponent_PlayerSpawning",
+      "source": "dump/JunoGameNative_classes.h",
+      "line": 3176,
+      "fields": [
+        "AllowedTeamStartTags"
+      ],
+      "functions": [],
+      "object_dump_lines": [
+        14157
+      ]
+    },
+    {
+      "reflection_name": "JunoGameNative.JunoRootPlayspace",
+      "cpp_type": "AJunoRootPlayspace",
+      "cpp_base": "AJunoPersistentPlayspace",
+      "source": "dump/JunoGameNative_classes.h",
+      "line": 3211,
+      "fields": [
+        "OwningController",
+        "DefaultInventoryItemTag",
+        "JunoServerExpiration",
+        "JunoPlayerSpawningComponent",
+        "ProcessPlayerProgressionTime",
+        "JunoStateMachineClass",
+        "WorldDataAvailable",
+        "bRootPlayspaceReady",
+        "bReadyToApplyPersistentData",
+        "CurrentJunoWorld",
+        "MetadataForReplication",
+        "JunoPlayerPersistenceComponent"
+      ],
+      "functions": [
+        "OnRep_WorldMetadata",
+        "OnPeriodicSaveCompletedSuccessfully",
+        "OnCheckInAllCompletedSuccessfully"
+      ],
+      "object_dump_lines": [
+        14160
+      ]
+    },
+    {
+      "reflection_name": "JunoGameNative.JunoWorldPersistenceSubsystem",
+      "cpp_type": "UJunoWorldPersistenceSubsystem",
+      "cpp_base": "UWorldSubsystem",
+      "source": "dump/JunoGameNative_classes.h",
+      "line": 2190,
+      "fields": [
+        "WorldPersistenceHandler",
+        "WorldPersistencePlayerManager",
+        "SubsystemData",
+        "CheckpointManager",
+        "PersistentPlayspaceMap",
+        "PersistentPlayspaceInsertionOrderArray",
+        "WorldSaveDataState",
+        "SubsystemDataAssetPath",
+        "ErrorCodeAllowList"
+      ],
+      "functions": [
+        "WasActorSpawnedFromSavedGame",
+        "RequestActorSave",
+        "GenerateDeterministicMapActorGUID"
+      ],
+      "object_dump_lines": [
+        14091
+      ]
+    },
+    {
+      "reflection_name": "JunoGameNative.JunoWorldReadinessQueryComponent",
+      "cpp_type": "UJunoWorldReadinessQueryComponent",
+      "cpp_base": "UGameFrameworkComponent",
+      "source": "dump/JunoGameNative_classes.h",
+      "line": 4377,
+      "fields": [],
+      "functions": [
+        "OnBasePhysicsStateChange",
+        "OnBaseEndPlay"
+      ],
+      "object_dump_lines": [
+        14223
+      ]
+    },
+    {
+      "reflection_name": "JunoWorldManagement.JunoWorldManagementHandler_WorldArbitrationService",
+      "cpp_type": "UJunoWorldManagementHandler_WorldArbitrationService",
+      "cpp_base": "UJunoWorldManagementHandler",
+      "source": "dump/JunoWorldManagement_classes.h",
+      "line": 42,
+      "fields": [
+        "WorldViewMap",
+        "GetAllAccessibleWorldsCacheTime",
+        "GetAllAccessibleWorldsErrorCacheTime"
+      ],
+      "functions": [],
+      "object_dump_lines": [
+        13838
+      ]
+    },
+    {
+      "reflection_name": "JunoWorldManagement.JunoWorldManagerSubsystem",
+      "cpp_type": "UJunoWorldManagerSubsystem",
+      "cpp_base": "UWorldSubsystem",
+      "source": "dump/JunoWorldManagement_classes.h",
+      "line": 18,
+      "fields": [
+        "bEnableWorldManager",
+        "bEnableWorldManagerInPIE",
+        "WorldPersistenceCompatibilityVersion",
+        "DeviceProfileSuffix",
+        "WorldManagementHandler"
+      ],
+      "functions": [],
+      "object_dump_lines": [
+        13835
+      ]
+    },
+    {
+      "reflection_name": "PilgrimBattleStageRuntime.PilgrimBattleStageGameManagerComponent",
+      "cpp_type": "UPilgrimBattleStageGameManagerComponent",
+      "cpp_base": "UPlayspaceComponent",
+      "source": "dump/PilgrimBattleStageRuntime_classes.h",
+      "line": 73,
+      "fields": [
+        "HowManyBandsAdvance",
+        "NumberOfSongsToPopulateInSetlist",
+        "BattleStageBandStates",
+        "bIsMatchPrivate",
+        "EliminatedBandStates",
+        "DisconnectedTeamIds",
+        "StartingPlayerCount"
+      ],
+      "functions": [
+        "ServerInitializeSetlist",
+        "ServerForceUpdateBandStates",
+        "ServerFindEliminatedBands",
+        "ServerClearEliminatedBandStates",
+        "OnTeamDisconnected",
+        "OnSongStart",
+        "OnRep_BattleStageBandStates",
+        "IsPrivateMatch",
+        "IsMatchOver",
+        "IsLastRound",
+        "InitializeMusicBattleInstances",
+        "InitializeMatch",
+        "InitializeBandStates",
+        "GetSortedBandStates",
+        "GetRandomBandName",
+        "GetRandomBandIcon",
+        "GetPlacementAnalyticsDataForPlayer",
+        "GetNumBandsToAdvance",
+        "GetGameplayRound",
+        "GetEliminatedBandStates",
+        "GetCurrentSongPlayId",
+        "GetCurrentRound",
+        "GetBandStateByTeam",
+        "GetBandCount",
+        "GetAllEliminatedPlayerStates",
+        "FireSetlistEvent",
+        "FireEliminationEvent",
+        "FireBreakStreakVerb",
+        "FireBandStateUpdateEventToAll"
+      ],
+      "object_dump_lines": [
+        16548
+      ]
+    },
+    {
+      "reflection_name": "PilgrimCoreRuntime.PilgrimSongCatalog",
+      "cpp_type": "UPilgrimSongCatalog",
+      "cpp_base": "UGameStateComponent",
+      "source": "dump/PilgrimCoreRuntime_classes.h",
+      "line": 1019,
+      "fields": [
+        "SongsByShortName",
+        "SongsByShortMcpTemplateId"
+      ],
+      "functions": [
+        "PlayerHasSongEntitlement",
+        "OnCMSCatalogRetrieved",
+        "IsSongShared",
+        "GetSortedSongList",
+        "GetSongByShortName",
+        "GetSongByMcpTemplateId",
+        "GetRandomSongList",
+        "GetPilgrimSongCatalog"
+      ],
+      "object_dump_lines": [
+        13377
+      ]
+    },
+    {
+      "reflection_name": "PilgrimQuickplayRuntime.PilgrimQuickplayPlayspace",
+      "cpp_type": "APilgrimQuickplayPlayspace",
+      "cpp_base": "APilgrimPlayspace",
+      "source": "dump/PilgrimQuickplayRuntime_classes.h",
+      "line": 195,
+      "fields": [
+        "StandinDirector",
+        "PilgrimQuickplayStateMachineClass",
+        "StateMachineManager",
+        "MainStateMachine",
+        "BandState",
+        "SparksCameraPluginDataProviderClass",
+        "CameraDataSource",
+        "AuraManager"
+      ],
+      "functions": [
+        "SetPlayerStateTeamIndex",
+        "HandleDirectorStopEvent",
+        "HandleDirectorStartEvent",
+        "HandleDirectorResetEvent",
+        "GetPilgrimQuickplayStateMachine",
+        "GetIsSinglePlayerGame",
+        "GetActivePilgrimStateId",
+        "GetActivePilgrimQuickplayState",
+        "ForceActiveCameraDirector"
+      ],
+      "object_dump_lines": [
+        13416
+      ]
+    },
+    {
+      "reflection_name": "PilgrimQuickplayRuntime.PilgrimQuickplayStateMachine",
+      "cpp_type": "UPilgrimQuickplayStateMachine",
+      "cpp_base": "UGameplayStateMachine",
+      "source": "dump/PilgrimQuickplayRuntime_classes.h",
+      "line": 267,
+      "fields": [
+        "GrantedQuests"
+      ],
+      "functions": [
+        "TeleportAllPlayers",
+        "PrepareStageForPlayer",
+        "GetPlayerPawnsInPlayspace",
+        "GetEventRouter",
+        "GetDailyQuests",
+        "GetActivePilgrimStateObject",
+        "GetActivePilgrimStateId",
+        "CleanUpStageForPlayer"
+      ],
+      "object_dump_lines": [
+        13422
+      ]
+    },
+    {
+      "reflection_name": "PilgrimQuickplayRuntime.PilgrimQuickplayState_Loading",
+      "cpp_type": "UPilgrimQuickplayState_Loading",
+      "cpp_base": "UPilgrimQuickplayStateBase",
+      "source": "dump/PilgrimQuickplayRuntime_classes.h",
+      "line": 292,
+      "fields": [],
+      "functions": [],
+      "object_dump_lines": [
+        13424
+      ]
+    },
+    {
+      "reflection_name": "SparksCMS.SparksSongCatalog",
+      "cpp_type": "USparksSongCatalog",
+      "cpp_base": "UGameInstanceSubsystem",
+      "source": "dump/SparksCMS_classes.h",
+      "line": 18,
+      "fields": [
+        "CatalogByUid",
+        "CatalogByShortName",
+        "CatalogByTemplateId",
+        "CatalogObjectPool",
+        "HFManager",
+        "OnSongCatalogRetrieved"
+      ],
+      "functions": [
+        "SetCMSSuffix",
+        "RequestSongCatalog",
+        "PlayerHasSongEntitlement",
+        "OnCalendarActiveEventsChanged",
+        "IsSongFeatured",
+        "IsSongDisabled",
+        "GetSongList",
+        "GetSongByUID",
+        "GetSongByTemplateID",
+        "GetSongByShortName"
+      ],
+      "object_dump_lines": [
+        12903
+      ]
+    },
+    {
+      "reflection_name": "SparksMusicPlayspaceRuntime.SparksMusicPlayspace",
+      "cpp_type": "ASparksMusicPlayspace",
+      "cpp_base": "AFortPlayspace",
+      "source": "dump/SparksMusicPlayspaceRuntime_classes.h",
+      "line": 41,
+      "fields": [
+        "OnMidiEventDriverChanged",
+        "OnMidiEventDataParsed",
+        "Interactors",
+        "MetasoundPlayer",
+        "MetasoundMixer",
+        "MusicClock",
+        "MusicPlayers",
+        "AudioState",
+        "CameraDirector",
+        "PlayerManagerComp",
+        "LipSyncManager",
+        "PerfMemComp"
+      ],
+      "functions": [
+        "TryGetMusicKeyAndMode",
+        "TryGetMidiEventDrivers",
+        "TryGetMidiEventDriverForPlayerState",
+        "RemoveMusicPlayer",
+        "RemoveInteractor",
+        "OnMeasureEvent",
+        "OnBeatEvent",
+        "IsAnyMusicPlayingWithKey",
+        "IsAnyMusicPlaying",
+        "HasGameplayTag",
+        "GetSparksMusicPlayspaceOfClassByLocation",
+        "GetSparksMusicPlayspaceOfClass",
+        "GetMusicPlayers",
+        "GetAllPlayerPawns",
+        "GetAllPlayerControllers",
+        "DoesPlayerHaveInstrument",
+        "BPEvent_OnUserRemoved",
+        "BPEvent_OnUserAdded",
+        "BPEvent_OnIntialized",
+        "BP_RemovePlayspaceUser",
+        "BP_GetOwnedEventRouter",
+        "BP_GetAllPlayerStates",
+        "AddMusicPlayer",
+        "AddInteractor"
+      ],
+      "object_dump_lines": [
+        12946
+      ]
+    },
+    {
+      "reflection_name": "SparksSongPlayerRuntime.SparksMediaStreamer",
+      "cpp_type": "USparksMediaStreamer",
+      "cpp_base": "UObject",
+      "source": "dump/SparksSongPlayerRuntime_classes.h",
+      "line": 1,
+      "fields": [
+        "StreamingStatus",
+        "Song",
+        "PlayParams",
+        "FortBaseStreaming",
+        "StemmedMediaStreamAsset",
+        "MidiFile"
+      ],
+      "functions": [
+        "OnVideoSuccess",
+        "OnVideoOpenTimeout",
+        "OnVideoOpenFailed",
+        "OnVideoOpened",
+        "OnVideoError",
+        "OnSongDataDownloaded",
+        "OnEndReached"
+      ],
+      "object_dump_lines": [
+        13281
+      ]
+    },
+    {
+      "reflection_name": "SparksSongPlayerRuntime.SparksSongPlayerSubsystem",
+      "cpp_type": "USparksSongPlayerSubsystem",
+      "cpp_base": "UGameInstanceSubsystem",
+      "source": "dump/SparksSongPlayerRuntime_classes.h",
+      "line": 35,
+      "fields": [
+        "SongPlayerDataCached",
+        "CurrentSong",
+        "CurrentPlayParams",
+        "PendingSong",
+        "PendingPlayParams",
+        "MediaStreamer",
+        "AudioComponentPlayer",
+        "AudioComponentMixer",
+        "PendingSongDebounceTimer"
+      ],
+      "functions": [
+        "StopSong",
+        "PlaySongByShortName",
+        "PlaySongByItemDef",
+        "PlaySongByCatalogData",
+        "OnLoadingScreenComplete"
+      ],
+      "object_dump_lines": [
+        13283
+      ]
+    }
+  ],
+  "missing_requested_classes": [],
+  "playlists": [
+    {
+      "research_label": "LEGO Fortnite",
+      "package_name": "/JunoGame/Playlists/Playlist_Juno",
+      "name_dump_lines": [
+        419439
+      ],
+      "short_object_name": "Playlist_Juno.Playlist_Juno",
+      "short_object_class": "FortPlaylistAthena",
+      "object_dump_lines": [
+        300856
+      ],
+      "package_to_object_link": "candidate inferred from matching short names",
+      "asset_bytes_validated": false
+    },
+    {
+      "research_label": "Festival Jam",
+      "package_name": "/SparksLobby/Playlist/Playlist_FMClubIsland",
+      "name_dump_lines": [
+        357427
+      ],
+      "short_object_name": "Playlist_FMClubIsland.Playlist_FMClubIsland",
+      "short_object_class": "FortPlaylistAthena",
+      "object_dump_lines": [
+        300883
+      ],
+      "package_to_object_link": "candidate inferred from matching short names",
+      "asset_bytes_validated": false
+    },
+    {
+      "research_label": "Festival Battle Stage",
+      "package_name": "/SparksLobby/Playlist/Playlist_PilgrimBattleStage",
+      "name_dump_lines": [
+        552281
+      ],
+      "short_object_name": "Playlist_PilgrimBattleStage.Playlist_PilgrimBattleStage",
+      "short_object_class": "FortPlaylistAthena",
+      "object_dump_lines": [
+        300889
+      ],
+      "package_to_object_link": "candidate inferred from matching short names",
+      "asset_bytes_validated": false
+    },
+    {
+      "research_label": "Festival Quickplay",
+      "package_name": "/SparksLobby/Playlist/Playlist_PilgrimQuickplay",
+      "name_dump_lines": [
+        509320
+      ],
+      "short_object_name": "Playlist_PilgrimQuickplay.Playlist_PilgrimQuickplay",
+      "short_object_class": "FortPlaylistAthena",
+      "object_dump_lines": [
+        300890
+      ],
+      "package_to_object_link": "candidate inferred from matching short names",
+      "asset_bytes_validated": false
+    }
+  ],
+  "package_references": [
+    {
+      "name": "/JunoGame/CoreClasses/BP_Juno_PlayerPawn_RealPlayer",
+      "name_dump_lines": [
+        480590
+      ],
+      "asset_bytes_validated": false
+    },
+    {
+      "name": "/JunoGame/CoreClasses/Juno_GameMode",
+      "name_dump_lines": [
+        118280
+      ],
+      "asset_bytes_validated": false
+    },
+    {
+      "name": "/JunoGame/CoreClasses/Juno_GameState",
+      "name_dump_lines": [
+        431565
+      ],
+      "asset_bytes_validated": false
+    },
+    {
+      "name": "/JunoGame/CoreClasses/Juno_PlayerController",
+      "name_dump_lines": [
+        545047
+      ],
+      "asset_bytes_validated": false
+    },
+    {
+      "name": "/JunoGame/CoreClasses/Juno_PlayerState",
+      "name_dump_lines": [
+        425394
+      ],
+      "asset_bytes_validated": false
+    },
+    {
+      "name": "/JunoGame/Maps/Juno_World_Inception",
+      "name_dump_lines": [
+        591065
+      ],
+      "asset_bytes_validated": false
+    },
+    {
+      "name": "/PilgrimCore/Maps/PilgrimCoreMap",
+      "name_dump_lines": [
+        237874
+      ],
+      "asset_bytes_validated": false
+    },
+    {
+      "name": "/SparksCommon/Maps/Sparks_Festival_Island",
+      "name_dump_lines": [
+        734188
+      ],
+      "asset_bytes_validated": false
+    },
+    {
+      "name": "/SparksCommon/Maps/Sparks_Festival_Pilgrim_Props",
+      "name_dump_lines": [
+        564488
+      ],
+      "asset_bytes_validated": false
+    }
+  ],
+  "input_sha256": {
+    "dump/JunoAIRuntime_classes.h": "363645ff7e27d56a0b2c5ce33d8925d2cff959f8006f5da13c64f7bc87d55f76",
+    "dump/JunoAdventuresRuntime_classes.h": "d10bf5d28c0d41aef313ecf625b01913dbb34f7ece2ffa02d5cf9c422990a046",
+    "dump/JunoBattleBusRuntime_classes.h": "76828903d7f6507cdec510ee455ac22847242215bdf14adc9b9d3cd9eb787f7a",
+    "dump/JunoBattleBusUI_classes.h": "9d6cdabd47df0074a919ed907a58e38fb7c1ca8ae337efdf0724768d8e281a41",
+    "dump/JunoBuildingCosmeticsUI_classes.h": "eb6ce77b2ae6b9a1abb040ee3a031f7b29052457853399251217c5b0c2583291",
+    "dump/JunoCodexUI_classes.h": "165d392e3b9c8674196413e2dec4f6ac1dae829d419364a345c7f0e1c3184f61",
+    "dump/JunoControlUnitRuntime_classes.h": "fcc0fd816bb683ad4223766edbbd6b9dc3626401da1fe8b4432a37ecc8a3a90c",
+    "dump/JunoControlUnitUI_classes.h": "8d8f8f07cc39911fddb40f44a6a33a86df275dee557005d8efffdd6b552915d7",
+    "dump/JunoCoreUI_classes.h": "a62f88ad01a6512ea19845df8e0c1752eb7a27ce4469b78b432ccdd0ff5fe7e3",
+    "dump/JunoCraftingBaseRuntime_classes.h": "5e1c5b719e1ce49d2afcba06ccfbdf494e267d11e61f0a6f7439925e654d0b6f",
+    "dump/JunoCreature_TamingRuntime_classes.h": "6e0cd6b61d513d0996b02045f4648038c124e9fa64ff2a3334b4b932c61fe2d7",
+    "dump/JunoCreature_TamingUI_classes.h": "37b57624b33d23d63dfd97633bd0ccf1a4b17e6afbc33924378d199cd7cb5b78",
+    "dump/JunoEncountersPOIRuntime_classes.h": "b707f01b0c012301eb6060a0b96e888954787067691e3ec83c6add0cc28f9f96",
+    "dump/JunoEnemiesRuntime_classes.h": "3c4ee4b30f456f1f474005a0442f4a10424563c19e2bbadb12d90c901898209e",
+    "dump/JunoFishing_classes.h": "ce234ff0200de253f96c10490e5b1bb4e07c31d5839e4a2422b379e2560e1456",
+    "dump/JunoFrontendUI_classes.h": "e050e6d7f1f2dacb08fe9aaf607af5c43ba88dfdac062cfabd075bd657bdd610",
+    "dump/JunoGameMobileUI_classes.h": "6ff37ea02a6f36fc62a57e8352ba043d05c2465a837135ed5f3e2bf5797c33fc",
+    "dump/JunoGameNative_classes.h": "96185c3b5903a5984fa1391755db8da23b3ebb4d65ea3b8bdad41e782087644a",
+    "dump/JunoInternalTesting_classes.h": "ccf5a30e7cdc618290f1ac9a781c124d4ee2108c939dd2235e454182f02edba4",
+    "dump/JunoLowMemoryFallbackRuntime_classes.h": "37f04350b3887e6f6352ae382d88cdf84a1ab8375e4b8cebaf16c7b19da1681d",
+    "dump/JunoMusicRuntime_classes.h": "59963bc2e91626f4bc2259989a3f7af3f0ea4cd2964a0faa94f64a2a85417e7b",
+    "dump/JunoPlayspaceMigration_classes.h": "69c378d5ff02a595010006305689190781a7aed4dab61c4c683841721565324d",
+    "dump/JunoPowerSystemRuntime_classes.h": "d48a9a88f9d26f858e2e88dfbb8b92dbd0cc728aa3f2085fc2e75a4522ed80d3",
+    "dump/JunoProceduralLandscape_classes.h": "b1bf09180aae38893a760432874f679bd140183250dc1fc6c1a46ddacaeda7cd",
+    "dump/JunoProceduralWorld_classes.h": "2f431392bc444eb4687105b3f29ba0730e3f0ada4e54085dfe0d32abd449a8e2",
+    "dump/JunoQuestsRuntime_classes.h": "162a706aebf5c2182d48c5e3023f2a7de09c7b0b9db0e32b0491a4441ec2839d",
+    "dump/JunoReplayRuntime_classes.h": "f12bde653462c36d1ef4dd71cfe945176cd44b6039c95fa39f04499f69d368b9",
+    "dump/JunoReplayUI_classes.h": "0fdd138980b7f6a2e0cdb99662b6618ecaf4fa36e6d00670a920036df3d354c1",
+    "dump/JunoRidableRuntime_classes.h": "e160c23816b4365bc902f208adbf01cf6f16ce776698128d2793e1f667498604",
+    "dump/JunoStandaloneQuestUI_classes.h": "39f85b8336185a98f1015ad3860bf6c557b11e43129fdfd8ddbe252a168d5eb6",
+    "dump/JunoUI_classes.h": "a50dff2ecc2183bf588a4d5b22ad0fbfb56a6b972bc13e68045bf2c9fb1c308d",
+    "dump/JunoWheelsDemoRuntime_classes.h": "24d0431e45406fb74c04ec521d3822174c42998e08252178d8a7f57aeeb95046",
+    "dump/JunoWorldManagement_classes.h": "aa4951ac621af7006d04e822a193614ed5f9f3243fc12cccc3e50d33b7af8d11",
+    "dump/PilgrimBattleStageRuntime_classes.h": "3aff443af80150843bcf63579f51c7161ce1a09e1e9965116b62b13535945e2a",
+    "dump/PilgrimCoreRuntime_classes.h": "e40ffbb27cb81d071b22abab5d90a582b9f0502d95614fe5e7b14fcde3e8f14a",
+    "dump/PilgrimCoreUI_classes.h": "222b12b73f866de13f57e7de53d4c88111af228369d341cf4e5fba093918c7e9",
+    "dump/PilgrimQuickplayRuntime_classes.h": "8fbdddde5321e1ce05f6e5e0cca50b370507ce7bba67c4e2d0fe7cdf69ae79f4",
+    "dump/PilgrimQuickplayUI_classes.h": "f798c90ffa46eab73e26152757a44017301753fdc035ebc31bde557afb9687d3",
+    "dump/SparksAlbumArtRuntime_classes.h": "8a7c3610ae7c1ccf75eb34e2337a74098c1f6c8a9c28063e1b1ee26af7625257",
+    "dump/SparksAlbumArtUI_classes.h": "2bb3acab24d6e9eff80ce3c1250f25b881349f59b8728d59d1566cba182a9a5d",
+    "dump/SparksCMS_classes.h": "001ce927345034ff757b1af67911f326b44e32bad98af95d4996ebede31a192f",
+    "dump/SparksCameraDirectorRuntime_classes.h": "6ae314184372f422962a11931a755af97e3ac42050b68574d0361ab1127a8f80",
+    "dump/SparksCharacterCommonRuntime_classes.h": "2076be3e7f0c34ea9456a4a96a19698892b52e7a0ca1f85e1fb6d014d8d56a25",
+    "dump/SparksCommonRuntime_classes.h": "210596753851c9252a4439ec160165b49786486a2dc65d17d55b3c9ef0e31088",
+    "dump/SparksCoreCosmeticsRuntime_classes.h": "383705660c260d5c463278a6ac356d35b0000cbede700087e0fc5bbde5dd3055",
+    "dump/SparksCoreRuntime_classes.h": "b01681698c7c4ccfc81048b3f3012dd7fdba46f06709413585924659dbb4014c",
+    "dump/SparksCoreUI_classes.h": "066d308ea432baebce75bd7e94a5b6e59ed4adeff915d84d332f05826d1e3872",
+    "dump/SparksCosmeticsRuntime_classes.h": "de3a723f4dc01e94e9f255bf200ea7a62f0d9728fec3e4a739f1e13df2d4923f",
+    "dump/SparksCosmeticsUI_classes.h": "3320e954efe67a9edc1b961c5bbd7fd7bc17cd82044e9071b56f76b5b83ba2da",
+    "dump/SparksDanceEmotesRuntime_classes.h": "f22724858302844b2fe54896da8cf50b3e421f779eeaa00ae42a6269e2ff1119",
+    "dump/SparksMidiParser_classes.h": "2ac962805764ce44db92472113c928d27076d720d7a10295dbbf2a984d690392",
+    "dump/SparksMusicPlayspaceRuntime_classes.h": "9470dc7694b06bd023a8eb0065806e23cbb3d22fdf643ed305d81a95d0f2b72f",
+    "dump/SparksSettingsRuntime_classes.h": "f8cd59f84991d034492a98b81bbf6aaa4d3e1459d1429d7998c2ab83d74c4bd5",
+    "dump/SparksSettingsUI_classes.h": "7940e76a7c90576dbd9432ab831d923b72b280f00abb120b590de9d80289a109",
+    "dump/SparksSongPlayerRuntime_classes.h": "5679d2784e3ed3a0b9d0c480eff9cc3ed8c4586a241f50f7f7af18d1628139f1",
+    "dump/SparksSongTemplatesRuntime_classes.h": "e03b139719111f8bcc1398f22bdca3930b156d083fffa2bcd8f2ba2ac24c6962",
+    "names_dump.txt": "2ca5c11f2cc38b85e687340f3e827096c711026120ae26fa63691e6acc6c2d7c",
+    "objects_dump.txt": "add8b6b76f2e247b0ca43969ae2d2ea4d1eb3d6a70703eeb22818bf7556de9d5",
+    "version.txt": "01e3664bb2b95f89cf4cdf9805558edba4eee05953be8e353f3c735f6ef4ae90"
+  }
+}

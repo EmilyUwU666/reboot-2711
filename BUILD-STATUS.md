@@ -1,3 +1,24 @@
+## 30.40 follow-up — LEGO and Festival SDK evidence
+
+The public 30.40 reflection archive has now been downloaded, hash-verified and
+inspected. Its internal release label is 30.40 and its build date is
+2024-08-02T23:01:14.134Z. It contains 1,014 Juno, 101 Sparks and 169 Pilgrim
+native class declarations, with concrete world-persistence, music-playback and
+Festival gameplay references. Four mode playlist names are present as Athena
+playlist objects. These facts refine the earlier assessment: Athena types are
+shared by the modes; the missing work is mode startup, behavior, content and
+service integration.
+
+The [research notes](research/fortnite-30.40/README.md) and
+[repeatable SDK checker](research/fortnite-30.40/inspect_sdk.py) preserve the
+findings, source hashes and a generated evidence inventory. The SDK does not
+establish a match to the uploaded executable, supply cooked mode assets or provide
+a working loader. **30.40 launch, LEGO and Festival remain blocked/unimplemented.**
+There is no new Windows package or DLL in this research update; Emilyfn 0.3.1 below
+remains the latest compiled launcher.
+
+---
+
 ## Emilyfn 0.3.1 — protected executable diagnosis
 
 - **Windows download:** https://github.com/EmilyUwU666/reboot-2711/actions/runs/35183004733/artifacts/10480194219
