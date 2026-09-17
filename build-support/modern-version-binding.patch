@@ -1,0 +1,200 @@
+diff --git a/MODERN-VERSION-BINDING.md b/MODERN-VERSION-BINDING.md
+new file mode 100644
+index 0000000..6a49971
+--- /dev/null
++++ b/MODERN-VERSION-BINDING.md
+@@ -0,0 +1,26 @@
++# Modern engine version binding diagnostic
++
++This candidate adds a fallback for the execGetEngineVersion wrapper observed in
++38.00 CL47722112 (UE 5.7). **It does not enable Season 38 gameplay.** The existing
++19-30 / UE 5.0-5.5 compatibility gate is intentionally retained. If initialization
++reaches this fallback on 38.00, the expected next result is a precise unsupported
++build error rather than an engine-version signature error.
++
++The fallback scans only executable .text, requires one matching wrapper, decodes
++its two relative calls, and requires both targets within .text. Disassembly ties
++these calls to version storage and formatting with argument 4. The getter's
++constructor contains 5.7.0, and the formatter reads version fields into a string.
++No absolute game function address is installed in the DLL.
++
++Existing version methods run first. The new resolver is checked against malformed,
++ambiguous and out-of-section targets. Offline validation against the uploaded
++38.00 executable resolves storage RVA 0x90866a2 and formatter RVA 0x29d7e2. This
++establishes static resolution only; no game functions were executed during tests.
++
++This is a developer diagnostic, not a replacement release. The launcher still
++rejects 38.00. Authentication, Unreal object/reflection bindings, map selection,
++server hooks and gameplay require further porting. Releases 31-37 were not supplied
++and are not covered by this validation. Keep the existing working launcher package.
++
++The workflow builds both DLLs and includes their hashes and corresponding source.
++CI does not launch Fortnite or establish runtime compatibility.
+diff --git a/Reboot2711/ModernVersionBinding.h b/Reboot2711/ModernVersionBinding.h
+new file mode 100644
+index 0000000..d42608e
+--- /dev/null
++++ b/Reboot2711/ModernVersionBinding.h
+@@ -0,0 +1,46 @@
++#pragma once
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <optional>
++
++namespace Reboot2711
++{
++    // Derived from 38.00 CL47722112 execGetEngineVersion. This identifies only
++    // the version getter/formatter, not UObject layouts or gameplay support.
++    struct ModernVersionBinding { std::size_t Storage; std::size_t Format; };
++    inline constexpr int ModernVersionPattern[] = { 0x56, 0x57, 0x48, 0x83, 0xEC, 0x38, 0x4C, 0x89, 0xC6, 0x48, 0x8B, 0x05, -1, -1, -1, -1, 0x48, 0x31, 0xE0, 0x48, 0x89, 0x44, 0x24, 0x30, 0x48, 0x8B, 0x42, 0x20, 0x48, 0x83, 0xF8, 0x01, 0x48, 0x83, 0xD8, 0xFF, 0x48, 0x89, 0x42, 0x20, 0xE8, -1, -1, -1, -1, 0x48, 0x8D, 0x7C, 0x24, 0x20, 0x48, 0x89, 0xC1, 0x48, 0x89, 0xFA, 0x41, 0xB8, 0x04, 0x00, 0x00, 0x00, 0xE8, -1, -1, -1, -1 };
++
++    inline std::optional<ModernVersionBinding> FindModernVersionBinding(
++        const std::uint8_t* image, std::size_t size, std::size_t text, std::size_t length)
++    {
++        constexpr auto width = sizeof(ModernVersionPattern) / sizeof(int);
++        if (!image || size > 0xFFFFFFFFull || text > size || length > size - text || length < width)
++            return std::nullopt;
++        std::optional<ModernVersionBinding> result;
++        for (std::size_t pos = text; pos <= text + length - width; ++pos)
++        {
++            bool match = true;
++            for (std::size_t i = 0; i < width; ++i)
++                if (ModernVersionPattern[i] >= 0 && image[pos + i] != ModernVersionPattern[i])
++                { match = false; break; }
++            if (!match) continue;
++            // Ambiguous wrappers must never select an arbitrary call target.
++            if (result) return std::nullopt;
++            const auto relative = [&](std::size_t call) -> std::optional<std::size_t>
++            {
++                std::int32_t displacement = 0;
++                std::memcpy(&displacement, image + pos + call + 1, sizeof(displacement));
++                const auto target = static_cast<std::int64_t>(pos + call + 5) + displacement;
++                if (target < static_cast<std::int64_t>(text)
++                    || target >= static_cast<std::int64_t>(text + length)) return std::nullopt;
++                return static_cast<std::size_t>(target);
++            };
++            const auto storage = relative(40);
++            const auto format = relative(62);
++            if (!storage || !format || *storage == *format) return std::nullopt;
++            result = ModernVersionBinding{*storage, *format};
++        }
++        return result;
++    }
++}
+diff --git a/SDK/Offsets.h b/SDK/Offsets.h
+index 948e289..a2d2769 100644
+--- a/SDK/Offsets.h
++++ b/SDK/Offsets.h
+@@ -3,6 +3,7 @@
+ #include <array>
+ #include <cstdio>
+ #include "../Reboot2711/RuntimeProfile.h"
++#include "../Reboot2711/ModernVersionBinding.h"
+ 
+ namespace SDK
+ {
+@@ -72,14 +73,39 @@ namespace SDK
+         else
+         {
+             auto GetEngineVersionMethod2 = Memcury::Scanner::FindPattern("40 53 48 83 EC ? 33 C0 49 8B D8 48 39 42 ? 0F 95 C0 48 01 42 ? E8 ? ? ? ? 41 B8");
+-            if (!GetEngineVersionMethod2.Get())
+-                throw std::runtime_error("Engine-version signature was not found. No SDK hooks were installed.");
+-            auto CopyOfMethod2 = GetEngineVersionMethod2;
+-
+-            auto GetStorage = (void* (*)())GetEngineVersionMethod2.RelativeOffset(23).Get();
+-            auto GetEngineVersion2 = (void (*)(void*, FStringNoOps*, int))CopyOfMethod2.RelativeOffset(42).Get();
+-
+-            GetEngineVersion2(GetStorage(), &OutVar, 4); // no idea why 4 but sure
++            if (GetEngineVersionMethod2.Get())
++            {
++                auto CopyOfMethod2 = GetEngineVersionMethod2;
++                auto GetStorage = (void* (*)())GetEngineVersionMethod2.RelativeOffset(23).Get();
++                auto GetEngineVersion2 = (void (*)(void*, FStringNoOps*, int))CopyOfMethod2.RelativeOffset(42).Get();
++                GetEngineVersion2(GetStorage(), &OutVar, 4);
++            }
++            else
++            {
++                // New compiler-generated version wrapper observed in 38.00.
++                // Resolve relative calls only inside the executable .text section.
++                const auto base = Memcury::PE::GetModuleBase();
++                const auto headers = Memcury::PE::GetNTHeaders();
++                const auto sections = IMAGE_FIRST_SECTION(headers);
++                std::optional<Reboot2711::ModernVersionBinding> binding;
++                for (unsigned i = 0; i < headers->FileHeader.NumberOfSections; ++i)
++                {
++                    const auto& section = sections[i];
++                    if (std::memcmp(section.Name, ".text\0\0\0", 8) != 0
++                        || !(section.Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
++                    binding = Reboot2711::FindModernVersionBinding(
++                        reinterpret_cast<const std::uint8_t*>(base), headers->OptionalHeader.SizeOfImage,
++                        section.VirtualAddress, section.Misc.VirtualSize);
++                    break;
++                }
++                if (!binding)
++                    throw std::runtime_error("Engine-version signature was not found or was ambiguous. No SDK hooks were installed.");
++                const auto getStorage = reinterpret_cast<void* (*)()>(base + binding->Storage);
++                const auto formatVersion = reinterpret_cast<void (*)(void*, FStringNoOps*, int)>(base + binding->Format);
++                const auto storage = getStorage();
++                if (!storage) throw std::runtime_error("Engine-version storage was null.");
++                formatVersion(storage, &OutVar, 4);
++            }
+         }
+ 
+         if (!OutVar.Data || OutVar.NumElements < 2 || OutVar.NumElements > 1024 || OutVar.NumElements > OutVar.MaxElements
+diff --git a/tests/modern_version_binding_tests.cpp b/tests/modern_version_binding_tests.cpp
+new file mode 100644
+index 0000000..619d041
+--- /dev/null
++++ b/tests/modern_version_binding_tests.cpp
+@@ -0,0 +1,50 @@
++#include "../Reboot2711/ModernVersionBinding.h"
++#include <algorithm>
++#include <fstream>
++#include <iostream>
++#include <iterator>
++#include <vector>
++#include <stdexcept>
++using namespace Reboot2711;
++int main(int argc, char** argv)
++{
++    int checks = 0;
++    const auto check = [&](bool ok) { ++checks; if (!ok) throw std::runtime_error("binding check failed"); };
++    std::vector<std::uint8_t> b(1024, 0xcc);
++    const auto install = [&](std::size_t at, std::int32_t storage, std::int32_t format) {
++        for (std::size_t i = 0; i < sizeof(ModernVersionPattern) / sizeof(int); ++i)
++            b[at+i] = ModernVersionPattern[i] < 0 ? 0 : static_cast<std::uint8_t>(ModernVersionPattern[i]);
++        storage -= static_cast<std::int32_t>(at + 45);
++        format -= static_cast<std::int32_t>(at + 67);
++        std::memcpy(b.data()+at+41, &storage, 4);
++        std::memcpy(b.data()+at+63, &format, 4);
++    };
++    check(!FindModernVersionBinding(nullptr, 1024, 0, 1024));
++    check(!FindModernVersionBinding(b.data(), 1024, 1025, 0));
++    check(!FindModernVersionBinding(b.data(), 1024, 64, 1024));
++    check(!FindModernVersionBinding(b.data(), 1024, 64, 32));
++    check(!FindModernVersionBinding(b.data(), 1024, 64, 900));
++    install(100, 70, 800);
++    auto found = FindModernVersionBinding(b.data(), 1024, 64, 900);
++    check(found && found->Storage == 70 && found->Format == 800);
++    install(300, 70, 800);
++    check(!FindModernVersionBinding(b.data(), 1024, 64, 900));
++    std::fill(b.begin(), b.end(), 0xcc);
++    install(100, 63, 800);
++    check(!FindModernVersionBinding(b.data(), 1024, 64, 900));
++    install(100, 70, 964);
++    check(!FindModernVersionBinding(b.data(), 1024, 64, 900));
++    install(100, 70, 70);
++    check(!FindModernVersionBinding(b.data(), 1024, 64, 900));
++    install(100, 70, 800); b[100] = 0;
++    check(!FindModernVersionBinding(b.data(), 1024, 64, 900));
++    if (argc == 2)
++    {
++        std::ifstream stream(argv[1], std::ios::binary);
++        std::vector<std::uint8_t> image((std::istreambuf_iterator<char>(stream)), {});
++        check(image.size() == 411324416);
++        auto actual = FindModernVersionBinding(image.data(), image.size(), 4096, 287428608);
++        check(actual && actual->Storage == 0x90866a2 && actual->Format == 0x29d7e2);
++    }
++    std::cout << checks << " binding checks passed; game functions were not executed.\n";
++}
