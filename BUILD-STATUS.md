@@ -1,3 +1,23 @@
+## 38.00 engine port — version binding diagnostic
+
+The uploaded 38.00 image identifies CL47722112 and Unreal Engine 5.7.0. The
+[executable investigation](research/fortnite-38.00/README.md) records its identity,
+limitations and the old SDK signature mismatch. The game executable is not
+included in this repository.
+
+`build-support/modern-version-binding.patch` adds a unique, bounded fallback for
+the engine-version getter/formatter observed in that image. Thirteen offline
+checks passed, including resolution against the uploaded image. Existing version
+selection remains 19.xx-30.xx / UE 5.0-5.5: **Season 38 gameplay is not enabled**.
+Object lookup, reflection layouts, authentication and server hooks still require
+porting and runtime validation. Releases 31-37 have not been verified.
+
+The separate `build-modern-version-binding.yml` workflow creates diagnostic DLLs;
+the standard Emilyfn launcher package is unchanged. No Fortnite game process was
+run in this environment. LEGO and Festival remain unimplemented.
+
+---
+
 ## 30.40 follow-up — LEGO and Festival SDK evidence
 
 The public 30.40 reflection archive has now been downloaded, hash-verified and
