@@ -1,0 +1,105 @@
+name: Build 38.00 reflection primitive port
+on:
+  push:
+    paths:
+      - build-support/reflection38.patch
+      - .github/workflows/build-reflection38.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract pinned native source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expected = 'c456b97c0a224866e017467949bf53799490760412628c01f85c531f20ab8a96'
+          if ((Get-FileHash Reboot-27.11-Source.zip -Algorithm SHA256).Hash -ne $expected) { throw 'Source hash mismatch' }
+          Expand-Archive -LiteralPath Reboot-27.11-Source.zip -DestinationPath source
+      - name: Apply existing compatibility and modern version binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in revision2 seasons19-30 modern-version-binding reflection38; do
+            git show "HEAD:build-support/${name}.patch" > "${name}.patch"
+            git apply --check --directory=source/Reboot-27.11-Source "${name}.patch"
+            git apply --directory=source/Reboot-27.11-Source "${name}.patch"
+          done
+      - name: Check version selection, SDK lookup, and modern version binding
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /WX source\Reboot-27.11-Source\tests\build_version_tests.cpp /Fe:version-tests.exe
+          if errorlevel 1 exit /b 1
+          version-tests.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /WX source\Reboot-27.11-Source\tests\process_event_lookup_tests.cpp /Fe:lookup-tests.exe
+          if errorlevel 1 exit /b 1
+          lookup-tests.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /WX source\Reboot-27.11-Source\tests\modern_version_binding_tests.cpp /Fe:mode-tests.exe
+          if errorlevel 1 exit /b 1
+          mode-tests.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /WX source\Reboot-27.11-Source\tests\reflection38_tests.cpp /Fe:reflection-tests.exe
+          if errorlevel 1 exit /b 1
+          reflection-tests.exe
+          if errorlevel 1 exit /b 1
+      - name: Compile paired server and client DLLs
+        shell: pwsh
+        run: |
+          ./source/Reboot-27.11-Source/scripts/Build.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Package binaries and corresponding source
+        shell: python
+        run: |
+          from pathlib import Path
+          import hashlib, json, os, shutil, struct, zipfile
+          source = Path('source/Reboot-27.11-Source')
+          out = Path('modern-binding-dist')
+          out.mkdir()
+          hashes = []
+          for name in ('Reboot-S19-S30-Server.dll', 'Reboot-S19-S30-Client.dll'):
+              src = source/'dist-S19-S30'/name
+              data = src.read_bytes()
+              assert data[:2] == b'MZ'
+              pe = struct.unpack_from('<I', data, 0x3c)[0]
+              assert data[pe:pe+4] == b'PE\0\0'
+              assert struct.unpack_from('<H', data, pe+4)[0] == 0x8664
+              assert struct.unpack_from('<H', data, pe+24)[0] == 0x20b
+              assert struct.unpack_from('<H', data, pe+22)[0] & 0x2000
+              assert struct.unpack_from('<I', data, pe+40)[0]
+              digest = hashlib.sha256(data).hexdigest()
+              hashes.append(f'{digest}  {name}')
+              shutil.copy2(src, out/name)
+              print(f'{name}: {len(data)} bytes, SHA256 {digest}')
+          for name in ('REFLECTION38-PORT.md', 'MODERN-VERSION-BINDING.md', 'LICENSE', 'PROVENANCE.md'):
+              shutil.copy2(source/name, out/name)
+          (out/'SHA256SUMS.txt').write_text('\n'.join(hashes)+'\n')
+          (out/'BUILD-INFO.json').write_text(json.dumps({
+              'name': 'LEGO and Festival modern version binding 1',
+              'commit': os.environ['GITHUB_SHA'],
+              'run': os.environ['GITHUB_RUN_ID'],
+              'gameplay_support': 'unimplemented; no Fortnite instance was run in CI',
+              'tests': 'version/profile, ProcessEvent lookup, modern version resolver and reflection primitives',
+              'authentication_backend': 'unchanged; retain existing files'
+          }, indent=2)+'\n')
+          with zipfile.ZipFile('Emilyfn-Reflection38-Primitives-Source.zip', 'w', zipfile.ZIP_DEFLATED) as z:
+              for file in sorted(source.rglob('*')):
+                  if file.is_file() and not any(p in ('build', 'dist-S19-S30', '.vs', '.git') for p in file.relative_to(source).parts):
+                      z.write(file, Path('Emilyfn-Reflection38-Primitives-Source')/file.relative_to(source))
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Emilyfn-Reflection38-Primitives-Windows-x64
+          path: modern-binding-dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Emilyfn-Reflection38-Primitives-Source
+          path: Emilyfn-Reflection38-Primitives-Source.zip
+          if-no-files-found: error

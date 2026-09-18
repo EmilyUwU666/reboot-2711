@@ -1,0 +1,273 @@
+diff --git a/REFLECTION38-PORT.md b/REFLECTION38-PORT.md
+new file mode 100644
+index 0000000..3b5d0c0
+--- /dev/null
++++ b/REFLECTION38-PORT.md
+@@ -0,0 +1,33 @@
++# 38.00 reflection primitives port
++
++Build identity: Fortnite 38.00 CL47722112, engine 5.7, supplied executable SHA256
++f4ddac1044edd0e8cc123f586f7204de8724989b6adcf25b2e34b4855747a5c0.
++
++This patch ports three verified operations into the SDK accessors:
++- FField next-link reads at 0x10 with conditional tagged-pointer decoding.
++- FProperty offset reads at 0x3c with 32-bit decoding.
++- FProperty element-size reads at 0x28 with 32-bit decoding.
++
++All property lookups and parameter-marshalling offset/element-size reads share
++the new helpers. Old releases keep their existing reads. Modern selection checks
++release, changelist, engine and three exact instruction anchors before accepting
++the primitives; other images fail closed. A changed instruction or mismatched
++build is not accepted merely because its label says 38.00.
++
++Evidence comes from the execConv_NameToString compiled-parameter path and its
++StepExplicitProperty call, confirmed independently in execGetObjectName. The
++StepExplicitProperty disassembly shows both decoded offset and decoded element
++size being used to address/copy property data. No access-control mechanism or
++anti-cheat component is modified.
++
++This is an incomplete port, not a playable release. Initialization still stops
++before gameplay hooks on 38.00. The exact failure distinguishes rejected identity
++from verified primitives with remaining bindings. UObject registry/layout,
++FField name/class/flags, function dispatch, allocation, networking and server
++hooks are not all validated. A separate GetObjectName trace reads UObject's name
++at 0x20; the legacy UObject layout must not be assumed compatible.
++
++Tests cover exact-image acceptance, each anchor mutation, wrong CL/release/engine,
++truncation, null/plain/tagged links and decoded scalar values. Portable actual-file
++checks do not execute game functions; Windows CI checks compilation and fixtures,
++not host startup, client join, replication, LEGO or Festival gameplay.
+diff --git a/Reboot2711/Reflection38.h b/Reboot2711/Reflection38.h
+new file mode 100644
+index 0000000..c61c6df
+--- /dev/null
++++ b/Reboot2711/Reflection38.h
+@@ -0,0 +1,44 @@
++#pragma once
++#include "BuildVersion.h"
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <optional>
++
++namespace Reboot2711
++{
++    // Exact-image reflection primitives, not a complete supported runtime profile.
++    // Only construction through Verify prevents enabling these keys for another CL.
++    class Reflection38
++    {
++        Reflection38() = default;
++    public:
++        static std::optional<Reflection38> Verify(const BuildVersion& build,
++            const std::uint8_t* image, std::size_t size)
++        {
++            if (build.Season != 38 || build.ReleaseMinor != 0 || build.Changelist != 47722112
++                || build.EngineMajor != 5 || build.EngineMinor != 7 || !image)
++                return std::nullopt;
++            const auto matches = [&](std::size_t rva, const std::uint8_t* bytes, std::size_t count)
++            {
++                return rva <= size && count <= size - rva && std::memcmp(image + rva, bytes, count) == 0;
++            };
++        static constexpr std::uint8_t anchor0[] = { 0x4c, 0x8b, 0x87, 0x88, 0x00, 0x00, 0x00, 0x49, 0x8b, 0x40, 0x10, 0x48, 0x89, 0xc1, 0x48, 0x83, 0xe1, 0xfe, 0x48, 0xba, 0x38, 0xec, 0x15, 0x3f, 0x17, 0xc0, 0xdc, 0x47, 0x48, 0x31, 0xca, 0xa8, 0x01, 0x48, 0x0f, 0x44, 0xd0, 0x48, 0x89, 0x97, 0x88, 0x00, 0x00, 0x00, 0x48, 0x8d, 0x54, 0x24, 0x48, 0x48, 0x89, 0xf9, 0xe8, 0x8c, 0xc9, 0xe4, 0x04 };
++        static constexpr std::uint8_t anchor1[] = { 0x48, 0x63, 0x47, 0x3c, 0x48, 0x35, 0x6b, 0x71, 0x45, 0xf0, 0x48, 0x01, 0xd8 };
++        static constexpr std::uint8_t anchor2[] = { 0x48, 0x63, 0x47, 0x28, 0x48, 0x35, 0x4b, 0x7e, 0x68, 0xaf };
++        if (!matches(0x45714e1, anchor0, sizeof(anchor0))) return std::nullopt;
++        if (!matches(0x93bdf1d, anchor1, sizeof(anchor1))) return std::nullopt;
++        if (!matches(0x93bdf78, anchor2, sizeof(anchor2))) return std::nullopt;
++            return Reflection38{};
++        }
++        std::uint64_t DecodeFieldLink(std::uint64_t stored) const
++        {
++            return (stored & 1) ? ((stored & ~std::uint64_t{1}) ^ 0x47dcc0173f15ec38ull) : stored;
++        }
++        std::uint32_t DecodePropertyOffset(std::uint32_t stored) const { return stored ^ 0xf045716bu; }
++        std::uint32_t DecodeElementSize(std::uint32_t stored) const { return stored ^ 0xaf687e4bu; }
++        static constexpr std::size_t FieldNextOffset = 0x10;
++        static constexpr std::size_t PropertyOffsetOffset = 0x3c;
++        static constexpr std::size_t ElementSizeOffset = 0x28;
++    };
++}
+diff --git a/SDK/Core.h b/SDK/Core.h
+index c7fba60..02d8c98 100644
+--- a/SDK/Core.h
++++ b/SDK/Core.h
+@@ -191,6 +191,24 @@ namespace SDK
+         return (_Ot*)(__int64(Obj) + Offset);
+     }
+ 
++    // Centralize reflected property reads so parameter marshalling uses the same
++    // version-aware decoding as named property lookup.
++    inline uint32 ReadPropertyOffset(const void* property)
++    {
++        if (ModernReflection)
++            return ModernReflection->DecodePropertyOffset(GetFromOffset<uint32>(property,
++                static_cast<uint32>(Reboot2711::Reflection38::PropertyOffsetOffset)));
++        return GetFromOffset<uint32>(property, Offsets::Offset_Internal);
++    }
++
++    inline uint32 ReadPropertyElementSize(const void* property)
++    {
++        if (ModernReflection)
++            return ModernReflection->DecodeElementSize(GetFromOffset<uint32>(property,
++                static_cast<uint32>(Reboot2711::Reflection38::ElementSizeOffset)));
++        return GetFromOffset<uint32>(property, Offsets::ElementSize);
++    }
++
+     class FStructBaseChain
+     {
+     public:
+@@ -243,7 +261,7 @@ namespace SDK
+             auto Prop = GetProperty(Name, CastFlags);
+             if (!Prop)
+                 return -1;
+-            return GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);
++            return ReadPropertyOffset(Prop);
+         }
+ 
+         bool IsA(const class UClass* Clss) const
+@@ -303,6 +321,9 @@ namespace SDK
+     public:
+         const UField* FField_GetNext() const
+         {
++            if (ModernReflection)
++                return reinterpret_cast<const UField*>(ModernReflection->DecodeFieldLink(
++                    GetFromOffset<uint64_t>(this, static_cast<uint32>(Reboot2711::Reflection38::FieldNextOffset))));
+             return GetFromOffset<UField*>(this, Offsets::FField_Next);
+         }
+ 
+@@ -358,7 +379,7 @@ namespace SDK
+             if (!Prop)
+                 return -1;
+ 
+-            return GetFromOffset<uint32>(Prop, Offsets::Offset_Internal);
++            return ReadPropertyOffset(Prop);
+         }
+     };
+ 
+@@ -552,10 +573,10 @@ namespace SDK
+ 
+             if (VersionInfo.FortniteVersion >= 12.10)
+                 for (const UField* _Pr = GetChildProperties(); _Pr; _Pr = _Pr->FField_GetNext())
+-                    p.NameOffsetMap.push_back({ GetFromOffset<uint32>(_Pr, Offsets::Offset_Internal), GetFromOffset<uint64>(_Pr, Offsets::PropertyFlags), GetFromOffset<uint32>(_Pr, Offsets::ElementSize) });
++                    p.NameOffsetMap.push_back({ ReadPropertyOffset(_Pr), GetFromOffset<uint64>(_Pr, Offsets::PropertyFlags), ReadPropertyElementSize(_Pr) });
+             else
+                 for (const UField* _Pr = GetChildren(); _Pr; _Pr = _Pr->GetNext())
+-                    p.NameOffsetMap.push_back({ GetFromOffset<uint32>(_Pr, Offsets::Offset_Internal), GetFromOffset<uint64>(_Pr, Offsets::PropertyFlags), GetFromOffset<uint32>(_Pr, Offsets::ElementSize) });
++                    p.NameOffsetMap.push_back({ ReadPropertyOffset(_Pr), GetFromOffset<uint64>(_Pr, Offsets::PropertyFlags), ReadPropertyElementSize(_Pr) });
+ 
+             p.Size = GetPropertiesSize();
+             return p;
+@@ -567,12 +588,12 @@ namespace SDK
+ 
+             if (VersionInfo.FortniteVersion >= 12.10)
+                 for (const UField* _Pr = GetChildProperties(); _Pr; _Pr = _Pr->FField_GetNext())
+-                    p.NameOffsetMap.push_back({ _Pr->FField_GetName().ToSDKString(), GetFromOffset<uint32>(_Pr, Offsets::Offset_Internal), GetFromOffset<uint64>(_Pr, Offsets::PropertyFlags),
+-                                                GetFromOffset<uint32>(_Pr, Offsets::ElementSize) });
++                    p.NameOffsetMap.push_back({ _Pr->FField_GetName().ToSDKString(), ReadPropertyOffset(_Pr), GetFromOffset<uint64>(_Pr, Offsets::PropertyFlags),
++                                                ReadPropertyElementSize(_Pr) });
+             else
+                 for (const UField* _Pr = GetChildren(); _Pr; _Pr = _Pr->GetNext())
+                     p.NameOffsetMap.push_back(
+-                        { _Pr->GetName().ToSDKString(), GetFromOffset<uint32>(_Pr, Offsets::Offset_Internal), GetFromOffset<uint64>(_Pr, Offsets::PropertyFlags), GetFromOffset<uint32>(_Pr, Offsets::ElementSize) });
++                        { _Pr->GetName().ToSDKString(), ReadPropertyOffset(_Pr), GetFromOffset<uint64>(_Pr, Offsets::PropertyFlags), ReadPropertyElementSize(_Pr) });
+ 
+             p.Size = GetPropertiesSize();
+             return p;
+diff --git a/SDK/Offsets.h b/SDK/Offsets.h
+index a2d2769..c732942 100644
+--- a/SDK/Offsets.h
++++ b/SDK/Offsets.h
+@@ -4,6 +4,7 @@
+ #include <cstdio>
+ #include "../Reboot2711/RuntimeProfile.h"
+ #include "../Reboot2711/ModernVersionBinding.h"
++#include "../Reboot2711/Reflection38.h"
+ 
+ namespace SDK
+ {
+@@ -21,6 +22,7 @@ namespace SDK
+     inline FVersionInfo VersionInfo{};
+     inline std::wstring DetectedBuildString;
+     inline Reboot2711::RuntimeProfile SelectedProfile{};
++    inline std::optional<Reboot2711::Reflection38> ModernReflection;
+ 
+     namespace Offsets
+     {
+@@ -116,6 +118,17 @@ namespace SDK
+ #ifdef REBOOT_SEASONS_19_30
+         static_assert(sizeof(void*) == 8, "Fortnite Seasons 19-30 require an x64 DLL.");
+         const auto ParsedBuild = Reboot2711::ParseBuildVersion(BuildString);
++        ModernReflection.reset();
++        if (ParsedBuild && ParsedBuild->Season == 38)
++        {
++            ModernReflection = Reboot2711::Reflection38::Verify(*ParsedBuild,
++                reinterpret_cast<const std::uint8_t*>(Memcury::PE::GetModuleBase()),
++                Memcury::PE::GetNTHeaders()->OptionalHeader.SizeOfImage);
++            if (!ModernReflection)
++                throw std::runtime_error("38.00 reflection identity check failed. No gameplay hooks were installed.");
++            // Three primitives are ported; the full object/server profile is not.
++            throw std::runtime_error("38.00 reflection primitives verified; UObject registry, dispatch and server bindings remain incomplete. No gameplay hooks were installed.");
++        }
+         if (!ParsedBuild || !Reboot2711::IsTarget(*ParsedBuild))
+             throw std::runtime_error("This experimental DLL accepts Fortnite 19.xx-30.xx with UE 5.0-5.5. Detected: " + std::string(BuildString.begin(), BuildString.end()));
+         VersionInfo.EngineVersion = (ParsedBuild->EngineMajor * 10 + ParsedBuild->EngineMinor) / 10.0;
+diff --git a/tests/reflection38_tests.cpp b/tests/reflection38_tests.cpp
+new file mode 100644
+index 0000000..9c33c41
+--- /dev/null
++++ b/tests/reflection38_tests.cpp
+@@ -0,0 +1,54 @@
++#include "../Reboot2711/Reflection38.h"
++#include <fstream>
++#include <iterator>
++#include <iostream>
++#include <stdexcept>
++#include <vector>
++using namespace Reboot2711;
++int main(int argc, char** argv)
++{
++    int checks = 0;
++    const auto check = [&](bool ok) { ++checks; if (!ok) throw std::runtime_error("reflection check failed"); };
++    auto build = *ParseBuildVersion(L"5.7.0-47722112+++Fortnite+Release-38.00");
++    std::vector<std::uint8_t> image(0x93bdf82, 0);
++    const std::uint8_t fixture0[] = { 0x4c, 0x8b, 0x87, 0x88, 0x00, 0x00, 0x00, 0x49, 0x8b, 0x40, 0x10, 0x48, 0x89, 0xc1, 0x48, 0x83, 0xe1, 0xfe, 0x48, 0xba, 0x38, 0xec, 0x15, 0x3f, 0x17, 0xc0, 0xdc, 0x47, 0x48, 0x31, 0xca, 0xa8, 0x01, 0x48, 0x0f, 0x44, 0xd0, 0x48, 0x89, 0x97, 0x88, 0x00, 0x00, 0x00, 0x48, 0x8d, 0x54, 0x24, 0x48, 0x48, 0x89, 0xf9, 0xe8, 0x8c, 0xc9, 0xe4, 0x04 };
++    std::memcpy(image.data()+0x45714e1, fixture0, sizeof(fixture0));
++    const std::uint8_t fixture1[] = { 0x48, 0x63, 0x47, 0x3c, 0x48, 0x35, 0x6b, 0x71, 0x45, 0xf0, 0x48, 0x01, 0xd8 };
++    std::memcpy(image.data()+0x93bdf1d, fixture1, sizeof(fixture1));
++    const std::uint8_t fixture2[] = { 0x48, 0x63, 0x47, 0x28, 0x48, 0x35, 0x4b, 0x7e, 0x68, 0xaf };
++    std::memcpy(image.data()+0x93bdf78, fixture2, sizeof(fixture2));
++    auto profile = Reflection38::Verify(build, image.data(), image.size());
++    check(profile.has_value());
++    check(!Reflection38::Verify(build, nullptr, image.size()));
++    check(!Reflection38::Verify(build, image.data(), 10));
++    auto wrong = build; wrong.Changelist++;
++    check(!Reflection38::Verify(wrong, image.data(), image.size()));
++    wrong = build; wrong.Season = 37;
++    check(!Reflection38::Verify(wrong, image.data(), image.size()));
++    wrong = build; wrong.ReleaseMinor = 10;
++    check(!Reflection38::Verify(wrong, image.data(), image.size()));
++    wrong = build; wrong.EngineMinor = 6;
++    check(!Reflection38::Verify(wrong, image.data(), image.size()));
++    for (auto at : {0x45714e1u, 0x93bdf1du, 0x93bdf78u})
++    {
++        image[at] ^= 1;
++        check(!Reflection38::Verify(build, image.data(), image.size()));
++        image[at] ^= 1;
++    }
++    check(profile->DecodeFieldLink(0) == 0);
++    check(profile->DecodeFieldLink(0x1000) == 0x1000);
++    check(profile->DecodeFieldLink(0x47dcc0173f15ec39ull) == 0);
++    check(profile->DecodeFieldLink(0x47dcc0173f15fc39ull) == 0x1000);
++    check(profile->DecodePropertyOffset(0xf045716bu) == 0);
++    check(profile->DecodePropertyOffset(0xf045726bu) == 0x300);
++    check(profile->DecodeElementSize(0xaf687e4bu) == 0);
++    check(profile->DecodeElementSize(0xaf687e43u) == 8);
++    if (argc == 2)
++    {
++        std::ifstream stream(argv[1], std::ios::binary);
++        std::vector<std::uint8_t> actual((std::istreambuf_iterator<char>(stream)), {});
++        check(actual.size() == 411324416);
++        check(Reflection38::Verify(build, actual.data(), actual.size()).has_value());
++    }
++    std::cout << checks << " reflection primitive checks passed; gameplay not exercised.\n";
++}
