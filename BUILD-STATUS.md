@@ -1,3 +1,25 @@
+## 38.00 backend validation and native diagnostic results
+
+- Native diagnostic run: https://github.com/EmilyUwU666/reboot-2711/actions/runs/35281579517
+  - Both Windows x64 DLLs compiled; 322 Windows checks passed (288 profile, 23 ProcessEvent, 11 resolver).
+  - Offline checks against the supplied executable also passed, 13 total including fixture checks.
+  - Diagnostic artifact: https://github.com/EmilyUwU666/reboot-2711/actions/runs/35281579517/artifacts/10522593756
+- Backend validation run: https://github.com/EmilyUwU666/reboot-2711/actions/runs/35304253021
+  - Existing smoke suite and 400 additional synthetic HTTP checks passed through release 38.
+  - Includes profile/calendar consistency, discovery, local session destination and network-ID cookie roundtrip.
+  - Artifact: https://github.com/EmilyUwU666/reboot-2711/actions/runs/35304253021/artifacts/10531351848
+  - Backend runtime behavior is unchanged; this packages the pinned backend after broader validation.
+- Review: https://github.com/EmilyUwU666/reboot-2711/pull/1
+
+**These are diagnostic and HTTP-validation packages, not full Season 38 support.**
+The main launcher still rejects 38.00. The executable investigation now identifies
+an additional field-link offset/tagged-pointer mismatch and a candidate name
+conversion function. Those modern reflection bindings remain unwired and need
+runtime validation with a matching full game installation/object dump. No host
+startup, client join, spawning, replication, LEGO or Festival gameplay was tested.
+
+---
+
 ## 38.00 engine port — version binding diagnostic
 
 The uploaded 38.00 image identifies CL47722112 and Unreal Engine 5.7.0. The
