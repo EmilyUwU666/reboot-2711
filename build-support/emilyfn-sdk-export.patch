@@ -1,0 +1,230 @@
+--- /dev/null
++++ b/launcher/Emilyfn.Core/SdkHeaderExporter.cs
+@@ -0,0 +1,129 @@
++using System.Security.Cryptography;
++using System.Text;
++using System.Text.Json;
++
++namespace Emilyfn.Core;
++
++// Produces reflection metadata headers, never unverified object layouts or dispatch wrappers.
++public static class SdkHeaderExporter
++{
++    public sealed record Result(string Folder, int Types, int Members, int Functions);
++    private sealed record Input(string Name, byte[] Bytes, JsonDocument Document);
++    public static Task<Result> ExportAsync(string source, string destination, string sourceBuild) =>
++        Task.Run(() => Export(source, destination, sourceBuild));
++
++    private static Result Export(string source, string destination, string sourceBuild)
++    {
++        if (string.IsNullOrWhiteSpace(sourceBuild) || sourceBuild.Length > 200 || sourceBuild.Any(char.IsControl))
++            throw new ArgumentException("Enter the dump's source build, including its CL when known.");
++        var inputs = new List<Input>();
++        string? folder = null;
++        try
++        {
++            foreach (string name in new[] { "ClassesInfo.json", "StructsInfo.json", "FunctionsInfo.json" })
++            {
++                var path = Path.Combine(source, name);
++                if (!File.Exists(path)) throw new FileNotFoundException($"Missing {name}. Select a decoded Dumpspace SDK folder, not a raw .dmp file.");
++                if (new FileInfo(path).Length > 256L * 1024 * 1024) throw new IOException($"{name} exceeds the 256 MB import limit.");
++                var bytes = File.ReadAllBytes(path);
++                var doc = JsonDocument.Parse(bytes);
++                inputs.Add(new(name, bytes, doc));
++                if (doc.RootElement.GetProperty("version").GetInt32() != 10202 ||
++                    doc.RootElement.GetProperty("data").ValueKind != JsonValueKind.Array)
++                    throw new InvalidDataException($"{name} is not a supported Dumpspace 10202 document.");
++            }
++            // A mixed snapshot can silently give incompatible class and function definitions.
++            if (inputs.Select(i => i.Document.RootElement.GetProperty("updated_at").ToString()).Distinct().Count() != 1)
++                throw new InvalidDataException("The input files have different snapshot timestamps. Use files from the same dump.");
++            var types = new List<string>(); var members = new List<string>(); var functions = new List<string>();
++            foreach (var input in inputs.Take(2))
++            foreach (var entry in input.Document.RootElement.GetProperty("data").EnumerateArray())
++            foreach (var type in entry.EnumerateObject())
++            {
++                long size = -1; string inherit = "";
++                foreach (var field in type.Value.EnumerateArray())
++                foreach (var property in field.EnumerateObject())
++                {
++                    if (property.Name == "__MDKClassSize") { size = Number(property.Value); continue; }
++                    if (property.Name == "__InheritInfo") { inherit = property.Value.GetRawText(); continue; }
++                    if (property.Name.StartsWith("__", StringComparison.Ordinal)) continue;
++                    var v = property.Value;
++                    if (v.ValueKind != JsonValueKind.Array || v.GetArrayLength() < 4)
++                        throw new InvalidDataException($"Unsupported member in {type.Name}.");
++                    long offset = Number(v[1]), width = Number(v[2]), count = Number(v[3]);
++                    long bit = v.GetArrayLength() > 4 ? Number(v[4]) : -1;
++                    members.Add($"{{{Quote(type.Name)}, {Quote(property.Name)}, {Quote(v[0].GetRawText())}, {offset}ULL, {width}ULL, {count}ULL, {bit}}}");
++                }
++                if (size < 0) throw new InvalidDataException($"Missing size for {type.Name}.");
++                types.Add($"{{{Quote(type.Name)}, {Quote(input.Name == "ClassesInfo.json" ? "class" : "struct")}, {size}ULL, {Quote(inherit)}}}");
++            }
++            foreach (var entry in inputs[2].Document.RootElement.GetProperty("data").EnumerateArray())
++            foreach (var owner in entry.EnumerateObject())
++            foreach (var item in owner.Value.EnumerateArray())
++            foreach (var fn in item.EnumerateObject())
++            {
++                var v = fn.Value;
++                if (v.ValueKind != JsonValueKind.Array || v.GetArrayLength() < 4)
++                    throw new InvalidDataException($"Unsupported function in {owner.Name}.");
++                functions.Add($"{{{Quote(owner.Name)}, {Quote(fn.Name)}, {Quote(v[0].GetRawText())}, {Quote(v[1].GetRawText())}, {Number(v[2])}ULL, {Quote(v[3].GetString() ?? "")}}}");
++            }
++            folder = Path.Combine(Path.GetFullPath(destination), "Emilyfn-SDK-" + Guid.NewGuid().ToString("N"));
++            Directory.CreateDirectory(folder);
++            string header = "#pragma once\n#include <array>\n#include <cstdint>\n#include <string_view>\n\nnamespace emilyfn_sdk {\n" +
++                "// Source metadata only. Addresses are unverified; no dispatch or live-object access is generated.\n" +
++                "struct Type { std::string_view name, kind; std::uint64_t reported_size; std::string_view inheritance_json; };\n" +
++                "struct Member { std::string_view owner, name, type_json; std::uint64_t offset, size, array_count; std::int64_t bit_index; };\n" +
++                "struct Function { std::string_view owner, name, return_type_json, parameters_json; std::uint64_t reported_address; std::string_view reported_flags; };\n" +
++                $"inline constexpr std::string_view source_build = {Quote(sourceBuild)};\n" +
++                "inline constexpr bool runtime_verified = false;\n";
++            WriteTable(folder, "types.hpp", header, "Type", "types", types);
++            WriteTable(folder, "members.hpp", header, "Member", "members", members);
++            WriteTable(folder, "functions.hpp", header, "Function", "functions", functions);
++            // Common declarations live in one header, avoiding redefinitions when tables are included together.
++            File.WriteAllText(Path.Combine(folder, "metadata.hpp"), header + "}\n", new UTF8Encoding(false));
++            File.WriteAllText(Path.Combine(folder, "sdk.hpp"), "#pragma once\n#include \"types.hpp\"\n#include \"members.hpp\"\n#include \"functions.hpp\"\n", new UTF8Encoding(false));
++            File.WriteAllText(Path.Combine(folder, "manifest.json"), JsonSerializer.Serialize(new {
++                Format = "Emilyfn SDK metadata headers v1", SourceBuildLabel = sourceBuild,
++                BuildLabelVerified = false, RuntimeVerified = false,
++                Types = types.Count, Members = members.Count, Functions = functions.Count,
++                Inputs = inputs.Select(i => new { File = i.Name, Sha256 = Convert.ToHexString(SHA256.HashData(i.Bytes)).ToLowerInvariant() })
++            }, new JsonSerializerOptions { WriteIndented = true }));
++            File.WriteAllText(Path.Combine(folder, "README.txt"),
++                "Emilyfn SDK metadata headers (C++17)\nInclude sdk.hpp to inspect emilyfn_sdk::types, members and functions.\n" +
++                "Generated from decoded Dumpspace 10202 JSON; not from a raw memory dump.\n" +
++                "The source build label is user supplied, not independently verified. See manifest.json for input hashes.\n" +
++                "Reported zero sizes, flags and addresses are preserved, not inferred or corrected.\n" +
++                "These headers describe the source dump. They do not provide C++ object layouts, callable wrappers, global offsets, or playable build support.\n" +
++                "Never use another CL's addresses without independent validation.\n");
++            return new(folder, types.Count, members.Count, functions.Count);
++        }
++        catch
++        {
++            if (folder is not null && Directory.Exists(folder)) Directory.Delete(folder, true);
++            throw;
++        }
++        finally { foreach (var input in inputs) input.Document.Dispose(); }
++    }
++    private static long Number(JsonElement value)
++    {
++        if (!value.TryGetInt64(out var number) || number < 0) throw new InvalidDataException("A dump offset, size or address is invalid.");
++        return number;
++    }
++    private static void WriteTable(string folder, string file, string header, string type, string name, List<string> rows)
++    {
++        using var output = new StreamWriter(Path.Combine(folder, file), false, new UTF8Encoding(false));
++        output.WriteLine("#pragma once\n#include \"metadata.hpp\"\nnamespace emilyfn_sdk {");
++        output.WriteLine($"inline constexpr std::array<{type}, {rows.Count}> {name} = {{{{");
++        foreach (var row in rows) output.WriteLine(row + ",");
++        output.WriteLine("}};\n}");
++    }
++    private static string Quote(string text)
++    {
++        // Fixed three-digit octal escapes avoid both source injection and ambiguous C++ hex escapes.
++        var result = new StringBuilder("\"");
++        foreach (var b in Encoding.UTF8.GetBytes(text))
++            if (b >= 32 && b <= 126 && b != 34 && b != 92) result.Append((char)b);
++            else result.Append('\\').Append(Convert.ToString(b, 8).PadLeft(3, '0'));
++        return result.Append('"').ToString();
++    }
++}
+--- /dev/null
++++ b/launcher/Emilyfn.App/SdkExportWindow.cs
+@@ -0,0 +1,43 @@
++using Emilyfn.Core;
++using Microsoft.Win32;
++using System.Diagnostics;
++using System.Windows;
++using System.Windows.Controls;
++
++namespace Emilyfn.App;
++
++public sealed class SdkExportWindow : Window
++{
++    private readonly TextBox build = new() { Margin = new Thickness(0, 8, 0, 12) };
++    private readonly Button export = new() { Content = "Choose decoded dump and export headers" };
++    private readonly TextBlock status = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) };
++    private bool busy;
++    public SdkExportWindow()
++    {
++        Title = "Emilyfn — SDK metadata headers"; Width = 720; Height = 400; WindowStartupLocation = WindowStartupLocation.CenterOwner;
++        var panel = new StackPanel { Margin = new Thickness(24) };
++        panel.Children.Add(new TextBlock { Text = "Generate SDK metadata headers", FontSize = 20 });
++        panel.Children.Add(new TextBlock { Text = "Import ClassesInfo.json, StructsInfo.json and FunctionsInfo.json from one Dumpspace snapshot. Exports C++17 class, property and function metadata. Raw memory dumps cannot be decoded here yet; live 38.00 SDK generation is still unavailable.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 12) });
++        panel.Children.Add(new TextBlock { Text = "Source dump build and CL (as reported by its author)" });
++        panel.Children.Add(build); panel.Children.Add(export); panel.Children.Add(status); Content = panel;
++        export.Click += async (_, _) => await Export();
++        Closing += (_, e) => { if (busy) e.Cancel = true; };
++    }
++    private async Task Export()
++    {
++        if (string.IsNullOrWhiteSpace(build.Text)) { status.Text = "Enter the source dump's build and CL first."; return; }
++        var source = new OpenFolderDialog { Title = "Choose folder containing decoded Dumpspace JSON" };
++        if (source.ShowDialog(this) != true) return;
++        var output = new OpenFolderDialog { Title = "Choose SDK output folder" };
++        if (output.ShowDialog(this) != true) return;
++        busy = true; export.IsEnabled = build.IsEnabled = false; status.Text = "Generating headers…";
++        try
++        {
++            var result = await SdkHeaderExporter.ExportAsync(source.FolderName, output.FolderName, build.Text.Trim());
++            status.Text = $"Saved {result.Types:N0} types, {result.Members:N0} members and {result.Functions:N0} functions to {result.Folder}. These are source metadata, not verified live bindings.";
++            try { Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { result.Folder } }); } catch { }
++        }
++        catch (Exception error) { status.Text = error.Message; }
++        finally { busy = false; export.IsEnabled = build.IsEnabled = true; }
++    }
++}
+--- a/launcher/Emilyfn.App/MainWindow.xaml
++++ b/launcher/Emilyfn.App/MainWindow.xaml
+@@ -144,7 +144,7 @@
+             <Border Background="{StaticResource Panel}" CornerRadius="14" Padding="24" Margin="0,20,0,0"><StackPanel><TextBlock Text="Local backend" FontSize="21" FontWeight="SemiBold"/><TextBlock Text="Emilyfn starts its bundled backend, or uses a compatible one already running on port 3551." Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,10,0,18"/><Button Content="Start / check backend" HorizontalAlignment="Left" Click="Backend_Click"/></StackPanel></Border>
+             <TextBlock Text="Emilyfn 0.3.1 · Experimental Seasons 19–30 support.&#10;A successful launch does not yet guarantee a complete match on every build." Foreground="#76829D" TextWrapping="Wrap" Margin="3,23,0,0" FontSize="12"/>
+           </StackPanel>
+-          <Grid x:Name="LogsPage" Visibility="Collapsed"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions><StackPanel Orientation="Horizontal" Margin="0,0,0,18"><Button Content="Export diagnostic ZIP" Style="{StaticResource Accent}" Click="ExportLogs_Click"/><Button Content="Capture game memory" Margin="12,0,0,0" Click="CaptureMemory_Click"/><Button Content="Open logs folder" Margin="12,0,0,0" Click="OpenLogs_Click"/></StackPanel><Border Grid.Row="1" Background="#090F19" CornerRadius="12" Padding="18" MinHeight="470"><TextBox Text="{Binding LogText, Mode=OneWay}" FontFamily="Consolas" FontSize="11" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Height="500" BorderThickness="0" Background="Transparent" Foreground="#B1C5D9"/></Border></Grid>
++          <Grid x:Name="LogsPage" Visibility="Collapsed"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions><StackPanel Orientation="Horizontal" Margin="0,0,0,18"><Button Content="Export diagnostic ZIP" Style="{StaticResource Accent}" Click="ExportLogs_Click"/><Button Content="SDK headers" Margin="12,0,0,0" Click="SdkHeaders_Click"/><Button Content="Capture game memory" Margin="12,0,0,0" Click="CaptureMemory_Click"/><Button Content="Open logs folder" Margin="12,0,0,0" Click="OpenLogs_Click"/></StackPanel><Border Grid.Row="1" Background="#090F19" CornerRadius="12" Padding="18" MinHeight="470"><TextBox Text="{Binding LogText, Mode=OneWay}" FontFamily="Consolas" FontSize="11" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Height="500" BorderThickness="0" Background="Transparent" Foreground="#B1C5D9"/></Border></Grid>
+         </Grid>
+       </ScrollViewer>
+       <TextBlock Grid.Row="3" Text="Host and client use the same selected build. Closing Emilyfn stops the instances it started." Foreground="#63708C" FontSize="10" Margin="0,15,0,0"/>
+--- a/launcher/Emilyfn.App/MainWindow.xaml.cs
++++ b/launcher/Emilyfn.App/MainWindow.xaml.cs
+@@ -206,6 +206,10 @@
+         try { Save(); } catch (Exception error) { ShowBanner(error.Message); }
+     }
+     private async void OpenLogs_Click(object sender, RoutedEventArgs e) => await ActionAsync(() => { Process.Start(new ProcessStartInfo("explorer.exe") { ArgumentList = { engine.LogsRoot }, UseShellExecute = true }); return Task.CompletedTask; });
++    private void SdkHeaders_Click(object sender, RoutedEventArgs e)
++    {
++        new SdkExportWindow { Owner = this }.ShowDialog();
++    }
+     private void CaptureMemory_Click(object sender, RoutedEventArgs e)
+     {
+         new MemoryCaptureWindow(path => engine.ExportLogsAsync(path)) { Owner = this }.ShowDialog();
+--- /dev/null
++++ b/launcher/Emilyfn.SdkTests/Emilyfn.SdkTests.csproj
+@@ -0,0 +1 @@
++<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup><ItemGroup><ProjectReference Include="../Emilyfn.Core/Emilyfn.Core.csproj" /></ItemGroup></Project>
+--- /dev/null
++++ b/launcher/Emilyfn.SdkTests/Program.cs
+@@ -0,0 +1,21 @@
++using Emilyfn.Core;
++using System.Text.Json;
++var root = Path.GetFullPath(args[0]);
++Directory.CreateDirectory(root);
++var input = Path.Combine(root, "input"); Directory.CreateDirectory(input);
++void Write(string name, object data, string stamp = "123") => File.WriteAllText(Path.Combine(input, name + ".json"), JsonSerializer.Serialize(new { version = 10202, updated_at = stamp, data }));
++Write("ClassesInfo", new object[] { new Dictionary<string, object> { ["UObject"] = new object[] { new { __InheritInfo = new[] { "" } }, new { __MDKClassSize = 0 } } } });
++Write("StructsInfo", new object[] { new Dictionary<string, object> { ["FTest\"\\é"] = new object[] { new { __InheritInfo = new[] { "" } }, new { __MDKClassSize = 8 }, new Dictionary<string, object> { ["Value"] = new object[] { new object[] { "uint64", "D", "", Array.Empty<object>() }, 0, 8, 1 } } } } });
++Write("FunctionsInfo", new object[] { new Dictionary<string, object> { ["UObject"] = new object[] { new Dictionary<string, object> { ["Test"] = new object[] { new object[] { "void", "D", "", Array.Empty<object>() }, Array.Empty<object>(), 1234, "Native" } } } } });
++var result = await SdkHeaderExporter.ExportAsync(input, root, "38.00-CL-test");
++if (result.Types != 2 || result.Members != 1 || result.Functions != 1) throw new Exception("Counts differ");
++var header = File.ReadAllText(Path.Combine(result.Folder, "members.hpp"));
++if (!header.Contains("\\042\\134\\303\\251")) throw new Exception("Unsafe C++ string encoding");
++var manifest = File.ReadAllText(Path.Combine(result.Folder, "manifest.json"));
++if (!manifest.Contains("\"RuntimeVerified\": false") || !manifest.Contains("Sha256")) throw new Exception("Missing provenance");
++Write("FunctionsInfo", Array.Empty<object>(), "different");
++bool rejected = false;
++try { await SdkHeaderExporter.ExportAsync(input, root, "38.00"); } catch (InvalidDataException) { rejected = true; }
++if (!rejected) throw new Exception("Mixed snapshots accepted");
++File.WriteAllText(Path.Combine(root, "sdk-smoke.cpp"), "#include \"" + result.Folder.Replace('\\','/') + "/sdk.hpp\"\nstatic_assert(emilyfn_sdk::types.size() == 2);\nstatic_assert(emilyfn_sdk::members[0].size == 8);\nstatic_assert(emilyfn_sdk::functions[0].reported_address == 1234);\nstatic_assert(!emilyfn_sdk::runtime_verified);\nint main() {}\n");
++Console.WriteLine("SDK exporter checks passed: counts, C++ escaping, provenance and mixed-snapshot rejection.");

@@ -18,7 +18,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for name in core ui tests downloads startup memory-capture; do
+          for name in core ui tests downloads startup memory-capture sdk-export; do
             git show "HEAD:build-support/emilyfn-${name}.patch" > "emilyfn-${name}.patch"
             git apply --check "emilyfn-${name}.patch"
             git apply "emilyfn-${name}.patch"
@@ -70,6 +70,15 @@ jobs:
           cl /nologo /std:c++17 /EHsc /MT /W4 /LD /DMODULE_ROLE=1 launcher\Emilyfn.Tests\native\module.cpp /Fe:native-fixtures\Reboot-S19-S30-Server.dll
           if errorlevel 1 exit /b 1
           cl /nologo /std:c++17 /EHsc /MT /W4 /LD /DMODULE_ROLE=2 launcher\Emilyfn.Tests\native\module.cpp /Fe:native-fixtures\Reboot-S19-S30-Client.dll
+          if errorlevel 1 exit /b 1
+      - name: Test SDK exporter and compile generated C++ headers
+        shell: cmd
+        run: |
+          dotnet run --project launcher/Emilyfn.SdkTests/Emilyfn.SdkTests.csproj -c Release -- sdk-fixtures
+          if errorlevel 1 exit /b 1
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /W4 /WX sdk-fixtures\sdk-smoke.cpp /Fe:sdk-fixtures\sdk-smoke.exe
           if errorlevel 1 exit /b 1
       - name: Test real memory capture of a synthetic child
         shell: pwsh
