@@ -1,0 +1,272 @@
+--- /dev/null
++++ b/launcher/Emilyfn.Core/GameMemoryCapture.cs
+@@ -0,0 +1,114 @@
++using Microsoft.Win32.SafeHandles;
++using System.ComponentModel;
++using System.Diagnostics;
++using System.Runtime.InteropServices;
++using System.Security.Cryptography;
++using System.Text.Json;
++
++namespace Emilyfn.Core;
++
++public sealed record CaptureTarget(int Id, DateTime StartedUtc, string Executable)
++{
++    public string Label => $"PID {Id} — {Executable}";
++}
++
++public static class GameMemoryCapture
++{
++    private static readonly SemaphoreSlim Gate = new(1, 1);
++    public static IReadOnlyList<CaptureTarget> FindTargets()
++    {
++        var targets = new List<CaptureTarget>();
++        foreach (var process in Process.GetProcessesByName("FortniteClient-Win64-Shipping"))
++        {
++            using (process)
++                try { targets.Add(new(process.Id, process.StartTime.ToUniversalTime(), process.MainModule!.FileName)); }
++                catch (Exception e) when (e is Win32Exception or InvalidOperationException or NotSupportedException) { }
++        }
++        return targets.OrderBy(t => t.Id).ToArray();
++    }
++
++    public static async Task<string> CaptureAsync(CaptureTarget target, string parent, IProgress<string>? progress = null)
++    {
++        if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess)
++            throw new PlatformNotSupportedException("Capture requires the Windows x64 launcher.");
++        if (!await Gate.WaitAsync(0)) throw new InvalidOperationException("A memory capture is already running.");
++        try { return await Task.Run(() => Capture(target, parent, progress)); }
++        finally { Gate.Release(); }
++    }
++
++    private static string Capture(CaptureTarget target, string parent, IProgress<string>? progress)
++    {
++        using var process = Process.GetProcessById(target.Id);
++        // Acquire a handle before validating identity so PID reuse cannot redirect the capture.
++        using var handle = OpenProcess(0x0400 | 0x0010, false, target.Id);
++        if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows could not open this game for capture.");
++        if (process.HasExited || process.StartTime.ToUniversalTime() != target.StartedUtc ||
++            !string.Equals(process.ProcessName, "FortniteClient-Win64-Shipping", StringComparison.OrdinalIgnoreCase) ||
++            !string.Equals(process.MainModule?.FileName, target.Executable, StringComparison.OrdinalIgnoreCase))
++            throw new InvalidOperationException("The selected game exited or changed. Refresh the process list.");
++        // Verify creation time against the actual native handle as well.
++        if (!GetProcessTimes(handle, out long created, out _, out _, out _) ||
++            DateTime.FromFileTimeUtc(created) != target.StartedUtc)
++            throw new InvalidOperationException("The selected game changed before capture.");
++        var folder = Path.Combine(Path.GetFullPath(parent), $"Emilyfn-memory-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}");
++        Directory.CreateDirectory(folder);
++        var partial = Path.Combine(folder, "game.dmp.partial");
++        try
++        {
++            progress?.Report("Recording build and module details…");
++            var modules = process.Modules.Cast<ProcessModule>().Select(m => new {
++                Name = m.ModuleName, Path = m.FileName, BaseAddress = $"0x{m.BaseAddress.ToInt64():X}", Size = m.ModuleMemorySize
++            }).ToArray();
++            var version = FileVersionInfo.GetVersionInfo(target.Executable);
++            using var executable = File.OpenRead(target.Executable);
++            var hash = Convert.ToHexString(SHA256.HashData(executable)).ToLowerInvariant();
++            File.WriteAllText(Path.Combine(folder, "capture.json"), JsonSerializer.Serialize(new {
++                FormatVersion = 1, CapturedUtc = DateTime.UtcNow, target.Id, target.StartedUtc,
++                target.Executable, version.FileVersion, version.ProductVersion, ExecutableSha256 = hash,
++                DumpFlags = "0x1822: FullMemory, FullMemoryInfo, ThreadInfo, UnloadedModules",
++                Modules = modules, Note = "Live process capture; not a decoded SDK or an atomic snapshot."
++            }, new JsonSerializerOptions { WriteIndented = true }));
++            File.WriteAllText(Path.Combine(folder, "README.txt"),
++                "Emilyfn runtime capture\r\n" +
++                "game.dmp contains full accessible game memory, modules and thread information.\r\n" +
++                "capture.json identifies the executable SHA-256 and module addresses.\r\n" +
++                "Capture while the game is initialized (lobby or the stuck screen), before closing it.\r\n" +
++                "This is raw runtime evidence, not generated SDK headers or proof of build support.\r\n" +
++                "Memory may contain credentials and personal data. Keep private; nothing is uploaded automatically.\r\n");
++            progress?.Report("Capturing game memory… This may take several minutes and several GB.");
++            using (var file = new FileStream(partial, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
++            {
++                if (!MiniDumpWriteDump(handle, (uint)target.Id, file.SafeFileHandle, 0x1822, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero))
++                {
++                    int error = Marshal.GetLastWin32Error();
++                    throw new IOException($"Memory capture failed (0x{error:X8}). The game must stay running and Windows must allow memory access. Check free disk space.", Marshal.GetExceptionForHR(error));
++                }
++                file.Flush(true);
++                file.Position = 0;
++                using var reader = new BinaryReader(file, System.Text.Encoding.UTF8, leaveOpen: true);
++                if (file.Length < 32 || reader.ReadUInt32() != 0x504d444d)
++                    throw new IOException("Windows returned an invalid memory dump.");
++            }
++            File.Move(partial, Path.Combine(folder, "game.dmp"));
++            progress?.Report("Memory capture saved.");
++            return folder;
++        }
++        catch
++        {
++            // Remove only this operation's incomplete dump; preserve diagnostics about the attempt.
++            if (File.Exists(partial)) File.Delete(partial);
++            File.WriteAllText(Path.Combine(folder, "CAPTURE-FAILED.txt"), "Capture did not complete. No valid game.dmp was produced. Retry while the game is running.");
++            throw;
++        }
++    }
++
++    [DllImport("kernel32.dll", SetLastError = true)]
++    private static extern SafeProcessHandle OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, int pid);
++    [DllImport("kernel32.dll", SetLastError = true)]
++    [return: MarshalAs(UnmanagedType.Bool)]
++    private static extern bool GetProcessTimes(SafeProcessHandle process, out long creation, out long exit, out long kernel, out long user);
++    [DllImport("dbghelp.dll", SetLastError = true)]
++    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
++    [return: MarshalAs(UnmanagedType.Bool)]
++    private static extern bool MiniDumpWriteDump(SafeProcessHandle process, uint pid, SafeFileHandle file, uint flags, IntPtr exception, IntPtr streams, IntPtr callback);
++}
+--- /dev/null
++++ b/launcher/Emilyfn.App/MemoryCaptureWindow.cs
+@@ -0,0 +1,65 @@
++using Emilyfn.Core;
++using Microsoft.Win32;
++using System.Diagnostics;
++using System.Windows;
++using System.Windows.Controls;
++
++namespace Emilyfn.App;
++
++public sealed class MemoryCaptureWindow : Window
++{
++    private readonly ComboBox targets = new() { Margin = new Thickness(0, 12, 0, 12), DisplayMemberPath = "Label" };
++    private readonly TextBlock status = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) };
++    private readonly Button capture = new() { Content = "Choose folder and capture", Margin = new Thickness(0, 0, 12, 0) };
++    private readonly Button refresh = new() { Content = "Refresh" };
++    private readonly Func<string, Task> exportLogs;
++    private bool busy;
++
++    public MemoryCaptureWindow(Func<string, Task> exportLogs)
++    {
++        this.exportLogs = exportLogs;
++        Title = "Emilyfn — Capture game memory"; Width = 720; Height = 370;
++        WindowStartupLocation = WindowStartupLocation.CenterOwner;
++        var panel = new StackPanel { Margin = new Thickness(24) };
++        panel.Children.Add(new TextBlock { Text = "Select the running game to capture", FontSize = 20 });
++        panel.Children.Add(new TextBlock { Text = "Keep Fortnite open at the lobby or stuck screen. This saves full game memory locally and may take several GB. Memory can contain session credentials; keep the files private. Nothing is uploaded automatically.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
++        panel.Children.Add(targets);
++        var buttons = new StackPanel { Orientation = Orientation.Horizontal };
++        buttons.Children.Add(capture); buttons.Children.Add(refresh); panel.Children.Add(buttons); panel.Children.Add(status);
++        Content = panel;
++        refresh.Click += (_, _) => Refresh();
++        capture.Click += async (_, _) => await Capture();
++        Closing += (_, e) => { if (busy) { e.Cancel = true; status.Text = "Please wait for the capture to finish before closing this window."; } };
++        Refresh();
++    }
++    private void Refresh()
++    {
++        try
++        {
++            var found = GameMemoryCapture.FindTargets(); targets.ItemsSource = found;
++            targets.SelectedIndex = found.Count == 1 ? 0 : -1;
++            capture.IsEnabled = found.Count > 0;
++            status.Text = found.Count == 0 ? "No accessible Fortnite game found. Start the game first, then refresh." : "Choose the client or host PID you want to capture.";
++        }
++        catch (Exception error) { status.Text = error.Message; capture.IsEnabled = false; }
++    }
++    private async Task Capture()
++    {
++        if (targets.SelectedItem is not CaptureTarget target) { status.Text = "Select a game process first."; return; }
++        var dialog = new OpenFolderDialog { Title = "Choose a folder with space for a full memory dump" };
++        if (dialog.ShowDialog(this) != true) return;
++        busy = true; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = false;
++        try
++        {
++            var folder = await GameMemoryCapture.CaptureAsync(target, dialog.FolderName, new Progress<string>(s => status.Text = s));
++            string logStatus = "Logs included.";
++            try { await exportLogs(System.IO.Path.Combine(folder, "launcher-logs.zip")); }
++            catch (Exception error) { logStatus = "Memory saved, but log export failed: " + error.Message; }
++            status.Text = $"Saved to {folder}. {logStatus}";
++            try { Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { folder } }); }
++            catch { /* Saved files remain usable if Explorer is unavailable. */ }
++        }
++        catch (Exception error) { status.Text = error.Message; }
++        finally { busy = false; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = true; }
++    }
++}
+--- a/launcher/Emilyfn.App/MainWindow.xaml
++++ b/launcher/Emilyfn.App/MainWindow.xaml
+@@ -144,7 +144,7 @@
+             <Border Background="{StaticResource Panel}" CornerRadius="14" Padding="24" Margin="0,20,0,0"><StackPanel><TextBlock Text="Local backend" FontSize="21" FontWeight="SemiBold"/><TextBlock Text="Emilyfn starts its bundled backend, or uses a compatible one already running on port 3551." Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,10,0,18"/><Button Content="Start / check backend" HorizontalAlignment="Left" Click="Backend_Click"/></StackPanel></Border>
+             <TextBlock Text="Emilyfn 0.3.1 · Experimental Seasons 19–30 support.&#10;A successful launch does not yet guarantee a complete match on every build." Foreground="#76829D" TextWrapping="Wrap" Margin="3,23,0,0" FontSize="12"/>
+           </StackPanel>
+-          <Grid x:Name="LogsPage" Visibility="Collapsed"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions><StackPanel Orientation="Horizontal" Margin="0,0,0,18"><Button Content="Export diagnostic ZIP" Style="{StaticResource Accent}" Click="ExportLogs_Click"/><Button Content="Open logs folder" Margin="12,0,0,0" Click="OpenLogs_Click"/></StackPanel><Border Grid.Row="1" Background="#090F19" CornerRadius="12" Padding="18" MinHeight="470"><TextBox Text="{Binding LogText, Mode=OneWay}" FontFamily="Consolas" FontSize="11" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Height="500" BorderThickness="0" Background="Transparent" Foreground="#B1C5D9"/></Border></Grid>
++          <Grid x:Name="LogsPage" Visibility="Collapsed"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions><StackPanel Orientation="Horizontal" Margin="0,0,0,18"><Button Content="Export diagnostic ZIP" Style="{StaticResource Accent}" Click="ExportLogs_Click"/><Button Content="Capture game memory" Margin="12,0,0,0" Click="CaptureMemory_Click"/><Button Content="Open logs folder" Margin="12,0,0,0" Click="OpenLogs_Click"/></StackPanel><Border Grid.Row="1" Background="#090F19" CornerRadius="12" Padding="18" MinHeight="470"><TextBox Text="{Binding LogText, Mode=OneWay}" FontFamily="Consolas" FontSize="11" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Height="500" BorderThickness="0" Background="Transparent" Foreground="#B1C5D9"/></Border></Grid>
+         </Grid>
+       </ScrollViewer>
+       <TextBlock Grid.Row="3" Text="Host and client use the same selected build. Closing Emilyfn stops the instances it started." Foreground="#63708C" FontSize="10" Margin="0,15,0,0"/>
+--- a/launcher/Emilyfn.App/MainWindow.xaml.cs
++++ b/launcher/Emilyfn.App/MainWindow.xaml.cs
+@@ -206,6 +206,10 @@
+         try { Save(); } catch (Exception error) { ShowBanner(error.Message); }
+     }
+     private async void OpenLogs_Click(object sender, RoutedEventArgs e) => await ActionAsync(() => { Process.Start(new ProcessStartInfo("explorer.exe") { ArgumentList = { engine.LogsRoot }, UseShellExecute = true }); return Task.CompletedTask; });
++    private void CaptureMemory_Click(object sender, RoutedEventArgs e)
++    {
++        new MemoryCaptureWindow(path => engine.ExportLogsAsync(path)) { Owner = this }.ShowDialog();
++    }
+     private async void ExportLogs_Click(object sender, RoutedEventArgs e) => await ActionAsync(async () =>
+     {
+         var dialog = new SaveFileDialog { Title = "Export Emilyfn diagnostics", Filter = "ZIP archive|*.zip", FileName = $"Emilyfn-logs-{DateTime.Now:yyyyMMdd-HHmmss}.zip", OverwritePrompt = false };
+--- /dev/null
++++ b/launcher/Emilyfn.CaptureTests/Emilyfn.CaptureTests.csproj
+@@ -0,0 +1,4 @@
++<Project Sdk="Microsoft.NET.Sdk">
++<PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
++<ItemGroup><ProjectReference Include="../Emilyfn.Core/Emilyfn.Core.csproj" /></ItemGroup>
++</Project>
+--- /dev/null
++++ b/launcher/Emilyfn.CaptureTests/Program.cs
+@@ -0,0 +1,53 @@
++using Emilyfn.Core;
++using System.Diagnostics;
++using System.Text.Json;
++
++var root = Path.Combine(Path.GetTempPath(), "Emilyfn capture " + Guid.NewGuid().ToString("N"));
++Directory.CreateDirectory(root);
++Process? child = null;
++int checks = 0;
++void Check(bool ok, string message) { if (!ok) throw new Exception(message); checks++; }
++try
++{
++    var exe = Path.Combine(root, "FortniteClient-Win64-Shipping.exe");
++    File.Copy(Path.GetFullPath(args[0]), exe);
++    child = Process.Start(new ProcessStartInfo(exe) { UseShellExecute = false })!;
++    CaptureTarget? target = null;
++    for (int i = 0; i < 100 && target is null; i++)
++    {
++        target = GameMemoryCapture.FindTargets().SingleOrDefault(t => t.Id == child.Id);
++        if (target is null) await Task.Delay(100);
++    }
++    Check(target is not null, "Running target discovered");
++    bool rejected = false;
++    try { await GameMemoryCapture.CaptureAsync(target! with { StartedUtc = DateTime.MinValue }, root); }
++    catch (InvalidOperationException) { rejected = true; }
++    Check(rejected, "Stale identity rejected");
++    var folder = await GameMemoryCapture.CaptureAsync(target!, root);
++    using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(folder, "capture.json")));
++    Check(manifest.RootElement.GetProperty("Id").GetInt32() == child.Id, "Manifest identifies selected process");
++    Check(manifest.RootElement.GetProperty("ExecutableSha256").GetString()!.Length == 64, "Executable hash recorded");
++    using (var file = File.OpenRead(Path.Combine(folder, "game.dmp")))
++    using (var reader = new BinaryReader(file))
++    {
++        Check(reader.ReadUInt32() == 0x504d444d, "Dump signature");
++        reader.ReadUInt32(); uint count = reader.ReadUInt32(), directory = reader.ReadUInt32();
++        var streams = new HashSet<uint>();
++        for (uint i = 0; i < count; i++) { file.Position = directory + i * 12; streams.Add(reader.ReadUInt32()); }
++        Check(streams.Contains(9), "Full memory stream present");
++        Check(streams.Contains(4), "Module stream present");
++        Check(streams.Contains(16), "Memory region information present");
++    }
++    Check(!Directory.EnumerateFiles(folder, "*.partial").Any(), "No partial output on success");
++    Check(!child.HasExited, "Capture leaves target running");
++    child.Kill(); child.WaitForExit();
++    rejected = false;
++    try { await GameMemoryCapture.CaptureAsync(target!, root); } catch (Exception e) when (e is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception) { rejected = true; }
++    Check(rejected, "Exited process rejected");
++    Console.WriteLine($"CAPTURE TESTS: {checks} checks passed (real Windows memory dump of synthetic child).");
++}
++finally
++{
++    if (child is not null) { if (!child.HasExited) { child.Kill(); child.WaitForExit(); } child.Dispose(); }
++    Directory.Delete(root, true);
++}
