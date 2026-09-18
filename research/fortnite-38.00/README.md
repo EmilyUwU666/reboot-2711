@@ -98,3 +98,25 @@ resolution rather than fixed addresses. Thirteen portable checks passed,
 including actual-image resolution and negative tests. Calling the functions in
 a running game remains untested. The existing gameplay compatibility gate still
 rejects 38.00. Versions 31-37 have not been examined.
+
+## Additional reflection port blockers
+
+The `Conv_NameToString` registration name at RVA 0x1591cc97 is paired with exec
+wrapper RVA 0x0457145e in the native table at RVA 0x11c43b10. Its call at RVA
+0x0457154d reaches 0x00028d86, a candidate native name-to-string function. That
+function transforms the stored name index before indexing a name-pool table.
+This supports a distinct modern binding path; it is not permission to treat the
+stored index as a plain name-pool index or copy older lookup offsets.
+
+The same exec wrapper's compiled-in parameter path reads a next-field value at
+`[property + 0x10]` and conditionally transforms a tagged pointer before updating
+`FFrame + 0x88`. The current SDK's latest profile assumes a plain next-field
+pointer at offset 0x18. That concrete mismatch needs a reviewed modern reflection
+accessor rather than only a new signature or expanded season gate. These are
+static observations from this exact image; broader UE5.7 layout claims and
+runtime behavior are not established.
+
+No name-conversion or field-access candidate from this subsection has been wired
+into the gameplay DLL. A matching runtime object/reflection dump and a full game
+installation are still needed to validate object traversal, function dispatch,
+map startup, client join and replication.
