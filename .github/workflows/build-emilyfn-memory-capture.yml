@@ -1,0 +1,147 @@
+name: Build Emilyfn memory capture launcher
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/build-emilyfn-memory-capture.yml
+      - build-support/emilyfn-*.patch
+permissions:
+  contents: read
+  actions: read
+jobs:
+  build-emilyfn:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Materialize Emilyfn source
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in core ui tests downloads startup memory-capture; do
+            git show "HEAD:build-support/emilyfn-${name}.patch" > "emilyfn-${name}.patch"
+            git apply --check "emilyfn-${name}.patch"
+            git apply "emilyfn-${name}.patch"
+          done
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Download compiled game components
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 34847063986
+          name: Reboot-S19-S30-Candidate1-Windows-x64
+          path: component-dlls
+      - name: Download portable backend
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 34817850310
+          name: Reboot-27.11-Backend-Candidate1-Windows-x64
+          path: test-resources/backend
+      - name: Download corresponding component source
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 34847063986
+          name: Reboot-S19-S30-Candidate1-Source
+          path: component-source
+      - name: Free backend test ports on this disposable runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $services = Get-Service -Name W3SVC,WAS -ErrorAction SilentlyContinue
+          foreach ($service in $services) {
+            if ($service.Status -eq 'Running') { Stop-Service -Name $service.Name -Force -ErrorAction Stop }
+          }
+      - name: Build synthetic x64 launch fixtures
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          mkdir native-fixtures
+          rc /nologo /fo native-fixtures\version.res launcher\Emilyfn.Tests\native\version.rc
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /MT /W4 launcher\Emilyfn.Tests\native\child.cpp native-fixtures\version.res /Fe:native-fixtures\test-child.exe
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /MT /W4 /LD /DMODULE_ROLE=0 launcher\Emilyfn.Tests\native\module.cpp /Fe:native-fixtures\Reboot-S19-S30-Auth.dll
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /MT /W4 /LD /DMODULE_ROLE=1 launcher\Emilyfn.Tests\native\module.cpp /Fe:native-fixtures\Reboot-S19-S30-Server.dll
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /MT /W4 /LD /DMODULE_ROLE=2 launcher\Emilyfn.Tests\native\module.cpp /Fe:native-fixtures\Reboot-S19-S30-Client.dll
+          if errorlevel 1 exit /b 1
+      - name: Test real memory capture of a synthetic child
+        shell: pwsh
+        run: |
+          dotnet run --project launcher/Emilyfn.CaptureTests/Emilyfn.CaptureTests.csproj -c Release -- native-fixtures/test-child.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Memory capture tests failed.' }
+      - name: Test staged launch and bundled backend lifecycle
+        shell: pwsh
+        run: |
+          dotnet run --project launcher/Emilyfn.Tests/Emilyfn.Tests.csproj -c Release -- native-fixtures test-resources
+          if ($LASTEXITCODE -ne 0) { throw 'Emilyfn tests failed.' }
+      - name: Publish complete portable launcher
+        shell: pwsh
+        run: |
+          ./launcher/build.ps1 -DllDirectory component-dlls -BackendDirectory test-resources/backend -OutputDirectory Emilyfn-dist
+      - name: Render the compiled WPF interface
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $preview = Join-Path $env:GITHUB_WORKSPACE 'Emilyfn-preview.png'
+          $app = Start-Process -FilePath ./Emilyfn-dist/Emilyfn.exe -ArgumentList @('--render-preview', $preview) -PassThru
+          if (!$app.WaitForExit(60000)) { $app.Kill(); throw 'Emilyfn preview timed out.' }
+          if ($app.ExitCode -ne 0) {
+            if (Test-Path Emilyfn-preview-error.txt) { Get-Content Emilyfn-preview-error.txt }
+            throw "Emilyfn preview failed with exit code $($app.ExitCode)."
+          }
+          if (!(Test-Path $preview) -or (Get-Item $preview).Length -lt 10000) { throw 'The WPF preview is missing or incomplete.' }
+          Write-Host ('EMILYFN_PREVIEW_BASE64=' + [Convert]::ToBase64String([IO.File]::ReadAllBytes($preview)))
+          foreach ($page in @('Library','Settings')) {
+            $file = Join-Path $env:GITHUB_WORKSPACE "Emilyfn-preview-$page.png"
+            if (!(Test-Path $file) -or (Get-Item $file).Length -lt 10000) { throw "Missing $page preview." }
+            Write-Host ("EMILYFN_" + $page.ToUpperInvariant() + "_BASE64=" + [Convert]::ToBase64String([IO.File]::ReadAllBytes($file)))
+          }
+      - name: Package complete source and validate executable
+        shell: python
+        run: |
+          from pathlib import Path
+          import hashlib, struct, zipfile
+          exe = Path('Emilyfn-dist/Emilyfn.exe').read_bytes()
+          pe = struct.unpack_from('<I', exe, 0x3c)[0]
+          assert exe[:2] == b'MZ' and exe[pe:pe+4] == b'PE\0\0'
+          assert struct.unpack_from('<H', exe, pe+4)[0] == 0x8664
+          assert struct.unpack_from('<H', exe, pe+24)[0] == 0x20b
+          assert len(exe) > 10_000_000, 'Expected a self-contained launcher'
+          print(f'Emilyfn.exe: Windows x64; {len(exe)} bytes; SHA256={hashlib.sha256(exe).hexdigest()}')
+          with zipfile.ZipFile('Emilyfn-Source.zip', 'w', zipfile.ZIP_DEFLATED) as source:
+              for file in Path('launcher').rglob('*'):
+                  if file.is_file() and not any(p in ('bin', 'obj') for p in file.parts):
+                      source.write(file, 'Emilyfn-Source/' + file.as_posix())
+              source.write('.github/workflows/build-emilyfn-memory-capture.yml', 'Emilyfn-Source/build-emilyfn-memory-capture.yml')
+              for file in Path('component-source').rglob('*.zip'):
+                  source.write(file, 'Emilyfn-Source/components/' + file.name)
+              for file in Path('test-resources/backend').rglob('*'):
+                  if file.is_file() and not any(p in ('node_modules', 'runtime') for p in file.parts):
+                      source.write(file, 'Emilyfn-Source/backend/' + file.relative_to('test-resources/backend').as_posix())
+          print('Full launcher source, corresponding DLL source, backend JavaScript and build instructions packaged.')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Emilyfn-Memory-Capture-Windows-x64
+          path: Emilyfn-dist/
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 90
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Emilyfn-Source
+          path: Emilyfn-Source.zip
+          if-no-files-found: error
+          retention-days: 90
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Emilyfn-Preview
+          path: Emilyfn-preview*.png
+          if-no-files-found: error
+          retention-days: 90
