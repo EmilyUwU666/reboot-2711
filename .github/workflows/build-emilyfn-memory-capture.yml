@@ -18,7 +18,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for name in core ui tests downloads startup memory-capture sdk-export diagnostic-launch startup-capture name-decoding reflection-export live-probe function-metadata; do
+          for name in core ui tests downloads startup memory-capture sdk-export diagnostic-launch startup-capture name-decoding reflection-export live-probe function-metadata thread-dispatch; do
             git show "HEAD:build-support/emilyfn-${name}.patch" > "emilyfn-${name}.patch"
             git apply --check "emilyfn-${name}.patch"
             git apply "emilyfn-${name}.patch"
@@ -71,6 +71,21 @@ jobs:
           if errorlevel 1 exit /b 1
           cl /nologo /std:c++17 /EHsc /MT /W4 /LD /DMODULE_ROLE=2 launcher\Emilyfn.Tests\native\module.cpp /Fe:native-fixtures\Reboot-S19-S30-Client.dll
           if errorlevel 1 exit /b 1
+      - name: Compile native game-thread diagnostic and message-loop fixture
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          mkdir native-probes
+          cl /nologo /std:c++17 /EHsc /MT /W4 /WX /D_WIN32_WINNT=0x0A00 /LD launcher\native\ThreadProbe\Probe.cpp /Fe:native-probes\Emilyfn-38-ThreadProbe.dll /link user32.lib
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /EHsc /MT /W4 /WX /D_WIN32_WINNT=0x0A00 launcher\Emilyfn.ThreadProbeTests\child.cpp /Fe:native-fixtures\thread-child.exe /link user32.lib
+          if errorlevel 1 exit /b 1
+      - name: Test thread-scoped callback delivery and guarded rejection
+        shell: pwsh
+        run: |
+          dotnet run --project launcher/Emilyfn.ThreadProbeTests/Emilyfn.ThreadProbeTests.csproj -c Release -- native-fixtures/thread-child.exe native-probes/Emilyfn-38-ThreadProbe.dll
+          if ($LASTEXITCODE -ne 0) { throw 'Native thread callback tests failed.' }
       - name: Test early-exit startup capture and child tracing
         shell: cmd
         run: |
@@ -102,7 +117,7 @@ jobs:
       - name: Publish complete portable launcher
         shell: pwsh
         run: |
-          ./launcher/build.ps1 -DllDirectory component-dlls -BackendDirectory test-resources/backend -OutputDirectory Emilyfn-dist
+          ./launcher/build.ps1 -DllDirectory component-dlls -BackendDirectory test-resources/backend -DiagnosticDllDirectory native-probes -OutputDirectory Emilyfn-dist
       - name: Render the compiled WPF interface
         shell: pwsh
         run: |
