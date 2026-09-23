@@ -1,0 +1,453 @@
+diff --git a/launcher/Emilyfn.Core/CaptureReflectionExporter38.cs b/launcher/Emilyfn.Core/CaptureReflectionExporter38.cs
+--- a/launcher/Emilyfn.Core/CaptureReflectionExporter38.cs
++++ b/launcher/Emilyfn.Core/CaptureReflectionExporter38.cs
+@@ -10,7 +10,8 @@
+     public sealed record Owner(ulong Address,string Name,string Kind);
+     public sealed record Property(string Owner,string Name,string Type,uint Offset,uint ElementSize,uint ArrayDim);
+     public sealed record Rejection(string Owner,string Reason);
+-    public sealed record Observation(List<Owner> Owners,List<Property> Properties,List<Rejection> Rejections,int ReadableObjects,int InvalidSlots,List<Owner> Candidates);
++    public sealed record Observation(List<Owner> Owners,List<Property> Properties,List<Rejection> Rejections,int ReadableObjects,int InvalidSlots,List<Owner> Candidates)
++    { public RuntimeObjectRegistry38.Observation? Registry { get; init; } }
+     private static readonly HashSet<string> Kinds = new(){"Class","ScriptStruct","Function","DelegateFunction","SparseDelegateFunction"};
+     public static ulong DecodeLink(ulong stored) => (stored & 1)!=0 ? (stored & ~1UL)^0x47dcc0173f15ec38UL : stored;
+     // Public for offline fixture validation; callers must validate the exact image profile first.
+@@ -20,14 +21,13 @@
+         ulong Q(ulong a)=>BinaryPrimitives.ReadUInt64LittleEndian(read(a,8));
+         string Name(uint stored)=>names.TryGetValue(NamePool38.DecodeIndex(stored),out var n)?n:throw new InvalidDataException("Name index unavailable.");
+         bool Image(ulong a)=>a>=imageBase && a-imageBase<0x18777000;
+-        var objects=new List<Owner>();var pointers=new HashSet<ulong>();int invalid=0;
+-        ulong table=Q(checked(imageBase+0x16cfacd8));uint count=D(checked(imageBase+0x16cface0));
+-        if(table==0 || count is 0 or >1000000) throw new InvalidDataException("Object table is unavailable or outside supported bounds.");
+-        for(uint slot=0;slot<count;slot++)
++        var registry=RuntimeObjectRegistry38.Inspect(read,imageBase);
++        var objects=new List<Owner>();var pointers=new HashSet<ulong>();int invalid=registry.Rejections.Count;
++        foreach(var item in registry.Entries)
+         {
+             try
+             {
+-                ulong a=Q(checked(table+slot*32UL+8)),vt=Q(a);
++                ulong a=item.Address,vt=Q(a);
+                 if(!Image(vt))throw new InvalidDataException("Object vtable outside game image.");
+                 ulong entry=Q(vt);
+                 if(entry<imageBase || entry-imageBase>=0x11000000)throw new InvalidDataException("Invalid virtual function.");
+@@ -84,7 +84,7 @@
+             catch(OverflowException){errors.Add(new(obj.Name,"Address overflow."));}
+         }
+         if(owners.Count==0)throw new InvalidDataException("No initialized property chains were found. A later initialized capture is required.");
+-        return new(owners,properties,errors,objects.Count,invalid,candidates);
++        return new(owners,properties,errors,objects.Count,invalid,candidates){Registry=registry};
+     }
+     public static Task<Result> ExportAsync(string dump,string destination)=>Task.Run(()=>CaptureNameExporter38.WithCapture(dump,view=>
+     {
+@@ -107,8 +107,8 @@
+                 output.WriteLine("}};\n}");
+             }
+             CaptureFunctionMetadata38.WriteHeaders(folder,bindings);
+-            var report=new { FormatVersion=2, Profile="38.00 CL47722112",view.SourceBytes,SdkReady=false,CompleteReflection=false,FunctionDispatchVerified=false,
+-                ReflectedOwners=owners.Count,Properties=fields.Count,Functions=bindings.Functions.Count,observed.ReadableObjects,observed.InvalidSlots,RejectedChains=observed.Rejections,RejectedBindings=bindings.Rejections,
++            var report=new { FormatVersion=3, Profile="38.00 CL47722112",view.SourceBytes,SdkReady=false,CompleteReflection=false,FunctionDispatchVerified=false,
++                ReflectedOwners=owners.Count,Properties=fields.Count,Functions=bindings.Functions.Count,observed.ReadableObjects,observed.InvalidSlots,RegistrySlots=observed.Registry!.Slots,EmptyRegistrySlots=observed.Registry.EmptySlots,RejectedRegistrySlots=observed.Registry.Rejections,RejectedChains=observed.Rejections,RejectedBindings=bindings.Rejections,
+                 Limitations="Property export includes populated chains only; function metadata also includes observed functions with no fields. Storage and parameter sizes differ. Raw function flags are exported; property flags, nested types, bool masks and callable bindings remain unavailable." };
+             File.WriteAllText(Path.Combine(folder,"reflection.json"),JsonSerializer.Serialize(new{Report=report,Owners=owners.Select(o=>new{o.Name,o.Kind}),Properties=fields,OwnerSizes=bindings.OwnerSizes,Functions=bindings.Functions},new JsonSerializerOptions{WriteIndented=true}));
+             File.WriteAllText(Path.Combine(folder,"README.txt"),"Observed capture metadata only. reflection.hpp contains properties; functions.hpp contains validated owner storage sizes and function metadata, including raw flags and image-relative entry RVAs. Native entry RVAs are not callable wrappers. Function parameter-buffer size is not the full storage size; field parameter flags and bool masks remain unknown. This is not a full gameplay SDK. See reflection.json for incomplete coverage and rejected entries. Keep runtime metadata private.\n");
+diff --git a/launcher/Emilyfn.Core/DispatchTarget38.cs b/launcher/Emilyfn.Core/DispatchTarget38.cs
+--- a/launcher/Emilyfn.Core/DispatchTarget38.cs
++++ b/launcher/Emilyfn.Core/DispatchTarget38.cs
+@@ -5,19 +5,19 @@
+ {
+     internal sealed record Target(ulong Class,ulong Object,ulong Function,uint ObjectName,uint ClassName,uint FunctionName);
+     internal sealed record Selection(Target? Value,string Reason);
+-    internal static Selection Find(Func<ulong,int,byte[]> read,ulong image,IReadOnlyDictionary<uint,string> names)
++    internal static Selection Find(Func<ulong,int,byte[]> read,ulong image,IReadOnlyDictionary<uint,string> names,RuntimeObjectRegistry38.Observation? registry=null)
+     {
+         uint D(ulong a)=>BinaryPrimitives.ReadUInt32LittleEndian(read(a,4));
+         ulong Q(ulong a)=>BinaryPrimitives.ReadUInt64LittleEndian(read(a,8));
+         string Name(ulong a)=>names.TryGetValue(NamePool38.DecodeIndex(D(checked(a+0x20))),out var n)?n:throw new InvalidDataException("Unknown target name.");
+         var classes=new List<ulong>();var objects=new List<ulong>();var functions=new List<ulong>();
+-        ulong table=Q(checked(image+0x16cfacd8));uint count=D(checked(image+0x16cface0));
+-        if(count is 0 or >1000000)throw new InvalidDataException("Invalid object table.");
+-        for(uint i=0;i<count;i++)
++        registry ??= RuntimeObjectRegistry38.Inspect(read,image);
++        if(registry.Rejections.Count!=0)return new(null,"Runtime object registry contains rejected slots; no function-call target can be selected.");
++        foreach(var item in registry.Entries)
+         {
+             try
+             {
+-                ulong obj=Q(checked(table+i*32UL+8));string name=Name(obj),kind=Name(Q(checked(obj+0x18)));
++                ulong obj=item.Address;string name=Name(obj),kind=Name(Q(checked(obj+0x18)));
+                 if(name=="ActorComponent" && kind=="Class")classes.Add(obj);
+                 if(name=="Default__ActorComponent" && kind=="ActorComponent")objects.Add(obj);
+                 if(name=="GetOwner" && kind=="Function")functions.Add(obj);
+diff --git a/launcher/Emilyfn.Core/GameThreadProbe38.cs b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+--- a/launcher/Emilyfn.Core/GameThreadProbe38.cs
++++ b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+@@ -64,9 +64,9 @@
+                 }
+                 return b;
+             }
+-            var pool=Raw(imageBase+NamePool38.PoolRva+8,8);var table=Raw(imageBase+0x16cfacd8,12);
++            var pool=Raw(imageBase+NamePool38.PoolRva+8,8);var table=RuntimeObjectRegistry38.ReadBoundary(Raw,imageBase);
+             var inspected=LiveBindingProbe38.InspectForDispatch(Read,imageBase);evidence=inspected.Evidence;
+-            stable=pool.AsSpan().SequenceEqual(Raw(imageBase+NamePool38.PoolRva+8,8))&&table.AsSpan().SequenceEqual(Raw(imageBase+0x16cfacd8,12));
++            stable=pool.AsSpan().SequenceEqual(Raw(imageBase+NamePool38.PoolRva+8,8))&&table.AsSpan().SequenceEqual(RuntimeObjectRegistry38.ReadBoundary(Raw,imageBase));
+             if(!stable||evidence.Checks.Any(c=>!c.Passed))throw new InvalidDataException("Live bindings failed or changed during verification. Wait for the game to settle and retry.");
+             var threads=FindGameThreads(process);
+             if(threads.Count!=1)throw new InvalidOperationException($"Expected one thread named GameThread; found {threads.Count}. No hook was installed.");
+diff --git a/launcher/Emilyfn.Core/LiveBindingProbe38.cs b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+--- a/launcher/Emilyfn.Core/LiveBindingProbe38.cs
++++ b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+@@ -10,7 +10,7 @@
+ public static class LiveBindingProbe38
+ {
+     public sealed record Check(string Name,bool Passed,string Detail);
+-    public sealed record Evidence(List<Check> Checks,int Names,int Owners,int Properties,int InvalidObjectSlots,int RejectedChains,int Functions,int RejectedBindings,string DispatchTargetStatus);
++    public sealed record Evidence(List<Check> Checks,int Names,int Owners,int Properties,int InvalidObjectSlots,int RejectedChains,int Functions,int RejectedBindings,string DispatchTargetStatus,uint RegistrySlots,int EmptyRegistrySlots,int RejectedRegistrySlots);
+     public sealed record Result(string File,bool Passed,string Message);
+     public static Task<Evidence> InspectCaptureAsync(string dump) => Task.Run(() => CaptureNameExporter38.WithCapture(dump, view => Inspect(view.Read, view.ImageBase)));
+     public static Evidence Inspect(Func<ulong,int,byte[]> read,ulong imageBase) => InspectForDispatch(read,imageBase).Evidence;
+@@ -31,19 +31,19 @@
+         var observed=CaptureReflectionExporter38.Inspect(read,imageBase,names);
+         var bindings=CaptureFunctionMetadata38.Inspect(read,imageBase,observed);
+         string Name(ulong obj)=>names.TryGetValue(NamePool38.DecodeIndex(D(obj+32)),out var name)?name:throw new InvalidDataException("Object name unavailable.");
+-        ulong table=Q(imageBase+0x16cfacd8);uint count=D(imageBase+0x16cface0);
+-        if(count is 0 or >1000000)throw new InvalidDataException("Invalid object table count.");
++        var registry=observed.Registry!;
+         ulong defaultObject=0;
+-        for(uint i=0;i<count;i++)
++        foreach(var item in registry.Entries)
+         {
+             try
+             {
+-                ulong obj=Q(checked(table+i*32UL+8));string name=Name(obj),kind=Name(Q(obj+24));
++                ulong obj=item.Address;string name=Name(obj),kind=Name(Q(obj+24));
+                 if(name=="Default__Object" && kind=="Object")defaultObject=obj;
+             }
+             catch(InvalidDataException){}
+         }
+         var checks=new List<Check>{new("Instruction profile",true,"Exact CL47722112 decoding and dispatch anchors matched."),
++            new("Runtime object registry",observed.InvalidSlots==0,$"{registry.Slots} slots; {registry.Entries.Count} matching internal indices; {registry.EmptySlots} empty slots; {observed.InvalidSlots} rejected objects."),
+             new("Core class lookup",true,"Core identities and Class self-reference passed."),
+             new("Property chains",observed.Rejections.Count==0,$"{observed.Properties.Count} properties; {observed.Rejections.Count} rejected chains.")};
+         bool dispatch=defaultObject!=0 && Q(checked(Q(defaultObject)+28*8))==imageBase+0x3729a;
+@@ -56,8 +56,8 @@
+             checks.Add(new("Function layout: "+key,found is not null,found is null?"Function not initialized or its metadata was rejected.":
+                 $"Storage={found.StorageSize}, parameter bytes={found.ParameterBufferSize}, native entry RVA=0x{found.NativeEntryRva:X}."));
+         }
+-        var target=DispatchTarget38.Find(read,imageBase,names);
+-        return new(new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count,target.Reason),target.Value);
++        var target=DispatchTarget38.Find(read,imageBase,names,registry);
++        return new(new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count,target.Reason,registry.Slots,registry.EmptySlots,registry.Rejections.Count),target.Value);
+     }
+     public static Task<Result> RunAsync(CaptureTarget target,string destination,IProgress<string>? progress=null)=>Task.Run(()=>Run(target,destination,progress));
+     private static Result Run(CaptureTarget target,string destination,IProgress<string>? progress)
+@@ -110,12 +110,12 @@
+                 }
+                 return data;
+             }
+-            var beforePool=Raw(imageBase+NamePool38.PoolRva+8,8);var beforeTable=Raw(imageBase+0x16cfacd8,12);
++            var beforePool=Raw(imageBase+NamePool38.PoolRva+8,8);var beforeTable=RuntimeObjectRegistry38.ReadBoundary(Raw,imageBase);
+             progress?.Report("Testing live objects, properties and dispatch addresses…");
+             evidence=Inspect(Read,imageBase);
+             stable=!process.HasExited && beforePool.AsSpan().SequenceEqual(Raw(imageBase+NamePool38.PoolRva+8,8)) &&
+-                beforeTable.AsSpan().SequenceEqual(Raw(imageBase+0x16cfacd8,12));
+-            if(!stable)failure="Name pool or object table changed during the test. Retry after the game settles.";
++                beforeTable.AsSpan().SequenceEqual(RuntimeObjectRegistry38.ReadBoundary(Raw,imageBase));
++            if(!stable)failure="Name pool or runtime object registry changed during the test. Retry after the game settles.";
+         }
+         catch(Exception error) when(error is Win32Exception or InvalidOperationException or IOException or OverflowException or TimeoutException or ArgumentException or UnauthorizedAccessException)
+         {failure=error.Message;}
+diff --git a/launcher/Emilyfn.Core/RuntimeObjectRegistry38.cs b/launcher/Emilyfn.Core/RuntimeObjectRegistry38.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.Core/RuntimeObjectRegistry38.cs
+@@ -0,0 +1,48 @@
++using System.Buffers.Binary;
++namespace Emilyfn.Core;
++
++// CL47722112: instruction-derived chunk and packed object pointer decoding.
++public static class RuntimeObjectRegistry38
++{
++    public const ulong ChunksRva=0x16cfaf80,CountRva=0x16cfaf94;
++    public const uint CountMask=0xff3b3ceb,IndexMask=0x753838ab;
++    public const ulong ChunksMask=0xffffffff40f0f3b4;
++    public sealed record Entry(uint Index,ulong Address);
++    public sealed record Rejection(uint Index,string Reason);
++    public sealed record Observation(uint Slots,int EmptySlots,List<Entry> Entries,List<Rejection> Rejections);
++    public static ulong DecodeObject(ulong packed,uint low)=>( (packed&0x3fff00000000UL)|(low^0xcc9e16dbu) )<<3;
++    public static byte[] ReadBoundary(Func<ulong,int,byte[]> read,ulong image) =>
++        read(checked(image+ChunksRva),8).Concat(read(checked(image+CountRva),4)).ToArray();
++    public static Observation Inspect(Func<ulong,int,byte[]> read,ulong image)
++    {
++        foreach(var anchor in Anchors)
++            if(!read(checked(image+anchor.Rva),anchor.Bytes.Length).AsSpan().SequenceEqual(anchor.Bytes))
++                throw new InvalidDataException("The image does not match the 38.00 runtime object-registry instructions.");
++        uint count=BinaryPrimitives.ReadUInt32LittleEndian(read(checked(image+CountRva),4))^CountMask;
++        ulong chunks=BinaryPrimitives.ReadUInt64LittleEndian(read(checked(image+ChunksRva),8))^ChunksMask;
++        if(count is 0 or >4194304 || chunks==0 || chunks>long.MaxValue)throw new InvalidDataException("Runtime object registry is uninitialized or outside supported bounds.");
++        var pointers=read(chunks,checked((int)((count+65535)/65536)*8));
++        var entries=new List<Entry>();var rejected=new List<Rejection>();int empty=0;
++        for(uint i=0;i<count;i++)
++        {
++            try
++            {
++                ulong chunk=BinaryPrimitives.ReadUInt64LittleEndian(pointers.AsSpan((int)(i>>16)*8,8));
++                if(chunk==0 || chunk>long.MaxValue)throw new InvalidDataException("Missing registry chunk.");
++                var item=read(checked(chunk+(i&65535)*24UL),24);
++                ulong obj=DecodeObject(BinaryPrimitives.ReadUInt64LittleEndian(item),BinaryPrimitives.ReadUInt32LittleEndian(item.AsSpan(8)));
++                if(obj==0){empty++;continue;}
++                uint index=BinaryPrimitives.ReadUInt32LittleEndian(read(checked(obj+0x14),4))^IndexMask;
++                if(index!=i)throw new InvalidDataException("Object internal index does not match the registry slot.");
++                entries.Add(new(i,obj));
++            }
++            catch(InvalidDataException error){rejected.Add(new(i,error.Message));}
++            catch(OverflowException){rejected.Add(new(i,"Registry address overflow."));}
++        }
++        return new(count,empty,entries,rejected);
++    }
++    private static readonly (ulong Rva,byte[] Bytes)[] Anchors={
++        (0x6213UL,Convert.FromHexString("8b40144835ab383875b9eb3c3bff330d6d4dcf1639c87d300fb7c848bab4f3f040ffffffff483315414dcf16c1e810488d0c49c1e10348030cc2")),
++        (0x23eeeUL,Convert.FromHexString("428b44c10841b9db169ecc4931c148b800000000ff3f00004a2304c14c09c80f84fb00000048c1e0034839c2"))
++    };
++}
+diff --git a/launcher/Emilyfn.SdkTests/DispatchTargetChecks.cs b/launcher/Emilyfn.SdkTests/DispatchTargetChecks.cs
+--- a/launcher/Emilyfn.SdkTests/DispatchTargetChecks.cs
++++ b/launcher/Emilyfn.SdkTests/DispatchTargetChecks.cs
+@@ -11,12 +11,11 @@
+         void D(byte[] b,int o,uint v)=>BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(o),v);
+         void W(byte[] b,int o,ushort v)=>BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(o),v);
+         uint Enc(uint v)=>unchecked(((v-1)^0x6f01622bu)+1);
+-        var globals=Alloc(image+0x16cfacd8,12);Q(globals,0,table);D(globals,8,5);
+-        var slots=Alloc(table,192);var vt=Alloc(image+0x1000,29*8);Q(vt,28*8,image+0x3729a);
++        var slots=RegistryFixture.Create(Alloc,image,table,6,5);var globals=memory[image+0x16cfaf80];var vt=Alloc(image+0x1000,29*8);Q(vt,28*8,image+0x3729a);
+         for(int i=0;i<5;i++)
+         {
+             ulong a=objects+(ulong)i*0x100;var b=Alloc(a,0x100);Q(b,0,image+0x1000);D(b,0x20,Enc((uint)i+1));
+-            Q(b,0x18,i==3?objects+0x200:i==4?objects+0x100:objects);Q(slots,i*32+8,a);
++            Q(b,0x18,i==3?objects+0x200:i==4?objects+0x100:objects);D(b,0x14,(uint)i^0x753838ab);RegistryFixture.Set(slots,i,a);
+         }
+         var obj=memory[objects+0x300];D(obj,0x10,0x31);
+         var fn=memory[objects+0x400];Q(fn,8,objects+0x200);D(fn,0xb8,0x54020401);
+@@ -31,13 +30,15 @@
+         DispatchTarget38.Selection Find()=>DispatchTarget38.Find(Read,image,names);
+         if(Find().Value?.Object!=objects+0x300)throw new Exception("Default component target not resolved");
+         void Refuse(){if(Find().Value is not null)throw new Exception("Unverified target was accepted");}
+-        Q(slots,3*32+8,0);Refuse();Q(slots,3*32+8,objects+0x300);
+-        D(globals,8,4);Refuse();D(globals,8,5);
++        RegistryFixture.Set(slots,3,0);Refuse();RegistryFixture.Set(slots,3,objects+0x300);
++        RegistryFixture.Count(globals,4);Refuse();RegistryFixture.Count(globals,5);
+         D(obj,0x10,0x40000031);Refuse();D(obj,0x10,0x31);
+         W(fn,0xbc,9^0x8250);Refuse();W(fn,0xbc,8^0x8250);
+         Q(fn,8,objects);Refuse();Q(fn,8,objects+0x200);
+         Q(fn,0xe0,image+0x432782b);Refuse();Q(fn,0xe0,image+0x432782a);
+-        D(globals,8,6);Q(slots,5*32+8,objects+0x300);Refuse();
++        RegistryFixture.Count(globals,6);RegistryFixture.Set(slots,5,objects+0x300);Refuse(); // Duplicate pointer fails its internal index.
++        var duplicate=Alloc(objects+0x500,0x100);obj.CopyTo(duplicate,0);D(duplicate,0x14,5^0x753838ab);
++        RegistryFixture.Set(slots,5,objects+0x500);Refuse(); // Two independently registered CDOs are ambiguous.
+         Console.WriteLine("Dispatch target checks passed: exact owner, missing/ambiguous instances, flags, parameters and entry mismatch.");
+     }
+ }
+diff --git a/launcher/Emilyfn.SdkTests/Program.cs b/launcher/Emilyfn.SdkTests/Program.cs
+--- a/launcher/Emilyfn.SdkTests/Program.cs
++++ b/launcher/Emilyfn.SdkTests/Program.cs
+@@ -33,6 +33,7 @@
+     Console.WriteLine($"Capture reflection export: {reflection.Owners} owners, {reflection.Properties} properties, {reflection.RejectedChains} rejected chains, {reflection.Functions} functions, {reflection.RejectedBindings} rejected bindings; {reflection.Folder}");
+ }
+ 
++RuntimeRegistryChecks.Run();
+ ReflectionChecks.Run();
+ FunctionMetadataChecks.Run(root);
+ DispatchTargetChecks.Run();
+diff --git a/launcher/Emilyfn.SdkTests/ReflectionChecks.cs b/launcher/Emilyfn.SdkTests/ReflectionChecks.cs
+--- a/launcher/Emilyfn.SdkTests/ReflectionChecks.cs
++++ b/launcher/Emilyfn.SdkTests/ReflectionChecks.cs
+@@ -10,15 +10,14 @@
+         void Q(byte[] b,int o,ulong v)=>BinaryPrimitives.WriteUInt64LittleEndian(b.AsSpan(o),v);
+         void D(byte[] b,int o,uint v)=>BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(o),v);
+         uint Enc(uint v)=>v==0?0:unchecked(((v-1)^0x6f01622bu)+1);
+-        var globals=Alloc(image+0x16cfacd8,16);Q(globals,0,table);D(globals,8,6);
+-        var slots=Alloc(table,192);var vt=Alloc(image+0x1000,8);Q(vt,0,image+0x2000);
++        var slots=RegistryFixture.Create(Alloc,image,table,6,6);var vt=Alloc(image+0x1000,8);Q(vt,0,image+0x2000);
+         // Class, Object, Actor and Function are class objects; Activate is a Function.
+         uint[] nameIds={2,1,3,4,5};
+         for(int i=0;i<5;i++)
+         {
+             ulong a=objects+(ulong)i*0x100;var b=Alloc(a,0x100);
+             Q(b,0,image+0x1000);Q(b,0x18,i==4?objects+0x300:objects);
+-            D(b,0x20,Enc(nameIds[i]));Q(slots,i*32+8,a);
++            D(b,0x20,Enc(nameIds[i]));D(b,0x14,(uint)i^0x753838ab);RegistryFixture.Set(slots,i,a);
+             if(i==4)Q(b,0x48,(field^0x47dcc0173f15ec38UL)|1);
+         }
+         // Slot 5 deliberately lacks an object, so coverage is reported accurately.
+@@ -34,7 +33,7 @@
+         }
+         var names=new Dictionary<uint,string>{{0,"None"},{1,"Object"},{2,"Class"},{3,"Actor"},{4,"Function"},{5,"Activate"},{6,"bReset"},{7,"BoolProperty"}};
+         var result=CaptureReflectionExporter38.Inspect(Read,image,names);
+-        if(result.ReadableObjects!=5 || result.InvalidSlots!=1 || result.Properties.Count!=1 || result.Owners.Count!=1 || result.Rejections.Count!=0)
++        if(result.ReadableObjects!=5 || result.InvalidSlots!=0 || result.Registry?.EmptySlots!=1 || result.Properties.Count!=1 || result.Owners.Count!=1 || result.Rejections.Count!=0)
+             throw new Exception("Reflection fixture coverage mismatch");
+         if(result.Properties[0].Name!="bReset" || result.Properties[0].ElementSize!=1 || result.Properties[0].Offset!=0)
+             throw new Exception("Reflection property decoding mismatch");
+diff --git a/launcher/Emilyfn.SdkTests/RegistryFixture.cs b/launcher/Emilyfn.SdkTests/RegistryFixture.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.SdkTests/RegistryFixture.cs
+@@ -0,0 +1,24 @@
++using System.Buffers.Binary;
++static class RegistryFixture
++{
++    // Independent fixture encoding, shared by reflection and target-selection tests.
++    public static byte[] Create(Func<ulong,int,byte[]> alloc,ulong image,ulong chunk,int capacity,uint count)
++    {
++        var a=Convert.FromHexString("8b40144835ab383875b9eb3c3bff330d6d4dcf1639c87d300fb7c848bab4f3f040ffffffff483315414dcf16c1e810488d0c49c1e10348030cc2");
++        var b=Convert.FromHexString("428b44c10841b9db169ecc4931c148b800000000ff3f00004a2304c14c09c80f84fb00000048c1e0034839c2");
++        a.CopyTo(alloc(image+0x6213,a.Length),0);b.CopyTo(alloc(image+0x23eee,b.Length),0);
++        var globals=alloc(image+0x16cfaf80,24);
++        BinaryPrimitives.WriteUInt64LittleEndian(globals,(chunk-0x1000)^0xffffffff40f0f3b4UL);
++        Count(globals,count);
++        var pointers=alloc(chunk-0x1000,16);BinaryPrimitives.WriteUInt64LittleEndian(pointers,chunk);
++        var slots=alloc(chunk,capacity*24);
++        for(int i=0;i<capacity;i++)Set(slots,i,0);
++        return slots;
++    }
++    public static void Count(byte[] globals,uint count)=>BinaryPrimitives.WriteUInt32LittleEndian(globals.AsSpan(20),count^0xff3b3ceb);
++    public static void Set(byte[] slots,int index,ulong address)
++    {
++        BinaryPrimitives.WriteUInt64LittleEndian(slots.AsSpan(index*24),(address>>3)&0x3fff00000000UL);
++        BinaryPrimitives.WriteUInt32LittleEndian(slots.AsSpan(index*24+8),unchecked((uint)(address>>3))^0xcc9e16db);
++    }
++}
+diff --git a/launcher/Emilyfn.SdkTests/RuntimeRegistryChecks.cs b/launcher/Emilyfn.SdkTests/RuntimeRegistryChecks.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.SdkTests/RuntimeRegistryChecks.cs
+@@ -0,0 +1,37 @@
++using Emilyfn.Core;
++using System.Buffers.Binary;
++static class RuntimeRegistryChecks
++{
++    public static void Run()
++    {
++        const ulong image=0x50000,chunk=0x20000000,second=0x22000000,object1=0x1478ad23458,object2=0x7ff4841bca38;
++        var memory=new SortedDictionary<ulong,byte[]>();
++        byte[] Alloc(ulong a,int n){var b=new byte[n];memory.Add(a,b);return b;}
++        void Q(byte[] b,int o,ulong v)=>BinaryPrimitives.WriteUInt64LittleEndian(b.AsSpan(o),v);
++        void D(byte[] b,int o,uint v)=>BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(o),v);
++        var slots=RegistryFixture.Create(Alloc,image,chunk,65536,65537);
++        var pointers=memory[chunk-0x1000];Q(pointers,8,second);
++        var tail=Alloc(second,24);RegistryFixture.Set(slots,65535,object1);RegistryFixture.Set(tail,0,object2);
++        var a=Alloc(object1,0x30);var b=Alloc(object2,0x30);D(a,0x14,65535^0x753838ab);D(b,0x14,65536^0x753838ab);
++        byte[] Read(ulong address,int n)
++        {
++            foreach(var p in memory)if(address>=p.Key && address-p.Key<=(ulong)p.Value.Length && (ulong)n<=(ulong)p.Value.Length-(address-p.Key))
++                return p.Value.AsSpan((int)(address-p.Key),n).ToArray();
++            throw new InvalidDataException("Fixture address unavailable.");
++        }
++        var found=RuntimeObjectRegistry38.Inspect(Read,image);
++        if(found.Slots!=65537 || found.EmptySlots!=65535 || found.Rejections.Count!=0 || found.Entries.Count!=2 ||
++            found.Entries[0].Address!=object1 || found.Entries[1].Address!=object2)throw new Exception("Chunk boundary / packed pointer decoding failed.");
++        D(b,0x14,65535^0x753838ab);
++        if(RuntimeObjectRegistry38.Inspect(Read,image).Rejections.Count!=1)throw new Exception("Mismatched internal index accepted.");
++        D(b,0x14,65536^0x753838ab);Q(pointers,8,0);
++        if(RuntimeObjectRegistry38.Inspect(Read,image).Rejections.Count!=1)throw new Exception("Missing chunk accepted.");
++        Q(pointers,8,second);
++        void Refuse(){try{RuntimeObjectRegistry38.Inspect(Read,image);}catch(InvalidDataException){return;}throw new Exception("Unverified registry accepted.");}
++        var globals=memory[image+0x16cfaf80];RegistryFixture.Count(globals,4194305);Refuse();RegistryFixture.Count(globals,0);Refuse();RegistryFixture.Count(globals,65537);
++        Q(globals,0,0xffffffff40f0f3b4);Refuse();Q(globals,0,(chunk-0x1000)^0xffffffff40f0f3b4);
++        memory[image+0x6213][0]^=1;Refuse();memory[image+0x6213][0]^=1;
++        memory[image+0x23eee][0]^=1;Refuse();
++        Console.WriteLine("Runtime registry checks passed: packed pointers, 64K chunk boundary, empty entries, index identity, missing chunks, bounds and instruction profiles.");
++    }
++}
+diff --git a/launcher/native/ThreadProbe/Probe.cpp b/launcher/native/ThreadProbe/Probe.cpp
+--- a/launcher/native/ThreadProbe/Probe.cpp
++++ b/launcher/native/ThreadProbe/Probe.cpp
+@@ -1,6 +1,7 @@
+ #define WIN32_LEAN_AND_MEAN
+ #define NOMINMAX
+ #include "Protocol.h"
++#include "Registry38.h"
+ #include <cstring>
+ #include <cwchar>
+ using namespace EmilyfnProbe;
+@@ -24,6 +25,16 @@
+ bool Validate(const Shared& p, std::uint64_t& expected) {
+     const auto image = reinterpret_cast<std::uint64_t>(GetModuleHandleW(nullptr));
+     if (p.image != image || p.dispatchRva != 0x3729a || p.nativeRva != 0x432782a || p.hasTarget != 1) return false;
++    // Verify the runtime registry decoder before trusting any receiver.
++    if (!Bytes(image + 0x6213, "\x8b\x40\x14\x48\x35\xab\x38\x38\x75\xb9\xeb\x3c\x3b\xff\x33\x0d\x6d\x4d\xcf\x16\x39\xc8\x7d\x30\x0f\xb7\xc8\x48\xba\xb4\xf3\xf0\x40\xff\xff\xff\xff\x48\x33\x15\x41\x4d\xcf\x16\xc1\xe8\x10\x48\x8d\x0c\x49\xc1\xe1\x03\x48\x03\x0c\xc2")) return false;
++    if (!Bytes(image + 0x23eee, "\x42\x8b\x44\xc1\x08\x41\xb9\xdb\x16\x9e\xcc\x49\x31\xc1\x48\xb8\x00\x00\x00\x00\xff\x3f\x00\x00\x4a\x23\x04\xc1\x4c\x09\xc8\x0f\x84\xfb\x00\x00\x00\x48\xc1\xe0\x03\x48\x39\xc2")) return false;
++    const auto registryRead=[](std::uint64_t a,void* value,std::size_t size) {
++        SIZE_T got=0;
++        return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(a),value,size,&got) && got==size;
++    };
++    if (!EmilyfnRegistry38::Member(registryRead,image,p.klass) ||
++        !EmilyfnRegistry38::Member(registryRead,image,p.object) ||
++        !EmilyfnRegistry38::Member(registryRead,image,p.function)) return false;
+     // Exact observed GetOwner exec wrapper: advance FFrame bytecode and return object+0xA8.
+     if (!Bytes(image + p.nativeRva, "\x48\x8b\x42\x20\x48\x83\xf8\x01\x48\x83\xd8\xff\x48\x89\x42\x20\x48\x8b\x81\xa8\x00\x00\x00\x49\x89\x00\xc3") ||
+         !Bytes(image + p.dispatchRva, "\x55\x41\x57\x41\x56\x41\x55\x41\x54\x56\x57\x53\x48\x81\xec\xc8\x00\x00\x00") ||
+diff --git a/launcher/native/ThreadProbe/Registry38.h b/launcher/native/ThreadProbe/Registry38.h
+new file mode 100644
+--- /dev/null
++++ b/launcher/native/ThreadProbe/Registry38.h
+@@ -0,0 +1,23 @@
++#pragma once
++#include <cstdint>
++#include <cstddef>
++namespace EmilyfnRegistry38 {
++inline constexpr std::uint64_t ChunksRva=0x16cfaf80,CountRva=0x16cfaf94;
++inline constexpr std::uint64_t MaxUser=0x7fffffffffffULL;
++// Every address used below is bounded before read; callback still uses ReadProcessMemory.
++template<class Reader> bool Member(Reader&& read,std::uint64_t image,std::uint64_t object) {
++    if (!image || image>MaxUser-CountRva-4 || !object || object>MaxUser-0x18) return false;
++    std::uint32_t count=0,index=0,low=0;
++    std::uint64_t chunks=0,chunk=0,packed=0;
++    if (!read(image+CountRva,&count,sizeof(count)) || !read(image+ChunksRva,&chunks,sizeof(chunks)) ||
++        !read(object+0x14,&index,sizeof(index))) return false;
++    count^=0xff3b3ceb; index^=0x753838ab; chunks^=0xffffffff40f0f3b4ULL;
++    if (!count || count>4194304 || index>=count || !chunks || chunks>MaxUser-512) return false;
++    if (!read(chunks+static_cast<std::uint64_t>(index>>16)*8,&chunk,sizeof(chunk)) ||
++        !chunk || chunk>MaxUser-65536*24) return false;
++    const auto item=chunk+static_cast<std::uint64_t>(index&65535)*24;
++    if (!read(item,&packed,sizeof(packed)) || !read(item+8,&low,sizeof(low))) return false;
++    const auto decoded=((packed&0x3fff00000000ULL)|(low^0xcc9e16dbU))<<3;
++    return decoded==object;
++}
++}
+diff --git a/launcher/native/ThreadProbe/RegistryTests.cpp b/launcher/native/ThreadProbe/RegistryTests.cpp
+new file mode 100644
+--- /dev/null
++++ b/launcher/native/ThreadProbe/RegistryTests.cpp
+@@ -0,0 +1,32 @@
++#include "Registry38.h"
++#include <map>
++#include <vector>
++#include <cstring>
++#include <stdexcept>
++#include <iostream>
++int main() {
++    constexpr std::uint64_t image=0x50000,table=0x20000000,chunk=0x22000000,obj=0x7ff4841bca38;
++    std::map<std::uint64_t,std::vector<unsigned char>> memory;
++    auto put=[&](std::uint64_t at,auto value) {auto& b=memory[at];b.resize(sizeof(value));std::memcpy(b.data(),&value,sizeof(value));};
++    auto read=[&](std::uint64_t at,void* out,std::size_t n) {
++        const auto found=memory.find(at);
++        if(found==memory.end() || found->second.size()!=n)return false;
++        std::memcpy(out,found->second.data(),n);return true;
++    };
++    const auto check=[&](bool expected) {if(EmilyfnRegistry38::Member(read,image,obj)!=expected)throw std::runtime_error("Registry membership guard failed");};
++    const auto index=std::uint32_t{65536};
++    put(image+0x16cfaf94,std::uint32_t{65537^0xff3b3ceb});
++    put(image+0x16cfaf80,table^std::uint64_t{0xffffffff40f0f3b4});
++    put(obj+0x14,index^0x753838abU);put(table+8,chunk);
++    put(chunk,(obj>>3)&std::uint64_t{0x3fff00000000});put(chunk+8,static_cast<std::uint32_t>(obj>>3)^0xcc9e16dbU);
++    check(true);
++    put(obj+0x14,std::uint32_t{65537^0x753838ab});check(false);put(obj+0x14,index^0x753838abU);
++    put(chunk+8,static_cast<std::uint32_t>((obj+8)>>3)^0xcc9e16dbU);check(false);
++    put(chunk+8,static_cast<std::uint32_t>(obj>>3)^0xcc9e16dbU);
++    put(table+8,std::uint64_t{0});check(false);put(table+8,chunk);
++    put(image+0x16cfaf94,std::uint32_t{4194305^0xff3b3ceb});check(false);
++    put(image+0x16cfaf94,std::uint32_t{65537^0xff3b3ceb});
++    put(table+8,std::uint64_t{0xffffffffffffffff});check(false);put(table+8,chunk);
++    memory.erase(obj+0x14);check(false);
++    std::cout<<"Native registry checks passed: encoded membership, chunk boundary, stale object, invalid count, null/overflow and unreadable memory.\n";
++}
