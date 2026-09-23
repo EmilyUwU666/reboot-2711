@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/launcher/Emilyfn.Core/StartupCapture.cs
-@@ -0,0 +1,204 @@
+@@ -0,0 +1,205 @@
 +using System.ComponentModel;
 +using System.Diagnostics;
 +using System.Runtime.InteropServices;
@@ -25,6 +25,7 @@
 +        Log("Early snapshot: PRE-INITIALIZATION evidence, not a live SDK dump.");
 +        Log("Child observation uses 100ms snapshots. Brief processes and handoffs to an existing launcher may be missed.");
 +        Log("Executable: " + start.FileName);
++        foreach (var argument in start.ArgumentList) Log("Argument: " + LaunchProtocol.Redact(argument));
 +        var command = new StringBuilder(Quote(start.FileName));
 +        foreach (var argument in start.ArgumentList) command.Append(' ').Append(Quote(argument));
 +        var si = new StartupInfo { cb = Marshal.SizeOf<StartupInfo>() };
@@ -234,7 +235,14 @@
      {
          if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess)
              throw new PlatformNotSupportedException("Diagnostic launch requires Windows x64.");
-@@ -30,6 +30,7 @@
+@@ -26,10 +26,14 @@
+         Directory.CreateDirectory(logsDirectory);
+         string log = Path.Combine(Path.GetFullPath(logsDirectory), $"diagnostic-38-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.log");
+         var start = new ProcessStartInfo(executable) { UseShellExecute = false, WorkingDirectory = binaryDirectory };
++        // Match the normal launcher's non-secret Epic startup metadata.
++        foreach (var argument in new[] { "-EpicPortal", "-epicapp=Fortnite", "-epicenv=Prod", "-epiclocale=en-us" })
++            start.ArgumentList.Add(argument);
+         start.ArgumentList.Add("-log");
          start.ArgumentList.Add("-FORCELOGFLUSH");
          start.ArgumentList.Add("-abslog=" + log);
          // No auth/game DLL injection, companion processes, or changes to EAC or launcher requirements.
