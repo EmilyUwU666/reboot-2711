@@ -1,0 +1,65 @@
+diff --git a/launcher/Emilyfn.Core/CaptureReflectionExporter38.cs b/launcher/Emilyfn.Core/CaptureReflectionExporter38.cs
+--- a/launcher/Emilyfn.Core/CaptureReflectionExporter38.cs
++++ b/launcher/Emilyfn.Core/CaptureReflectionExporter38.cs
+@@ -17,7 +17,8 @@
+         List<RuntimeObjectRegistry38.Rejection> RegistryRejectionSamples,List<IdentitySample> HeaderSamples,List<IdentitySample> AcceptedHeaderSamples);
+     private static readonly string[] CoreNames={"Object","Class","Actor","Function"};
+     public sealed record Observation(List<Owner> Owners,List<Property> Properties,List<Rejection> Rejections,int ReadableObjects,int InvalidSlots,List<Owner> Candidates)
+-    { public RuntimeObjectRegistry38.Observation? Registry { get; init; } }
++    { public RuntimeObjectRegistry38.Observation? Registry { get; init; }
++      public List<Owner> ClassIdentities { get; init; } = new(); }
+     private static readonly HashSet<string> Kinds = new(){"Class","ScriptStruct","Function","DelegateFunction","SparseDelegateFunction"};
+     public static ulong DecodeLink(ulong stored) => (stored & 1)!=0 ? (stored & ~1UL)^0x47dcc0173f15ec38UL : stored;
+     // Public for offline fixture validation; callers must validate the exact image profile first.
+@@ -79,6 +80,14 @@
+             }
+             path.Reverse();return string.Join('.',path);
+         }
++        // Class identity does not require a supported property-layout exporter.
++        // Keep generated class names separate from native reflection candidates.
++        var classIdentities=new List<Owner>();
++        foreach(var obj in objects.Where(o=>o.Kind is "Class" or "BlueprintGeneratedClass" or "AnimBlueprintGeneratedClass"))
++        {
++            try {classIdentities.Add(new(obj.Address,Qualified(obj.Address),obj.Kind));}
++            catch(Exception e) when(e is InvalidDataException or OverflowException) {}
++        }
+         var candidates=new List<Owner>();var owners=new List<Owner>();var properties=new List<Property>();var errors=new List<Rejection>();
+         var qualifiedOwners=new HashSet<string>();
+         foreach(var obj in objects.Where(o=>Kinds.Contains(o.Kind)&&!o.Name.StartsWith("Default__",StringComparison.Ordinal)))
+@@ -111,7 +120,7 @@
+             catch(OverflowException){errors.Add(new(obj.Name,"Address overflow."));}
+         }
+         if(owners.Count==0)throw new InvalidDataException("No initialized property chains were found. A later initialized capture is required.");
+-        return new(owners,properties,errors,objects.Count,invalid,candidates){Registry=registry};
++        return new(owners,properties,errors,objects.Count,invalid,candidates){Registry=registry,ClassIdentities=classIdentities};
+     }
+     public static Task<Result> ExportAsync(string dump,string destination)=>Task.Run(()=>CaptureNameExporter38.WithCapture(dump,view=>
+     {
+diff --git a/launcher/Emilyfn.Core/WorldLinks38.cs b/launcher/Emilyfn.Core/WorldLinks38.cs
+--- a/launcher/Emilyfn.Core/WorldLinks38.cs
++++ b/launcher/Emilyfn.Core/WorldLinks38.cs
+@@ -14,7 +14,7 @@
+         var entries=reflection.Registry?.Entries ?? new();
+         var slots=entries.GroupBy(e=>e.Index).Where(g=>g.Count()==1).ToDictionary(g=>g.Key,g=>g.Single());
+         var pointers=entries.GroupBy(e=>e.Address).Where(g=>g.Count()==1).ToDictionary(g=>g.Key,g=>g.Single());
+-        var classes=reflection.Candidates.Where(c=>c.Kind=="Class").GroupBy(c=>c.Address)
++        var classes=reflection.Candidates.Where(c=>c.Kind=="Class").Concat(reflection.ClassIdentities).Distinct().GroupBy(c=>c.Address)
+             .Where(g=>g.Count()==1).ToDictionary(g=>g.Key,g=>g.Single().Name);
+         var worldClasses=reflection.Candidates.Where(c=>c.Kind=="Class"&&c.Name==owner).ToList();
+         var sizes=metadata.OwnerSizes.Where(s=>s.Owner==owner).ToList();
+diff --git a/launcher/Emilyfn.SdkTests/WorldLinksChecks.cs b/launcher/Emilyfn.SdkTests/WorldLinksChecks.cs
+--- a/launcher/Emilyfn.SdkTests/WorldLinksChecks.cs
++++ b/launcher/Emilyfn.SdkTests/WorldLinksChecks.cs
+@@ -16,6 +16,12 @@
+         WorldLinks38.Link Link()=>WorldLinks38.Inspect(Read,reflection,metadata,new uint[]{1}).Worlds[0].Links[0];
+         void Check(bool b){if(!b)throw new Exception("World-link validation failed");}
+         Check(Link().Status=="Registered object"&&Link().TargetSlot==2&&Link().TargetClass=="/Script/Engine.Level");
++        values[0x3018]=0x1200;
++        reflection.ClassIdentities.Add(new(0x1200,"/Game/FrontEnd.TestMode_C","BlueprintGeneratedClass"));
++        Check(Link().TargetClass=="/Game/FrontEnd.TestMode_C");
++        reflection.ClassIdentities.Add(new(0x1200,"/Game/OtherMode_C","BlueprintGeneratedClass"));
++        Check(Link().Status=="Target class unresolved");
++        reflection.ClassIdentities.Clear();values[0x3018]=0x1100;
+         values[0x2080]=0;Check(Link().Status=="Null");
+         values[0x2080]=0xdead;Check(Link().TargetSlot is null&&Link().Status.StartsWith("Non-null"));
+         values[0x2080]=0x3000;values[0x3014]=3u^RuntimeObjectRegistry38.IndexMask;Check(Link().Status=="Target identity changed");
