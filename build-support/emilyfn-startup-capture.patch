@@ -1,0 +1,292 @@
+--- /dev/null
++++ b/launcher/Emilyfn.Core/StartupCapture.cs
+@@ -0,0 +1,153 @@
++using System.ComponentModel;
++using System.Diagnostics;
++using System.Runtime.InteropServices;
++using System.Text;
++using Microsoft.Win32.SafeHandles;
++
++namespace Emilyfn.Core;
++
++public static class StartupCapture
++{
++    public sealed record Result(int ProcessId, string Folder, bool EarlyDumpSaved, int? ExitCode);
++    public static Task<Result> RunAsync(ProcessStartInfo start, string folder, string tracePath, IProgress<string>? progress = null) =>
++        Task.Run(() => Run(start, folder, tracePath, progress));
++
++    private static Result Run(ProcessStartInfo start, string folder, string tracePath, IProgress<string>? progress)
++    {
++        if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess) throw new PlatformNotSupportedException("Startup capture requires Windows x64.");
++        Directory.CreateDirectory(folder);
++        Directory.CreateDirectory(Path.GetDirectoryName(tracePath)!);
++        using var trace = new StreamWriter(new FileStream(tracePath, FileMode.CreateNew, FileAccess.Write, FileShare.Read)) { AutoFlush = true };
++        void Log(string message) => trace.WriteLine($"{DateTime.UtcNow:O} {message}");
++        Log("Early snapshot: PRE-INITIALIZATION evidence, not a live SDK dump.");
++        Log("Child observation uses 100ms snapshots. Brief processes and handoffs to an existing launcher may be missed.");
++        Log("Executable: " + start.FileName);
++        var command = new StringBuilder(Quote(start.FileName));
++        foreach (var argument in start.ArgumentList) command.Append(' ').Append(Quote(argument));
++        var si = new StartupInfo { cb = Marshal.SizeOf<StartupInfo>() };
++        if (!CreateProcessW(start.FileName, command, IntPtr.Zero, IntPtr.Zero, false, 4, IntPtr.Zero, start.WorkingDirectory, ref si, out var pi))
++        {
++            int error = Marshal.GetLastWin32Error(); Log($"CreateProcess failed: {error}");
++            File.Copy(tracePath, Path.Combine(folder, "startup.log"), true);
++            throw new Win32Exception(error);
++        }
++        bool resumed = false, early = false;
++        try
++        {
++            Log($"Created suspended: PID {pi.pid}");
++            progress?.Report("Saving early startup memory before the game runs…");
++            var partial = Path.Combine(folder, "early.dmp.partial");
++            try
++            {
++                using (var file = new FileStream(partial, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
++                {
++                    lock (GameMemoryCapture.DumpLock)
++                    {
++                        if (!MiniDumpWriteDump(pi.process, pi.pid, file.SafeFileHandle, 2, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero))
++                            throw new IOException($"MiniDumpWriteDump: 0x{Marshal.GetLastWin32Error():X8}");
++                    }
++                    file.Flush(true); file.Position = 0;
++                    using var reader = new BinaryReader(file, Encoding.UTF8, true);
++                    if (file.Length < 32 || reader.ReadUInt32() != 0x504d444d) throw new IOException("Invalid dump header.");
++                }
++                File.Move(partial, Path.Combine(folder, "early.dmp")); early = true;
++                Log("Early full-memory snapshot saved.");
++            }
++            catch (Exception error)
++            {
++                Log("Early capture failed: " + error.Message);
++                try { if (File.Exists(partial)) File.Delete(partial); } catch (Exception cleanup) { Log("Partial-file cleanup failed: " + cleanup.Message); }
++            }
++            finally
++            {
++                if (ResumeThread(pi.thread) == uint.MaxValue) throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not resume diagnostic process.");
++                resumed = true;
++            }
++            var clock = Stopwatch.StartNew(); Log("Primary thread resumed.");
++            progress?.Report("Observing startup for 10 seconds…");
++            var descendants = new HashSet<uint> { pi.pid }; var seen = new HashSet<uint>();
++            int? exit = null; bool laterAttempted = false;
++            while (clock.Elapsed < TimeSpan.FromSeconds(10))
++            {
++                try
++                {
++                    var rows = Snapshot(); bool changed;
++                    do { changed = false; foreach (var row in rows) if (descendants.Contains(row.parent) && descendants.Add(row.pid)) changed = true; } while (changed);
++                    foreach (var row in rows)
++                        if (row.pid != pi.pid && descendants.Contains(row.pid) && seen.Add(row.pid))
++                            Log($"Observed descendant: PID {row.pid}, parent {row.parent}, image {row.name}");
++                }
++                catch (Exception error) { Log("Child observation unavailable: " + error.Message); }
++                if (exit is null && WaitForSingleObject(pi.process, 0) == 0)
++                {
++                    if (!GetExitCodeProcess(pi.process, out uint code)) throw new Win32Exception(Marshal.GetLastWin32Error());
++                    exit = unchecked((int)code); Log($"Root exited: code {exit}; observed running duration after resume {clock.ElapsedMilliseconds} ms.");
++                }
++                if (!laterAttempted && exit is null && clock.ElapsedMilliseconds >= 2000)
++                {
++                    laterAttempted = true;
++                    try
++                    {
++                        var target = GameMemoryCapture.FindTargets().FirstOrDefault(t => t.Id == pi.pid);
++                        if (target is null) Log("Later capture: no accessible Fortnite target.");
++                        else
++                        {
++                            progress?.Report("Attempting later game-memory capture…");
++                            var path = GameMemoryCapture.CaptureAsync(target, folder).GetAwaiter().GetResult();
++                            Log("Later capture saved: " + path + "; engine initialization not verified.");
++                        }
++                    }
++                    catch (Exception error) { Log("Later capture failed: " + error.Message); }
++                }
++                Thread.Sleep(100);
++            }
++            if (exit is null) Log("Root still running when observation ended.");
++            File.WriteAllText(Path.Combine(folder, "README.txt"), "early.dmp is captured before the primary thread runs. It may lack live objects and cannot by itself generate an SDK.\nA later Emilyfn-memory-* folder is included only if a second capture succeeded.\nstartup.log records process startup, observed descendants and exit. Sampling may miss short processes or handoffs to an existing launcher.\nKeep dumps private: memory can contain sensitive information. Nothing was uploaded.\n");
++            return new((int)pi.pid, folder, early, exit);
++        }
++        finally
++        {
++            if (!resumed) TerminateProcess(pi.process, 1); // Only our newly created, unresumed child.
++            CloseHandle(pi.thread); CloseHandle(pi.process);
++            trace.Flush();
++            try { File.Copy(tracePath, Path.Combine(folder, "startup.log"), true); } catch { }
++        }
++    }
++    private static string Quote(string value)
++    {
++        var result = new StringBuilder("\""); int slashes = 0;
++        foreach (char c in value)
++        {
++            if (c == '\\') { slashes++; continue; }
++            result.Append('\\', c == '"' ? slashes * 2 + 1 : slashes);
++            result.Append(c); slashes = 0;
++        }
++        return result.Append('\\', slashes * 2).Append('"').ToString();
++    }
++    private static List<(uint pid, uint parent, string name)> Snapshot()
++    {
++        var result = new List<(uint,uint,string)>();
++        var handle = CreateToolhelp32Snapshot(2, 0);
++        if (handle == new IntPtr(-1)) throw new Win32Exception(Marshal.GetLastWin32Error());
++        try
++        {
++            var entry = new ProcessEntry { size = (uint)Marshal.SizeOf<ProcessEntry>() };
++            if (Process32FirstW(handle, ref entry)) do { result.Add((entry.pid, entry.parent, entry.name)); } while (Process32NextW(handle, ref entry));
++            return result;
++        }
++        finally { CloseHandle(handle); }
++    }
++    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] private struct ProcessEntry { public uint size,usage,pid; public UIntPtr heap; public uint module,threads,parent; public int priority; public uint flags; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=260)] public string name; }
++    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] private struct StartupInfo { public int cb; public string? reserved,desktop,title; public int x,y,xSize,ySize,xChars,yChars,fill,flags; public short show,reserved2; public IntPtr reservedPointer,input,output,error; }
++    [StructLayout(LayoutKind.Sequential)] private struct ProcessInfo { public IntPtr process,thread; public uint pid,tid; }
++    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool CreateProcessW(string app,StringBuilder cmd,IntPtr pa,IntPtr ta,bool inherit,uint flags,IntPtr env,string directory,ref StartupInfo si,out ProcessInfo pi);
++    [DllImport("kernel32.dll", SetLastError=true)] private static extern uint ResumeThread(IntPtr thread);
++    [DllImport("kernel32.dll")] private static extern uint WaitForSingleObject(IntPtr handle,uint timeout);
++    [DllImport("kernel32.dll", SetLastError=true)] private static extern bool GetExitCodeProcess(IntPtr process,out uint code);
++    [DllImport("kernel32.dll")] private static extern bool TerminateProcess(IntPtr process,uint code);
++    [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
++    [DllImport("kernel32.dll", SetLastError=true)] private static extern IntPtr CreateToolhelp32Snapshot(uint flags,uint pid);
++    [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] private static extern bool Process32FirstW(IntPtr handle,ref ProcessEntry entry);
++    [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] private static extern bool Process32NextW(IntPtr handle,ref ProcessEntry entry);
++    [DllImport("dbghelp.dll", SetLastError=true)] [DefaultDllImportSearchPaths(DllImportSearchPath.System32)] private static extern bool MiniDumpWriteDump(IntPtr process,uint pid,SafeFileHandle file,uint flags,IntPtr exception,IntPtr streams,IntPtr callback);
++}
+--- a/launcher/Emilyfn.Core/GameMemoryCapture.cs
++++ b/launcher/Emilyfn.Core/GameMemoryCapture.cs
+@@ -14,6 +14,7 @@
+ 
+ public static class GameMemoryCapture
+ {
++    internal static readonly object DumpLock = new();
+     private static readonly SemaphoreSlim Gate = new(1, 1);
+     public static IReadOnlyList<CaptureTarget> FindTargets()
+     {
+@@ -78,6 +79,7 @@
+             progress?.Report("Capturing game memory… This may take several minutes and several GB.");
+             using (var file = new FileStream(partial, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
+             {
++                lock (DumpLock)
+                 if (!MiniDumpWriteDump(handle, (uint)target.Id, file.SafeFileHandle, 0x1822, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero))
+                 {
+                     int error = Marshal.GetLastWin32Error();
+--- a/launcher/Emilyfn.Core/DiagnosticGameLaunch.cs
++++ b/launcher/Emilyfn.Core/DiagnosticGameLaunch.cs
+@@ -7,7 +7,7 @@
+ {
+     // The exact uploaded 38.00 CL47722112 image. This is not a supported gameplay profile.
+     public const string ImageSha256 = "f4ddac1044edd0e8cc123f586f7204de8724989b6adcf25b2e34b4855747a5c0";
+-    public static async Task<Process> StartAsync(string executable, string logsDirectory)
++    public static async Task<StartupCapture.Result> StartAsync(string executable, string logsDirectory, string? captureFolder = null, IProgress<string>? progress = null)
+     {
+         if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess)
+             throw new PlatformNotSupportedException("Diagnostic launch requires Windows x64.");
+@@ -30,6 +30,7 @@
+         start.ArgumentList.Add("-FORCELOGFLUSH");
+         start.ArgumentList.Add("-abslog=" + log);
+         // No auth/game DLL injection, companion processes, or changes to EAC or launcher requirements.
+-        return Process.Start(start) ?? throw new IOException("Windows did not start the diagnostic game process.");
++        captureFolder ??= Path.Combine(logsDirectory, "startup-capture-" + Guid.NewGuid().ToString("N"));
++        return await StartupCapture.RunAsync(start, captureFolder, log + ".startup.log", progress);
+     }
+ }
+--- a/launcher/Emilyfn.App/MemoryCaptureWindow.cs
++++ b/launcher/Emilyfn.App/MemoryCaptureWindow.cs
+@@ -14,7 +14,7 @@
+     private readonly Button refresh = new() { Content = "Refresh" };
+     private readonly Func<string, Task> exportLogs;
+     private readonly string logsDirectory;
+-    private readonly Button launch = new() { Content = "Launch 38.00 for capture", Margin = new Thickness(12, 0, 0, 0) };
++    private readonly Button launch = new() { Content = "Capture 38.00 startup", Margin = new Thickness(12, 0, 0, 0) };
+     private bool busy;
+ 
+     public MemoryCaptureWindow(Func<string, Task> exportLogs, string logsDirectory)
+@@ -29,7 +29,7 @@
+         panel.Children.Add(targets);
+         var buttons = new StackPanel { Orientation = Orientation.Horizontal };
+         buttons.Children.Add(capture); buttons.Children.Add(refresh); buttons.Children.Add(launch); panel.Children.Add(buttons); panel.Children.Add(status);
+-        panel.Children.Add(new TextBlock { Text = "38.00 diagnostic launch starts your matching executable without gameplay DLLs. It does not enable gameplay or remove Epic/EAC startup requirements. Keep the complete game installation in place.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
++        panel.Children.Add(new TextBlock { Text = "Startup capture saves early memory before the game runs, observes startup, then attempts a later capture if it stays open. Early memory may lack SDK objects. It does not enable gameplay or remove Epic/EAC startup requirements. Keep the complete game installation in place.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
+         Content = panel;
+         launch.Click += async (_, _) => await Launch();
+         refresh.Click += (_, _) => Refresh();
+@@ -52,20 +52,21 @@
+     {
+         var dialog = new OpenFileDialog { Title = "Select the matching 38.00 game executable", Filter = "Fortnite executable|FortniteClient-Win64-Shipping.exe", CheckFileExists = true };
+         if (dialog.ShowDialog(this) != true) return;
++        var output = new OpenFolderDialog { Title = "Choose space for startup memory captures" };
++        if (output.ShowDialog(this) != true) return;
++        var folder = System.IO.Path.Combine(output.FolderName, "Emilyfn-startup-" + Guid.NewGuid().ToString("N"));
+         busy = true; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = false;
+         status.Text = "Checking the 38.00 executable…";
+         try
+         {
+-            using var process = await DiagnosticGameLaunch.StartAsync(dialog.FileName, logsDirectory);
+-            await Task.Delay(1500);
++            var result = await DiagnosticGameLaunch.StartAsync(dialog.FileName, logsDirectory, folder, new Progress<string>(message => status.Text = message));
+             Refresh();
+-            if (process.HasExited)
+-                status.Text = $"The game exited during startup (code {process.ExitCode}). Export the diagnostic logs. The 19–30 gameplay range check was not used.";
+-            else
+-            {
+-                targets.SelectedItem = targets.Items.Cast<CaptureTarget>().FirstOrDefault(t => t.Id == process.Id);
+-                status.Text = $"Diagnostic process started: PID {process.Id}. Wait for initialization, then capture. This is not a gameplay-ready signal.";
+-            }
++            status.Text = $"Saved to {result.Folder}. Early snapshot: {(result.EarlyDumpSaved ? "saved before engine initialization" : "failed; see startup.log")}. " +
++                (result.ExitCode is int code ? $"Game exited with code {code}." : $"PID {result.ProcessId} was still running when observation ended.");
++            try { await exportLogs(System.IO.Path.Combine(folder, "launcher-logs.zip")); }
++            catch (Exception error) { status.Text += " Log export failed: " + error.Message; }
++            try { Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { folder } }); } catch { }
++
+         }
+         catch (Exception error) { status.Text = error.Message; }
+         finally { busy = false; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = true; }
+--- /dev/null
++++ b/launcher/Emilyfn.StartupTests/Emilyfn.StartupTests.csproj
+@@ -0,0 +1 @@
++<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup><ItemGroup><ProjectReference Include="../Emilyfn.Core/Emilyfn.Core.csproj" /></ItemGroup></Project>
+--- /dev/null
++++ b/launcher/Emilyfn.StartupTests/Program.cs
+@@ -0,0 +1,25 @@
++using Emilyfn.Core;
++using System.Diagnostics;
++var root = Path.Combine(Path.GetTempPath(), "Emilyfn startup test " + Guid.NewGuid().ToString("N"));
++Directory.CreateDirectory(root);
++try
++{
++    var exe = Path.Combine(root, "startup child.exe"); File.Copy(Path.GetFullPath(args[0]), exe);
++    var folder = Path.Combine(root, "capture"); var trace = Path.Combine(root, "startup.log");
++    var result = await StartupCapture.RunAsync(new ProcessStartInfo(exe) { WorkingDirectory = root }, folder, trace);
++    if (result.ExitCode != 42) throw new Exception("Exit code not recorded: " + result.ExitCode);
++    if (!result.EarlyDumpSaved) throw new Exception("Early capture failed: " + File.ReadAllText(trace));
++    using (var reader = new BinaryReader(File.OpenRead(Path.Combine(folder, "early.dmp"))))
++    {
++        if (reader.ReadUInt32() != 0x504d444d) throw new Exception("Dump invalid");
++        reader.ReadUInt32(); uint count = reader.ReadUInt32(), offset = reader.ReadUInt32(); bool memory = false;
++        for (uint i = 0; i < count; i++) { reader.BaseStream.Position = offset + i * 12; if (reader.ReadUInt32() == 9) memory = true; }
++        if (!memory) throw new Exception("Full memory stream absent");
++    }
++    var log = File.ReadAllText(trace);
++    if (!log.Contains("Observed descendant:") || !log.Contains("observed running duration") || !log.Contains("PRE-INITIALIZATION")) throw new Exception("Trace incomplete: " + log);
++    if (!File.Exists(Path.Combine(folder, "startup.log"))) throw new Exception("Trace not copied");
++    if (Directory.EnumerateFiles(folder, "*.partial").Any()) throw new Exception("Partial dump remains");
++    Console.WriteLine("STARTUP CAPTURE PASSED: pre-run full-memory snapshot, resumed process, exit code 42, descendant discovery, lifetime, copied trace, no partial dump.");
++}
++finally { Directory.Delete(root, true); }
+--- /dev/null
++++ b/launcher/Emilyfn.StartupTests/child.cpp
+@@ -0,0 +1,12 @@
++#include <windows.h>
++#include <string>
++int wmain(int argc, wchar_t**)
++{
++    if (argc > 1) { Sleep(1200); return 17; }
++    wchar_t file[MAX_PATH]{}; GetModuleFileNameW(nullptr, file, MAX_PATH);
++    std::wstring command = L"\"" + std::wstring(file) + L"\" child";
++    STARTUPINFOW si{}; si.cb = sizeof(si); PROCESS_INFORMATION pi{};
++    if (!CreateProcessW(file, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) return 99;
++    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
++    Sleep(750); return 42;
++}
