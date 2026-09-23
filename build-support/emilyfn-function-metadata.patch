@@ -1,0 +1,397 @@
+diff --git a/launcher/Emilyfn.Core/AssemblyInfo.cs b/launcher/Emilyfn.Core/AssemblyInfo.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.Core/AssemblyInfo.cs
+@@ -0,0 +1 @@
++[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("Emilyfn.SdkTests")]
+diff --git a/launcher/Emilyfn.Core/CaptureFunctionMetadata38.cs b/launcher/Emilyfn.Core/CaptureFunctionMetadata38.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.Core/CaptureFunctionMetadata38.cs
+@@ -0,0 +1,101 @@
++using System.Buffers.Binary;
++using System.Text;
++
++namespace Emilyfn.Core;
++
++// Observed CL47722112 metadata; does not invoke functions or construct call buffers.
++public static class CaptureFunctionMetadata38
++{
++    public sealed record OwnerSize(string Owner, uint StorageSize);
++    public sealed record Function(string Owner, string Kind, uint StorageSize, ushort ParameterBufferSize,
++        uint RawFlags, bool DeclaredNative, ulong? NativeEntryRva);
++    public sealed record Rejection(string Owner, string Reason);
++    public sealed record Observation(List<OwnerSize> OwnerSizes, List<Function> Functions, List<Rejection> Rejections);
++
++    public static Observation Inspect(Func<ulong, int, byte[]> read, ulong imageBase, CaptureReflectionExporter38.Observation reflection)
++    {
++        uint D(ulong a) => BinaryPrimitives.ReadUInt32LittleEndian(read(a, 4));
++        ushort W(ulong a) => BinaryPrimitives.ReadUInt16LittleEndian(read(a, 2));
++        ulong Q(ulong a) => BinaryPrimitives.ReadUInt64LittleEndian(read(a, 8));
++        foreach (var anchor in Anchors)
++            if (!read(checked(imageBase + anchor.Rva), anchor.Bytes.Length).AsSpan().SequenceEqual(anchor.Bytes))
++                throw new InvalidDataException("The image does not match the 38.00 function-layout instructions.");
++
++        // Check executable PE sections instead of treating any image pointer as code.
++        if (W(imageBase) != 0x5a4d) throw new InvalidDataException("Invalid image DOS header.");
++        uint peOffset = D(checked(imageBase + 0x3c));
++        if (peOffset is < 64 or > 0x100000) throw new InvalidDataException("Invalid PE header offset.");
++        ulong pe = checked(imageBase + peOffset);
++        if (D(pe) != 0x4550 || W(pe + 4) != 0x8664 || W(pe + 24) != 0x20b || D(pe + 24 + 56) != 0x18777000)
++            throw new InvalidDataException("Unsupported 38.00 PE image.");
++        ushort sections = W(pe + 6), optionalSize = W(pe + 20);
++        if (sections is 0 or > 96 || optionalSize is < 112 or > 4096)
++            throw new InvalidDataException("Invalid image section table.");
++        var executable = new List<(uint Start, uint End)>();
++        for (uint i = 0; i < sections; i++)
++        {
++            ulong section = checked(pe + 24 + optionalSize + i * 40);
++            uint size = D(section + 8), start = D(section + 12), flags = D(section + 36);
++            if (start > 0x18777000 || size > 0x18777000 - start)
++                throw new InvalidDataException("Image section exceeds module bounds.");
++            if ((flags & 0x20000000) != 0 && size != 0) executable.Add((start, start + size));
++        }
++        if (executable.Count == 0) throw new InvalidDataException("Image has no executable sections.");
++
++        var sizes = new List<OwnerSize>(); var functions = new List<Function>(); var rejected = new List<Rejection>();
++        var fields = reflection.Properties.ToLookup(p => p.Owner, StringComparer.Ordinal);
++        var withProperties = reflection.Owners.Select(o => o.Name).ToHashSet(StringComparer.Ordinal);
++        var seen = new HashSet<string>(StringComparer.Ordinal);
++        foreach (var owner in reflection.Candidates.OrderBy(o => o.Name, StringComparer.Ordinal))
++        {
++            bool isFunction = owner.Kind is "Function" or "DelegateFunction" or "SparseDelegateFunction";
++            if (!isFunction && !withProperties.Contains(owner.Name)) continue;
++            try
++            {
++                if (!seen.Add(owner.Name)) throw new InvalidDataException("Duplicate qualified owner name.");
++                uint storage = D(checked(owner.Address + 0x68)) ^ 0x1937f47b;
++                if (storage > 0x1000000) throw new InvalidDataException("Owner storage size exceeds supported bounds.");
++                foreach (var property in fields[owner.Name])
++                    if ((ulong)property.Offset + (ulong)property.ElementSize * property.ArrayDim > storage)
++                        throw new InvalidDataException("Property exceeds decoded owner storage size.");
++                if (withProperties.Contains(owner.Name)) sizes.Add(new(owner.Name, storage));
++                if (!isFunction) continue;
++                ushort parameters = (ushort)(W(checked(owner.Address + 0xbc)) ^ 0x8250);
++                uint flags = D(checked(owner.Address + 0xb8));
++                ulong native = Q(checked(owner.Address + 0xe0));
++                bool declaredNative = (flags & 0x400) != 0;
++                if (parameters > storage) throw new InvalidDataException("Parameter buffer exceeds owner storage size.");
++                if (native == 0 && declaredNative) throw new InvalidDataException("Native function has no entry pointer.");
++                ulong? rva = null;
++                if (native != 0)
++                {
++                    if (native < imageBase || !executable.Any(s => native - imageBase >= s.Start && native - imageBase < s.End))
++                        throw new InvalidDataException("Function entry is outside executable game sections.");
++                    rva = native - imageBase;
++                }
++                functions.Add(new(owner.Name, owner.Kind, storage, parameters, flags, declaredNative, rva));
++            }
++            catch (InvalidDataException error) { rejected.Add(new(owner.Name, error.Message)); }
++            catch (OverflowException) { rejected.Add(new(owner.Name, "Address overflow.")); }
++        }
++        return new(sizes, functions, rejected);
++    }
++
++    internal static void WriteHeaders(string folder, Observation observation)
++    {
++        static string Cpp(string text) => "\"" + string.Concat(Encoding.UTF8.GetBytes(text).Select(b => "\\" + Convert.ToString(b, 8).PadLeft(3, '0'))) + "\"";
++        using var output = new StreamWriter(Path.Combine(folder, "functions.hpp"), false, new UTF8Encoding(false));
++        output.WriteLine("#pragma once\n#include <array>\n#include <cstdint>\nnamespace emilyfn_functions38 {\n// Metadata only: entry RVAs are not callable wrappers.\ninline constexpr bool sdk_ready=false;\ninline constexpr bool function_dispatch_verified=false;\nstruct OwnerSize { const char* owner; std::uint32_t storage_size; };\nstruct Function { const char* owner; const char* kind; std::uint32_t storage_size; std::uint16_t parameter_buffer_size; std::uint32_t raw_flags; bool declared_native; bool has_native_entry; std::uint64_t native_entry_rva; };\ninline constexpr std::array<OwnerSize, " + observation.OwnerSizes.Count + "> owner_sizes = {{");
++        foreach (var size in observation.OwnerSizes) output.WriteLine("{" + Cpp(size.Owner) + "," + size.StorageSize + "u},");
++        output.WriteLine("}};\ninline constexpr std::array<Function, " + observation.Functions.Count + "> functions = {{");
++        foreach (var f in observation.Functions)
++            output.WriteLine("{" + Cpp(f.Owner) + "," + Cpp(f.Kind) + "," + f.StorageSize + "u," + f.ParameterBufferSize + "u," + f.RawFlags + "u," + (f.DeclaredNative ? "true" : "false") + "," + (f.NativeEntryRva.HasValue ? "true" : "false") + "," + (f.NativeEntryRva ?? 0) + "ull},");
++        output.WriteLine("}};\n}");
++    }
++
++    private static readonly (ulong Rva, byte[] Bytes)[] Anchors = {
++        (0x373d5UL, Convert.FromHexString("48634768ba7bf437194889c14831d148")),
++        (0x3743cUL, Convert.FromHexString("0fb787bc00000048355082000039")),
++        (0x8d7afb3UL, Convert.FromHexString("498b86e0000000"))
++    };
++}
+diff --git a/launcher/Emilyfn.Core/CaptureReflectionExporter38.cs b/launcher/Emilyfn.Core/CaptureReflectionExporter38.cs
+--- a/launcher/Emilyfn.Core/CaptureReflectionExporter38.cs
++++ b/launcher/Emilyfn.Core/CaptureReflectionExporter38.cs
+@@ -6,11 +6,11 @@
+ // Observed capture metadata only. Does not execute code, inject or enable gameplay.
+ public static class CaptureReflectionExporter38
+ {
+-    public sealed record Result(string Folder,int Owners,int Properties,int RejectedChains);
++    public sealed record Result(string Folder,int Owners,int Properties,int RejectedChains,int Functions,int RejectedBindings);
+     public sealed record Owner(ulong Address,string Name,string Kind);
+     public sealed record Property(string Owner,string Name,string Type,uint Offset,uint ElementSize,uint ArrayDim);
+     public sealed record Rejection(string Owner,string Reason);
+-    public sealed record Observation(List<Owner> Owners,List<Property> Properties,List<Rejection> Rejections,int ReadableObjects,int InvalidSlots);
++    public sealed record Observation(List<Owner> Owners,List<Property> Properties,List<Rejection> Rejections,int ReadableObjects,int InvalidSlots,List<Owner> Candidates);
+     private static readonly HashSet<string> Kinds = new(){"Class","ScriptStruct","Function","DelegateFunction","SparseDelegateFunction"};
+     public static ulong DecodeLink(ulong stored) => (stored & 1)!=0 ? (stored & ~1UL)^0x47dcc0173f15ec38UL : stored;
+     // Public for offline fixture validation; callers must validate the exact image profile first.
+@@ -52,7 +52,7 @@
+             }
+             path.Reverse();return string.Join('.',path);
+         }
+-        var owners=new List<Owner>();var properties=new List<Property>();var errors=new List<Rejection>();
++        var candidates=new List<Owner>();var owners=new List<Owner>();var properties=new List<Property>();var errors=new List<Rejection>();
+         var qualifiedOwners=new HashSet<string>();
+         foreach(var obj in objects.Where(o=>Kinds.Contains(o.Kind)&&!o.Name.StartsWith("Default__",StringComparison.Ordinal)))
+         {
+@@ -73,9 +73,10 @@
+                         throw new InvalidDataException("Implausible property extent.");
+                     chain.Add(new(owner,name,type,offset,size,dim));p=DecodeLink(Q(checked(p+16)));
+                 }
++                if(!qualifiedOwners.Add(owner))throw new InvalidDataException("Duplicate qualified owner name.");
++                candidates.Add(new(obj.Address,owner,obj.Kind));
+                 if(chain.Count>0)
+                 {
+-                    if(!qualifiedOwners.Add(owner))throw new InvalidDataException("Duplicate qualified owner name.");
+                     owners.Add(new(obj.Address,owner,obj.Kind));properties.AddRange(chain);
+                 }
+             }
+@@ -83,11 +84,12 @@
+             catch(OverflowException){errors.Add(new(obj.Name,"Address overflow."));}
+         }
+         if(owners.Count==0)throw new InvalidDataException("No initialized property chains were found. A later initialized capture is required.");
+-        return new(owners,properties,errors,objects.Count,invalid);
++        return new(owners,properties,errors,objects.Count,invalid,candidates);
+     }
+     public static Task<Result> ExportAsync(string dump,string destination)=>Task.Run(()=>CaptureNameExporter38.WithCapture(dump,view=>
+     {
+         var observed=Inspect(view.Read,view.ImageBase,view.Names.ToDictionary(n=>n.Index,n=>n.Name));
++        var bindings=CaptureFunctionMetadata38.Inspect(view.Read,view.ImageBase,observed);
+         var owners=observed.Owners.OrderBy(o=>o.Name,StringComparer.Ordinal).ToList();
+         var ids=owners.Select((o,i)=>(o.Name,i)).ToDictionary(x=>x.Name,x=>x.i);
+         var fields=observed.Properties.OrderBy(p=>ids[p.Owner]).ThenBy(p=>p.Offset).ThenBy(p=>p.Name,StringComparer.Ordinal).ToList();
+@@ -104,12 +106,13 @@
+                 foreach(var p in fields)output.WriteLine("{"+ids[p.Owner]+"u,"+Cpp(p.Name)+","+Cpp(p.Type)+","+p.Offset+"u,"+p.ElementSize+"u,"+p.ArrayDim+"u},");
+                 output.WriteLine("}};\n}");
+             }
+-            var report=new { Profile="38.00 CL47722112",view.SourceBytes,SdkReady=false,CompleteReflection=false,FunctionDispatchVerified=false,
+-                ReflectedOwners=owners.Count,Properties=fields.Count,observed.ReadableObjects,observed.InvalidSlots,RejectedChains=observed.Rejections,
+-                Limitations="Only populated chains are exported. Missing sizes, flags, nested type references, bool masks and callable bindings are not inferred." };
+-            File.WriteAllText(Path.Combine(folder,"reflection.json"),JsonSerializer.Serialize(new{Report=report,Owners=owners.Select(o=>new{o.Name,o.Kind}),Properties=fields},new JsonSerializerOptions{WriteIndented=true}));
+-            File.WriteAllText(Path.Combine(folder,"README.txt"),"Observed capture metadata only. This is not a full gameplay SDK. See reflection.json for incomplete coverage and rejected chains. Keep runtime metadata private.\n");
+-            return new Result(folder,owners.Count,fields.Count,observed.Rejections.Count);
++            CaptureFunctionMetadata38.WriteHeaders(folder,bindings);
++            var report=new { FormatVersion=2, Profile="38.00 CL47722112",view.SourceBytes,SdkReady=false,CompleteReflection=false,FunctionDispatchVerified=false,
++                ReflectedOwners=owners.Count,Properties=fields.Count,Functions=bindings.Functions.Count,observed.ReadableObjects,observed.InvalidSlots,RejectedChains=observed.Rejections,RejectedBindings=bindings.Rejections,
++                Limitations="Property export includes populated chains only; function metadata also includes observed functions with no fields. Storage and parameter sizes differ. Raw function flags are exported; property flags, nested types, bool masks and callable bindings remain unavailable." };
++            File.WriteAllText(Path.Combine(folder,"reflection.json"),JsonSerializer.Serialize(new{Report=report,Owners=owners.Select(o=>new{o.Name,o.Kind}),Properties=fields,OwnerSizes=bindings.OwnerSizes,Functions=bindings.Functions},new JsonSerializerOptions{WriteIndented=true}));
++            File.WriteAllText(Path.Combine(folder,"README.txt"),"Observed capture metadata only. reflection.hpp contains properties; functions.hpp contains validated owner storage sizes and function metadata, including raw flags and image-relative entry RVAs. Native entry RVAs are not callable wrappers. Function parameter-buffer size is not the full storage size; field parameter flags and bool masks remain unknown. This is not a full gameplay SDK. See reflection.json for incomplete coverage and rejected entries. Keep runtime metadata private.\n");
++            return new Result(folder,owners.Count,fields.Count,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count);
+         }
+         catch{Directory.Delete(folder,true);throw;}
+     }));
+diff --git a/launcher/Emilyfn.Core/LiveBindingProbe38.cs b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+--- a/launcher/Emilyfn.Core/LiveBindingProbe38.cs
++++ b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+@@ -10,14 +10,13 @@
+ public static class LiveBindingProbe38
+ {
+     public sealed record Check(string Name,bool Passed,string Detail);
+-    public sealed record Evidence(List<Check> Checks,int Names,int Owners,int Properties,int InvalidObjectSlots,int RejectedChains);
++    public sealed record Evidence(List<Check> Checks,int Names,int Owners,int Properties,int InvalidObjectSlots,int RejectedChains,int Functions,int RejectedBindings);
+     public sealed record Result(string File,bool Passed,string Message);
+     public static Task<Evidence> InspectCaptureAsync(string dump) => Task.Run(() => CaptureNameExporter38.WithCapture(dump, view => Inspect(view.Read, view.ImageBase)));
+     public static Evidence Inspect(Func<ulong,int,byte[]> read,ulong imageBase)
+     {
+         uint D(ulong a)=>BinaryPrimitives.ReadUInt32LittleEndian(read(a,4));
+         ulong Q(ulong a)=>BinaryPrimitives.ReadUInt64LittleEndian(read(a,8));
+-        ushort W(ulong a)=>BinaryPrimitives.ReadUInt16LittleEndian(read(a,2));
+         foreach(var anchor in Anchors)
+             if(!read(checked(imageBase+anchor.Rva),anchor.Bytes.Length).AsSpan().SequenceEqual(anchor.Bytes))
+                 throw new InvalidDataException("Live image instruction profile mismatch.");
+@@ -28,18 +27,17 @@
+         for(uint i=0;i<=block;i++)blocks.Add(read(Q(pool+16+i*8),(int)(i==block?cursor:131072)));
+         var names=NamePool38.DecodeBlocks(blocks).ToDictionary(n=>n.Index,n=>n.Name);
+         var observed=CaptureReflectionExporter38.Inspect(read,imageBase,names);
++        var bindings=CaptureFunctionMetadata38.Inspect(read,imageBase,observed);
+         string Name(ulong obj)=>names.TryGetValue(NamePool38.DecodeIndex(D(obj+32)),out var name)?name:throw new InvalidDataException("Object name unavailable.");
+         ulong table=Q(imageBase+0x16cfacd8);uint count=D(imageBase+0x16cface0);
+         if(count is 0 or >1000000)throw new InvalidDataException("Invalid object table count.");
+-        ulong defaultObject=0;var sampleFunctions=new Dictionary<string,ulong>();
++        ulong defaultObject=0;
+         for(uint i=0;i<count;i++)
+         {
+             try
+             {
+                 ulong obj=Q(checked(table+i*32UL+8));string name=Name(obj),kind=Name(Q(obj+24));
+                 if(name=="Default__Object" && kind=="Object")defaultObject=obj;
+-                if(kind=="Function" && new[]{"Activate","ExecuteUbergraph","GetOwner","ComponentHasTag"}.Contains(name))
+-                    sampleFunctions.TryAdd(name,obj);
+             }
+             catch(InvalidDataException){}
+         }
+@@ -48,26 +46,15 @@
+             new("Property chains",observed.Rejections.Count==0,$"{observed.Properties.Count} properties; {observed.Rejections.Count} rejected chains.")};
+         bool dispatch=defaultObject!=0 && Q(checked(Q(defaultObject)+28*8))==imageBase+0x3729a;
+         checks.Add(new("Dispatch slot",dispatch,"Default__Object vtable slot 28 must resolve to image RVA 0x3729A; no function is invoked."));
+-        var badExtents=0;
+-        foreach(var owner in observed.Owners)
+-        {
+-            uint size=D(owner.Address+0x68)^0x1937f47b;
+-            foreach(var field in observed.Properties.Where(p=>p.Owner==owner.Name))
+-                if((ulong)field.Offset+(ulong)field.ElementSize*field.ArrayDim>size)badExtents++;
+-        }
+-        checks.Add(new("Owner storage bounds",badExtents==0,$"{badExtents} properties extend beyond the decoded owner storage size."));
++        checks.Add(new("Function and storage metadata",bindings.Functions.Count>0 && bindings.Rejections.Count==0,
++            $"{bindings.Functions.Count} functions; {bindings.OwnerSizes.Count} owner sizes; {bindings.Rejections.Count} rejected metadata entries."));
+         foreach(string key in new[]{"Activate","ExecuteUbergraph","GetOwner","ComponentHasTag"})
+         {
+-            bool found=sampleFunctions.TryGetValue(key,out ulong a);bool valid=false;string detail="Function not initialized in this process.";
+-            if(found)
+-            {
+-                uint storage=D(a+0x68)^0x1937f47b;int parameters=W(a+0xbc)^0x8250;ulong native=Q(a+0xe0);
+-                valid=parameters<=storage && storage<=0x1000000 && native>=imageBase && native-imageBase<0x11000000;
+-                detail=$"Storage={storage}, parameter bytes={parameters}, native entry inside game code={native>=imageBase && native-imageBase<0x11000000}.";
+-            }
+-            checks.Add(new("Function layout: "+key,valid,detail));
++            var found=bindings.Functions.FirstOrDefault(f=>f.Kind=="Function" && (f.Owner==key || f.Owner.EndsWith("."+key,StringComparison.Ordinal)));
++            checks.Add(new("Function layout: "+key,found is not null,found is null?"Function not initialized or its metadata was rejected.":
++                $"Storage={found.StorageSize}, parameter bytes={found.ParameterBufferSize}, native entry RVA=0x{found.NativeEntryRva:X}."));
+         }
+-        return new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count);
++        return new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count);
+     }
+     public static Task<Result> RunAsync(CaptureTarget target,string destination,IProgress<string>? progress=null)=>Task.Run(()=>Run(target,destination,progress));
+     private static Result Run(CaptureTarget target,string destination,IProgress<string>? progress)
+diff --git a/launcher/Emilyfn.App/SdkExportWindow.cs b/launcher/Emilyfn.App/SdkExportWindow.cs
+--- a/launcher/Emilyfn.App/SdkExportWindow.cs
++++ b/launcher/Emilyfn.App/SdkExportWindow.cs
+@@ -12,14 +12,14 @@
+     private readonly Button export = new() { Content = "Choose decoded dump and export headers" };
+     private readonly TextBlock status = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) };
+     private readonly Button inspect = new() { Content = "Export 38.00 names from a memory capture", Margin = new Thickness(0, 12, 0, 0) };
+-    private readonly Button reflection = new() { Content = "Export 38.00 property metadata from a capture", Margin = new Thickness(0, 12, 0, 0) };
++    private readonly Button reflection = new() { Content = "Export 38.00 properties and functions from a capture", Margin = new Thickness(0, 12, 0, 0) };
+     private bool busy;
+     public SdkExportWindow()
+     {
+         Title = "Emilyfn — SDK metadata headers"; Width = 720; Height = 540; WindowStartupLocation = WindowStartupLocation.CenterOwner;
+         var panel = new StackPanel { Margin = new Thickness(24) };
+         panel.Children.Add(new TextBlock { Text = "Generate SDK metadata headers", FontSize = 20 });
+-        panel.Children.Add(new TextBlock { Text = "Import ClassesInfo.json, StructsInfo.json and FunctionsInfo.json from one Dumpspace snapshot. Exports C++17 class, property and function metadata. 38.00 capture exports provide names or observed property metadata. Full SDK layouts and callable functions remain unavailable.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 12) });
++        panel.Children.Add(new TextBlock { Text = "Import ClassesInfo.json, StructsInfo.json and FunctionsInfo.json from one Dumpspace snapshot. Exports C++17 class, property and function metadata. 38.00 capture exports provide names, observed properties and function metadata. Full SDK layouts and callable functions remain unavailable.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 12) });
+         panel.Children.Add(new TextBlock { Text = "Source dump build and CL (as reported by its author)" });
+         panel.Children.Add(build); panel.Children.Add(export); panel.Children.Add(inspect); panel.Children.Add(reflection); panel.Children.Add(status); Content = panel;
+         inspect.Click += async (_, _) => await InspectCapture(false);
+@@ -42,7 +42,7 @@
+             {
+                 var result = await CaptureReflectionExporter38.ExportAsync(source.FileName, output.FolderName);
+                 folder = result.Folder;
+-                status.Text = $"Saved {result.Properties:N0} properties across {result.Owners:N0} owners. Rejected chains: {result.RejectedChains}. Coverage is incomplete; this is not a callable gameplay SDK. Output: {folder}";
++                status.Text = $"Saved {result.Properties:N0} properties, {result.Functions:N0} functions and {result.Owners:N0} owners. Rejected chains: {result.RejectedChains}; rejected bindings: {result.RejectedBindings}. Coverage is incomplete; this is not a callable gameplay SDK. Output: {folder}";
+             }
+             else
+             {
+diff --git a/launcher/Emilyfn.SdkTests/FunctionMetadataChecks.cs b/launcher/Emilyfn.SdkTests/FunctionMetadataChecks.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.SdkTests/FunctionMetadataChecks.cs
+@@ -0,0 +1,90 @@
++using Emilyfn.Core;
++using System.Buffers.Binary;
++
++static class FunctionMetadataChecks
++{
++    public static void Run(string root)
++    {
++        // Synthetic memory only; no game executable or capture is required on CI.
++        foreach (ulong image in new[] { 0x50000UL, 0x140000000UL }) RunAt(image, root);
++        Console.WriteLine("Function metadata checks passed: relocation, padded parameters, no-field functions, executable sections, rejection paths and generated header.");
++    }
++    private static void RunAt(ulong image, string root)
++    {
++        const ulong owner = 0x500000000, noArgs = owner + 0x1000, noNative = owner + 0x2000, type = owner + 0x3000;
++        var segments = new Dictionary<ulong, byte[]>();
++        byte[] Alloc(ulong a, int size) { var b = new byte[size]; segments.Add(a, b); return b; }
++        void W(byte[] b, int o, ushort v) => BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(o), v);
++        void D(byte[] b, int o, uint v) => BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(o), v);
++        void Q(byte[] b, int o, ulong v) => BinaryPrimitives.WriteUInt64LittleEndian(b.AsSpan(o), v);
++        void Check(bool value, string reason) { if (!value) throw new Exception(reason); }
++        var header = Alloc(image, 0x1000);
++        W(header, 0, 0x5a4d); D(header, 0x3c, 0x80); D(header, 0x80, 0x4550);
++        W(header, 0x84, 0x8664); W(header, 0x86, 2); W(header, 0x94, 240); W(header, 0x98, 0x20b); D(header, 0x98 + 56, 0x18777000);
++        const int section = 0x98 + 240;
++        D(header, section + 8, 0x4000); D(header, section + 12, 0x1000); D(header, section + 36, 0x60000020);
++        D(header, section + 48, 0x1000); D(header, section + 52, 0x8000); D(header, section + 76, 0xc0000040);
++        foreach (var (rva, hex) in new[] {
++            (0x373d5UL, "48634768ba7bf437194889c14831d148"),
++            (0x3743cUL, "0fb787bc00000048355082000039"),
++            (0x8d7afb3UL, "498b86e0000000") }) segments.Add(image + rva, Convert.FromHexString(hex));
++        var function = Alloc(owner, 0x100); D(function, 0x68, 8 ^ 0x1937f47b); W(function, 0xbc, 5 ^ 0x8250);
++        D(function, 0xb8, 0x54020403); Q(function, 0xe0, image + 0x2000);
++        var empty = Alloc(noArgs, 0x100); D(empty, 0x68, 0x1937f47b); W(empty, 0xbc, 0x8250);
++        D(empty, 0xb8, 0x400); Q(empty, 0xe0, image + 0x2200);
++        var nonNative = Alloc(noNative, 0x100); D(nonNative, 0x68, 0x1937f47b); W(nonNative, 0xbc, 0x8250);
++        var structure = Alloc(type, 0x100); D(structure, 0x68, 12 ^ 0x1937f47b);
++        byte[] Read(ulong a, int n)
++        {
++            foreach (var pair in segments)
++                if (a >= pair.Key && a - pair.Key <= (ulong)pair.Value.Length && (ulong)n <= (ulong)pair.Value.Length - (a - pair.Key))
++                    return pair.Value.AsSpan((int)(a - pair.Key), n).ToArray();
++            throw new InvalidDataException("Missing fixture memory");
++        }
++        const string name = "Owner.ComponentHasTag\"\\é";
++        var owners = new List<CaptureReflectionExporter38.Owner> { new(owner, name, "Function"), new(type, "Data", "ScriptStruct") };
++        var fields = new List<CaptureReflectionExporter38.Property> {
++            new(name, "Tag", "NameProperty", 0, 4, 1), new(name, "ReturnValue", "BoolProperty", 4, 1, 1),
++            new("Data", "Array", "IntProperty", 4, 4, 2) };
++        var candidates = new List<CaptureReflectionExporter38.Owner>(owners) { new(noArgs, "NoArgs", "Function"), new(noNative, "NoNative", "DelegateFunction") };
++        var reflection = new CaptureReflectionExporter38.Observation(owners, fields, new(), 4, 0, candidates);
++        CaptureFunctionMetadata38.Observation Inspect() => CaptureFunctionMetadata38.Inspect(Read, image, reflection);
++        var result = Inspect();
++        Check(result.Functions.Count == 3 && result.OwnerSizes.Count == 2 && result.Rejections.Count == 0, "Missing function/storage metadata");
++        var padded = result.Functions.Single(f => f.Owner == name);
++        Check(padded.StorageSize == 8 && padded.ParameterBufferSize == 5 && padded.RawFlags == 0x54020403 && padded.NativeEntryRva == 0x2000 && padded.DeclaredNative, "Decoded/padded metadata differs");
++        Check(result.Functions.Single(f => f.Owner == "NoArgs").ParameterBufferSize == 0, "No-field function lost");
++        Check(result.Functions.Single(f => f.Owner == "NoNative").NativeEntryRva is null, "Missing entry was fabricated");
++        void Refuse(string expected)
++        {
++            var rejected = Inspect();
++            Check(rejected.Rejections.Any(r => r.Owner == name && r.Reason.Contains(expected, StringComparison.Ordinal)), "Malformed function accepted: " + expected);
++            Check(rejected.Functions.All(f => f.Owner != name), "Rejected function was exported");
++            Check(rejected.Functions.Any(f => f.Owner == "NoArgs"), "One rejected function discarded valid functions");
++        }
++        W(function, 0xbc, 9 ^ 0x8250); Refuse("Parameter buffer"); W(function, 0xbc, 5 ^ 0x8250);
++        D(function, 0x68, 4 ^ 0x1937f47b); Refuse("Property exceeds"); D(function, 0x68, 8 ^ 0x1937f47b);
++        D(function, 0x68, 0x1000001 ^ 0x1937f47b); Refuse("supported bounds"); D(function, 0x68, 8 ^ 0x1937f47b);
++        foreach (ulong bad in new[] { image - 1, image + 0x8000, image + 0x18777000 }) { Q(function, 0xe0, bad); Refuse("executable game sections"); }
++        Q(function, 0xe0, 0); Refuse("no entry pointer"); Q(function, 0xe0, image + 0x2000);
++        void RejectProfile()
++        {
++            try { Inspect(); } catch (InvalidDataException) { return; }
++            throw new Exception("Invalid function profile was accepted");
++        }
++        var anchor = segments[image + 0x373d5]; anchor[0] ^= 1; RejectProfile(); anchor[0] ^= 1;
++        D(header, section + 8, 0x18777000); RejectProfile(); D(header, section + 8, 0x4000);
++        W(header, 0x84, 0x14c); RejectProfile(); W(header, 0x84, 0x8664);
++        if (image == 0x50000)
++        {
++            var output = Path.Combine(root, "function-fixture"); Directory.CreateDirectory(output);
++            CaptureFunctionMetadata38.WriteHeaders(output, result);
++            string file = Path.Combine(output, "functions.hpp"), text = File.ReadAllText(file);
++            Check(text.Contains("\\042\\134\\303\\251"), "Unsafe C++ name escaping");
++            File.AppendAllText(Path.Combine(root, "sdk-smoke.cpp"), "\n#include \"" + file.Replace('\\', '/') + "\"\n" +
++                "static_assert(!emilyfn_functions38::sdk_ready);\nstatic_assert(!emilyfn_functions38::function_dispatch_verified);\n" +
++                "static_assert(emilyfn_functions38::functions.size()==3);\nstatic_assert(emilyfn_functions38::owner_sizes.size()==2);\n" +
++                "constexpr bool padded_function_present() { for (const auto& f : emilyfn_functions38::functions) if (f.storage_size==8 && f.parameter_buffer_size==5 && f.native_entry_rva==0x2000) return true; return false; }\nstatic_assert(padded_function_present());\n");
++        }
++    }
++}
+diff --git a/launcher/Emilyfn.SdkTests/Program.cs b/launcher/Emilyfn.SdkTests/Program.cs
+--- a/launcher/Emilyfn.SdkTests/Program.cs
++++ b/launcher/Emilyfn.SdkTests/Program.cs
+@@ -30,10 +30,11 @@
+ if (args.Length > 1)
+ {
+     var reflection = await CaptureReflectionExporter38.ExportAsync(args[1], root);
+-    Console.WriteLine($"Capture reflection export: {reflection.Owners} owners, {reflection.Properties} properties, {reflection.RejectedChains} rejected; {reflection.Folder}");
++    Console.WriteLine($"Capture reflection export: {reflection.Owners} owners, {reflection.Properties} properties, {reflection.RejectedChains} rejected chains, {reflection.Functions} functions, {reflection.RejectedBindings} rejected bindings; {reflection.Folder}");
+ }
+ 
+ ReflectionChecks.Run();
++FunctionMetadataChecks.Run(root);
+ 
+ if (args.Length > 1)
+ {
