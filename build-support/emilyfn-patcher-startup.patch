@@ -37,7 +37,15 @@ diff --git a/launcher/Emilyfn.App/MainWindow.xaml.cs b/launcher/Emilyfn.App/Main
 diff --git a/launcher/Emilyfn.App/MemoryCaptureWindow.cs b/launcher/Emilyfn.App/MemoryCaptureWindow.cs
 --- a/launcher/Emilyfn.App/MemoryCaptureWindow.cs
 +++ b/launcher/Emilyfn.App/MemoryCaptureWindow.cs
-@@ -14,6 +14,7 @@
+@@ -3,6 +3,7 @@
+ using System.Diagnostics;
+ using System.Windows;
+ using System.Windows.Controls;
++using System.Windows.Media;
+ 
+ namespace Emilyfn.App;
+ 
+@@ -14,6 +15,7 @@
      private readonly Button refresh = new() { Content = "Refresh" };
      private readonly Func<string, Task> exportLogs;
      private readonly string logsDirectory;
@@ -45,13 +53,22 @@ diff --git a/launcher/Emilyfn.App/MemoryCaptureWindow.cs b/launcher/Emilyfn.App/
      private readonly Button launch = new() { Content = "Capture 38.00 startup", Margin = new Thickness(12, 0, 0, 0) };
      private readonly ComboBox captureDelay = new() { ItemsSource = new[] { 15, 30, 60, 120 }, SelectedItem = 30, Width = 100, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 6, 0, 12) };
      private readonly Button live = new() { Content = "Test 38.00 live bindings", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 12, 0, 0) };
-@@ -24,29 +25,62 @@
+@@ -24,29 +26,71 @@
      {
          this.exportLogs = exportLogs;
          this.logsDirectory = logsDirectory;
 -        Title = "Emilyfn — Capture game memory"; Width = 820; Height = 740;
 +        Title = "Emilyfn — Game diagnostics"; Width = 820; Height = 740;
          WindowStartupLocation = WindowStartupLocation.CenterOwner;
++        var background = new SolidColorBrush(Color.FromRgb(0x0D, 0x11, 0x1C));
++        Background = background;
++        foreach (var combo in new[] { targets, captureDelay })
++        {
++            combo.Background = Brushes.White; combo.Foreground = Brushes.Black;
++            var text = new Style(typeof(TextBlock));
++            text.Setters.Add(new Setter(TextBlock.ForegroundProperty, Brushes.Black));
++            combo.Resources[typeof(TextBlock)] = text;
++        }
          var panel = new StackPanel { Margin = new Thickness(24) };
 -        panel.Children.Add(new TextBlock { Text = "Select the running game to capture", FontSize = 20 });
 -        panel.Children.Add(new TextBlock { Text = "Keep Fortnite open at the lobby or stuck screen. This saves full game memory locally and may take several GB. Memory can contain session credentials; keep the files private. Nothing is uploaded automatically.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
@@ -79,9 +96,10 @@ diff --git a/launcher/Emilyfn.App/MemoryCaptureWindow.cs b/launcher/Emilyfn.App/
 -        panel.Children.Add(new TextBlock { Text = "Loads the diagnostic DLL into the selected game to test a GameThread callback. Calls GetOwner once only when the matching default component and bindings validate. Saves a small dispatch-test.json with the game-thread callback stack; no full memory dump is needed.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
 -        panel.Children.Add(status);
 -        panel.Children.Add(new TextBlock { Text = "Startup capture saves memory at the initial Windows loader breakpoint, observes startup, then attempts a later capture if it stays open. Early memory may lack SDK objects. It does not enable gameplay or remove Epic/EAC startup requirements. Keep the complete game installation in place.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
+-        Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
 +        buttons.Children.Add(capture); buttons.Children.Add(launch); panel.Children.Add(buttons);
 +        panel.Children.Add(new TextBlock { Text = "Startup capture saves memory before engine initialization, observes startup, then attempts a later capture if it stays open. It uses the same diagnostic startup option and does not enable gameplay.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
-         Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
++        Content = new ScrollViewer { Content = panel, Background = background, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
 +        diagnosticLaunch.Click += async (_, _) => await LaunchDiagnostic();
          dispatch.Click += async (_, _) => await DispatchTest();
          live.Click += async (_, _) => await LiveTest();
@@ -119,7 +137,7 @@ diff --git a/launcher/Emilyfn.App/MemoryCaptureWindow.cs b/launcher/Emilyfn.App/
      }
      private void Refresh()
      {
-@@ -66,7 +100,7 @@
+@@ -66,7 +110,7 @@
          var output = new OpenFolderDialog { Title = "Choose space for startup memory captures" };
          if (output.ShowDialog(this) != true) return;
          var folder = System.IO.Path.Combine(output.FolderName, "Emilyfn-startup-" + Guid.NewGuid().ToString("N"));
@@ -128,7 +146,7 @@ diff --git a/launcher/Emilyfn.App/MemoryCaptureWindow.cs b/launcher/Emilyfn.App/
          status.Text = "Checking the 38.00 executable…";
          try
          {
-@@ -80,14 +114,14 @@
+@@ -80,14 +124,14 @@
  
          }
          catch (Exception error) { status.Text = error.Message; }
@@ -145,7 +163,7 @@ diff --git a/launcher/Emilyfn.App/MemoryCaptureWindow.cs b/launcher/Emilyfn.App/
          try
          {
              var result = await LiveBindingProbe38.RunAsync(target, dialog.FolderName, new Progress<string>(s => status.Text = s));
-@@ -95,14 +129,14 @@
+@@ -95,14 +139,14 @@
              try { Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { System.IO.Path.GetDirectoryName(result.File)! } }); } catch { }
          }
          catch (Exception error) { status.Text = error.Message; }
@@ -162,7 +180,7 @@ diff --git a/launcher/Emilyfn.App/MemoryCaptureWindow.cs b/launcher/Emilyfn.App/
          try
          {
              var result = await GameThreadProbe38.RunAsync(target, dialog.FolderName, new Progress<string>(s => status.Text = s));
-@@ -110,14 +144,14 @@
+@@ -110,14 +154,14 @@
              try { Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { System.IO.Path.GetDirectoryName(result.File)! } }); } catch { }
          }
          catch (Exception error) { status.Text = error.Message; }
@@ -179,7 +197,7 @@ diff --git a/launcher/Emilyfn.App/MemoryCaptureWindow.cs b/launcher/Emilyfn.App/
          try
          {
              var folder = await GameMemoryCapture.CaptureAsync(target, dialog.FolderName, new Progress<string>(s => status.Text = s));
-@@ -129,6 +163,6 @@
+@@ -129,6 +173,6 @@
              catch { /* Saved files remain usable if Explorer is unavailable. */ }
          }
          catch (Exception error) { status.Text = error.Message; }
