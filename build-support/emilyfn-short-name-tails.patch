@@ -1,0 +1,97 @@
+diff --git a/launcher/Emilyfn.Core/NamePool38.cs b/launcher/Emilyfn.Core/NamePool38.cs
+--- a/launcher/Emilyfn.Core/NamePool38.cs
++++ b/launcher/Emilyfn.Core/NamePool38.cs
+@@ -52,6 +52,13 @@
+             for (int offset = 0; offset < data.Length;)
+             {
+                 ushort h = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(offset));
++                int length = (h >> 6) ^ 0x26f;
++                int size = length == 0 ? 10 : (2 + length * ((h & 1) != 0 ? 2 : 1) + 1) & ~1;
++                // AllocateNewBlock cannot write its ten-byte marker into a
++                // shorter remainder. Only a closed block's non-fitting tail is
++                // ignored; a valid small entry that fits must still be decoded.
++                int remaining = data.Length - offset;
++                if (block < blocks.Count - 1 && remaining < 10 && size > remaining) break;
+                 if (h == 0)
+                 {
+                     // Some numbered allocations include two bytes of alignment padding.
+@@ -62,7 +69,6 @@
+                     throw new InvalidDataException($"Unknown name padding: block {block}, offset {offset:X}.");
+                 }
+                 uint index = ((uint)block << 16) | ((uint)offset / 2);
+-                int length = (h >> 6) ^ 0x26f;
+                 if (length == 0)
+                 {
+                     if (offset + 10 > data.Length) throw new InvalidDataException($"Numbered name crosses block boundary: block={block}, offset=0x{offset:X}, available={data.Length-offset}, required=10, blockBytes={data.Length}, currentBlock={block==blocks.Count-1}.");
+@@ -80,7 +86,6 @@
+                 }
+                 else
+                 {
+-                    int size = (2 + length * ((h & 1) != 0 ? 2 : 1) + 1) & ~1;
+                     if (offset + size > data.Length) throw new InvalidDataException($"Name crosses block boundary: block={block}, offset=0x{offset:X}, header=0x{h:X4}, characters={length}, wide={(h&1)!=0}, available={data.Length-offset}, required={size}, blockBytes={data.Length}, currentBlock={block==blocks.Count-1}.");
+                     plain.Add(index, DecodePlain(data.AsSpan(offset, size))); offset += size;
+                 }
+diff --git a/launcher/Emilyfn.SdkTests/Program.cs b/launcher/Emilyfn.SdkTests/Program.cs
+--- a/launcher/Emilyfn.SdkTests/Program.cs
++++ b/launcher/Emilyfn.SdkTests/Program.cs
+@@ -21,6 +21,7 @@
+ Console.WriteLine("SDK exporter checks passed: counts, C++ escaping, provenance and mixed-snapshot rejection.");
+ 
+ await NamePoolChecks.Run(root);
++ShortNameTailChecks.Run();
+ if (args.Length > 1)
+ {
+     var live = await CaptureNameExporter38.ExportAsync(args[1], root);
+diff --git a/launcher/Emilyfn.SdkTests/ShortNameTailChecks.cs b/launcher/Emilyfn.SdkTests/ShortNameTailChecks.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.SdkTests/ShortNameTailChecks.cs
+@@ -0,0 +1,48 @@
++using Emilyfn.Core;
++using System.Buffers.Binary;
++
++static class ShortNameTailChecks
++{
++    public static void Run()
++    {
++        var none=Convert.FromHexString("de9a5c39743b");
++        var obj=Convert.FromHexString("409a9bba3605879c");
++        byte[] Block(int remainder)
++        {
++            var block=new byte[131072];int end=block.Length-remainder,offset=0;
++            none.CopyTo(block,offset);offset+=none.Length;
++            while((end-offset)%none.Length!=0){obj.CopyTo(block,offset);offset+=obj.Length;}
++            while(offset<end){none.CopyTo(block,offset);offset+=none.Length;}
++            Array.Fill(block,(byte)0xa6,end,remainder);
++            return block;
++        }
++        void Reject(Action action)
++        {
++            try{action();}catch(InvalidDataException){return;}
++            throw new Exception("Truncated name data outside a closed short tail was accepted.");
++        }
++        foreach(int remaining in new[]{2,4,6,8})
++        {
++            var block=Block(remaining);int end=block.Length-remaining;
++            foreach(ushort header in new ushort[]{0xe45e,0x9bc0,0})
++            {
++                BinaryPrimitives.WriteUInt16LittleEndian(block.AsSpan(end),header);
++                var result=NamePool38.DecodeBlocks(new[]{block,obj});
++                if(result[^1].Index!=65536||result[^1].Name!="Object"||result.Any(n=>n.Index==(uint)end/2))
++                    throw new Exception("Unmarked short tail became a name or hid the following block.");
++                if(header!=0)Reject(()=>NamePool38.DecodeBlocks(new[]{block}));
++            }
++        }
++        foreach(int remaining in new[]{10,12,40})
++        {
++            var block=Block(remaining);
++            BinaryPrimitives.WriteUInt16LittleEndian(block.AsSpan(block.Length-remaining),0xe45e);
++            Reject(()=>NamePool38.DecodeBlocks(new[]{block,obj}));
++        }
++        // Small valid names are allowed to use the end of a block exactly.
++        var exact=Block(8);obj.CopyTo(exact,exact.Length-8);
++        var names=NamePool38.DecodeBlocks(new[]{exact,obj});
++        if(!names.Any(n=>n.Index==65532&&n.Name=="Object"))throw new Exception("Valid final short name was discarded.");
++        Console.WriteLine("Short name-tail checks passed: all even remainders below ten bytes, reported 0xE45E header, current-block rejection, larger-overflow rejection and exact-fit preservation.");
++    }
++}

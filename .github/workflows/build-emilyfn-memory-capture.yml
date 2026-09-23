@@ -18,7 +18,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for name in core ui tests downloads startup memory-capture sdk-export diagnostic-launch startup-capture name-decoding reflection-export live-probe function-metadata thread-dispatch runtime-registry startup-stack patcher-startup name-read-recovery name-block-terminator; do
+          for name in core ui tests downloads startup memory-capture sdk-export diagnostic-launch startup-capture name-decoding reflection-export live-probe function-metadata thread-dispatch runtime-registry startup-stack patcher-startup name-read-recovery name-block-terminator short-name-tails; do
             git show "HEAD:build-support/emilyfn-${name}.patch" > "emilyfn-${name}.patch"
             git apply --check "emilyfn-${name}.patch"
             git apply "emilyfn-${name}.patch"
