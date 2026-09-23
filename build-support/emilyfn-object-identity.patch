@@ -1,0 +1,217 @@
+diff --git a/launcher/Emilyfn.Core/CaptureReflectionExporter38.cs b/launcher/Emilyfn.Core/CaptureReflectionExporter38.cs
+--- a/launcher/Emilyfn.Core/CaptureReflectionExporter38.cs
++++ b/launcher/Emilyfn.Core/CaptureReflectionExporter38.cs
+@@ -10,12 +10,18 @@
+     public sealed record Owner(ulong Address,string Name,string Kind);
+     public sealed record Property(string Owner,string Name,string Type,uint Offset,uint ElementSize,uint ArrayDim);
+     public sealed record Rejection(string Owner,string Reason);
++    public sealed record IdentitySample(uint Slot,string Reason,uint? NameIndex,uint? ClassNameIndex,string? CoreName,string? CoreKind,string? VtableRva,string? FirstFunctionRva);
++    public sealed record IdentityDiagnostics(int DecodedNames,uint RegistrySlots,int RegistryEntries,int EmptyRegistrySlots,int RejectedRegistrySlots,
++        int ReadableObjects,int RejectedObjectHeaders,Dictionary<string,int> HeaderRejectionReasons,
++        Dictionary<string,uint[]> CoreNameIndices,Dictionary<string,int> CoreClassMatches,
++        List<RuntimeObjectRegistry38.Rejection> RegistryRejectionSamples,List<IdentitySample> HeaderSamples,List<IdentitySample> AcceptedHeaderSamples);
++    private static readonly string[] CoreNames={"Object","Class","Actor","Function"};
+     public sealed record Observation(List<Owner> Owners,List<Property> Properties,List<Rejection> Rejections,int ReadableObjects,int InvalidSlots,List<Owner> Candidates)
+     { public RuntimeObjectRegistry38.Observation? Registry { get; init; } }
+     private static readonly HashSet<string> Kinds = new(){"Class","ScriptStruct","Function","DelegateFunction","SparseDelegateFunction"};
+     public static ulong DecodeLink(ulong stored) => (stored & 1)!=0 ? (stored & ~1UL)^0x47dcc0173f15ec38UL : stored;
+     // Public for offline fixture validation; callers must validate the exact image profile first.
+-    public static Observation Inspect(Func<ulong,int,byte[]> read,ulong imageBase,IReadOnlyDictionary<uint,string> names)
++    public static Observation Inspect(Func<ulong,int,byte[]> read,ulong imageBase,IReadOnlyDictionary<uint,string> names,Action<IdentityDiagnostics>? identityReport=null)
+     {
+         uint D(ulong a)=>BinaryPrimitives.ReadUInt32LittleEndian(read(a,4));
+         ulong Q(ulong a)=>BinaryPrimitives.ReadUInt64LittleEndian(read(a,8));
+@@ -23,6 +29,22 @@
+         bool Image(ulong a)=>a>=imageBase && a-imageBase<0x18777000;
+         var registry=RuntimeObjectRegistry38.Inspect(read,imageBase);
+         var objects=new List<Owner>();var pointers=new HashSet<ulong>();int invalid=registry.Rejections.Count;
++        var reasons=new Dictionary<string,int>();var samples=new List<IdentitySample>();var acceptedSamples=new List<IdentitySample>();
++        void Record(uint slot,ulong address,string reason,bool rejected=true)
++        {
++            if(rejected)reasons[reason]=reasons.GetValueOrDefault(reason)+1;
++            var destination=rejected?samples:acceptedSamples;
++            if(identityReport is null||destination.Count>=12)return;
++            uint? nameId=null,classId=null;string? coreName=null,coreKind=null,vtRva=null,fnRva=null;
++            string? Core(uint id)=>names.TryGetValue(id,out var value)&&CoreNames.Contains(value)?value:null;
++            string? Rva(ulong value)=>Image(value)?$"0x{value-imageBase:X}":null;
++            // Independent bounded observations preserve useful fields even when a
++            // different header field failed. No raw pointers or arbitrary names.
++            try{nameId=NamePool38.DecodeIndex(D(checked(address+0x20)));coreName=Core(nameId.Value);}catch(Exception e) when(e is InvalidDataException or OverflowException){}
++            try{classId=NamePool38.DecodeIndex(D(checked(Q(checked(address+0x18))+0x20)));coreKind=Core(classId.Value);}catch(Exception e) when(e is InvalidDataException or OverflowException){}
++            try{ulong vt=Q(address);vtRva=Rva(vt);if(vtRva is not null)fnRva=Rva(Q(vt));}catch(Exception e) when(e is InvalidDataException or OverflowException){}
++            destination.Add(new(slot,reason,nameId,classId,coreName,coreKind,vtRva,fnRva));
++        }
+         foreach(var item in registry.Entries)
+         {
+             try
+@@ -34,11 +56,16 @@
+                 ulong klass=Q(checked(a+0x18));string kind=Name(D(checked(klass+0x20))),name=Name(D(checked(a+0x20)));
+                 if(!pointers.Add(a))throw new InvalidDataException("Duplicate object.");
+                 objects.Add(new(a,name,kind));
++                Record(item.Index,a,"Accepted object header.",false);
+             }
+-            catch(InvalidDataException){invalid++;}
+-            catch(OverflowException){invalid++;}
++            catch(InvalidDataException error){invalid++;Record(item.Index,item.Address,error.Message);}
++            catch(OverflowException){invalid++;Record(item.Index,item.Address,"Object header address overflow.");}
+         }
+-        foreach(string required in new[]{"Object","Class","Actor","Function"})
++        identityReport?.Invoke(new(names.Count,registry.Slots,registry.Entries.Count,registry.EmptySlots,registry.Rejections.Count,
++            objects.Count,invalid-registry.Rejections.Count,reasons,
++            CoreNames.ToDictionary(n=>n,n=>names.Where(p=>p.Value==n).Select(p=>p.Key).Take(16).ToArray()),
++            CoreNames.ToDictionary(n=>n,n=>objects.Count(o=>o.Kind=="Class"&&o.Name==n)),registry.Rejections.Take(12).ToList(),samples,acceptedSamples));
++        foreach(string required in CoreNames)
+             if(!objects.Any(o=>o.Kind=="Class" && o.Name==required))throw new InvalidDataException("Required core class missing: "+required);
+         var meta=objects.Single(o=>o.Kind=="Class" && o.Name=="Class");
+         if(Q(meta.Address+0x18)!=meta.Address)throw new InvalidDataException("Class self-reference check failed.");
+diff --git a/launcher/Emilyfn.Core/GameThreadProbe38.cs b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+--- a/launcher/Emilyfn.Core/GameThreadProbe38.cs
++++ b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+@@ -24,6 +24,7 @@
+         string file=Path.Combine(folder,"dispatch-test.json");string? failure=null;LiveBindingProbe38.Evidence? evidence=null;CallbackResult? callback=null;
+         string? imageHash=null;int? threadId=null;bool stable=false,alive=false;
+         EarlyStartupPatcher38.State? startupPatcher=null;
++        CaptureReflectionExporter38.IdentityDiagnostics? objectIdentity=null;
+         var readAttempts=new List<LiveReadRetry38.Attempt>();
+         try
+         {
+@@ -69,7 +70,7 @@
+             }
+             startupPatcher=EarlyStartupPatcher38.Inspect(Raw,imageBase);
+             byte[] Boundary()=>Raw(imageBase+NamePool38.PoolRva+8,8).Concat(RuntimeObjectRegistry38.ReadBoundary(Raw,imageBase)).ToArray();
+-            var inspected=LiveReadRetry38.Run(Boundary,()=>LiveBindingProbe38.InspectForDispatch(Read,imageBase),pages.Clear,readAttempts);
++            var inspected=LiveReadRetry38.Run(Boundary,()=>LiveBindingProbe38.InspectForDispatch(Read,imageBase,d=>objectIdentity=d),()=>{pages.Clear();objectIdentity=null;},readAttempts);
+             evidence=inspected.Evidence;stable=true;
+             if(!stable||evidence.Checks.Any(c=>!c.Passed))throw new InvalidDataException("Live bindings failed or changed during verification. Wait for the game to settle and retry.");
+             var threads=FindGameThreads(process);
+@@ -103,7 +104,7 @@
+         File.WriteAllText(file,JsonSerializer.Serialize(new{FormatVersion=2,Test="38.00 game-thread and guarded GetOwner dispatch",Utc=DateTime.UtcNow,ProcessId=target.Id,GameThreadId=threadId,
+             ExecutableSha256=imageHash,StableBoundaryCounters=stable,GameAliveAfterProbe=callback is null?(bool?)null:alive,GameThreadCallbackObserved=observed,EngineTaskTagVerified=false,
+             FunctionCallsAttempted=callback is null?(bool?)false:callback.FunctionCallsAttempted,ControlledGetOwnerPassed=callPassed,GameplayReady=false,
+-            Failure=failure,Message=message,StartupPatcher=startupPatcher,BindingReadAttempts=readAttempts,Evidence=evidence,Callback=callback,
++            Failure=failure,Message=message,StartupPatcher=startupPatcher,BindingReadAttempts=readAttempts,ObjectIdentity=objectIdentity,Evidence=evidence,Callback=callback,
+             Note="Thread identity uses a unique Windows GameThread description and matching process/thread IDs. GameFrameRvas records the callback-delivery stack, not a GetOwner execution trace. It may omit callers across native callback boundaries. This does not validate Unreal task tags or general gameplay dispatch. No arbitrary function is exposed."},new JsonSerializerOptions{WriteIndented=true}));
+         return new(file,message);
+     }
+diff --git a/launcher/Emilyfn.Core/LiveBindingProbe38.cs b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+--- a/launcher/Emilyfn.Core/LiveBindingProbe38.cs
++++ b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+@@ -13,9 +13,9 @@
+     public sealed record Evidence(List<Check> Checks,int Names,int Owners,int Properties,int InvalidObjectSlots,int RejectedChains,int Functions,int RejectedBindings,string DispatchTargetStatus,uint RegistrySlots,int EmptyRegistrySlots,int RejectedRegistrySlots,EarlyStartupPatcher38.State StartupPatcher);
+     public sealed record Result(string File,bool Passed,string Message);
+     public static Task<Evidence> InspectCaptureAsync(string dump) => Task.Run(() => CaptureNameExporter38.WithCapture(dump, view => Inspect(view.Read, view.ImageBase)));
+-    public static Evidence Inspect(Func<ulong,int,byte[]> read,ulong imageBase) => InspectForDispatch(read,imageBase).Evidence;
++    public static Evidence Inspect(Func<ulong,int,byte[]> read,ulong imageBase,Action<CaptureReflectionExporter38.IdentityDiagnostics>? identityReport=null) => InspectForDispatch(read,imageBase,identityReport).Evidence;
+     internal sealed record Inspection(Evidence Evidence,DispatchTarget38.Target? Target);
+-    internal static Inspection InspectForDispatch(Func<ulong,int,byte[]> read,ulong imageBase)
++    internal static Inspection InspectForDispatch(Func<ulong,int,byte[]> read,ulong imageBase,Action<CaptureReflectionExporter38.IdentityDiagnostics>? identityReport=null)
+     {
+         uint D(ulong a)=>BinaryPrimitives.ReadUInt32LittleEndian(read(a,4));
+         ulong Q(ulong a)=>BinaryPrimitives.ReadUInt64LittleEndian(read(a,8));
+@@ -29,7 +29,7 @@
+         var blocks=new List<byte[]>();
+         for(uint i=0;i<=block;i++)blocks.Add(read(Q(pool+16+i*8),(int)(i==block?cursor:131072)));
+         var names=NamePool38.DecodeBlocks(blocks).ToDictionary(n=>n.Index,n=>n.Name);
+-        var observed=CaptureReflectionExporter38.Inspect(read,imageBase,names);
++        var observed=CaptureReflectionExporter38.Inspect(read,imageBase,names,identityReport);
+         var bindings=CaptureFunctionMetadata38.Inspect(read,imageBase,observed);
+         string Name(ulong obj)=>names.TryGetValue(NamePool38.DecodeIndex(D(obj+32)),out var name)?name:throw new InvalidDataException("Object name unavailable.");
+         var registry=observed.Registry!;
+@@ -68,6 +68,7 @@
+         string file=Path.Combine(folder,"live-test.json");Evidence? evidence=null;string? failure=null;string? hash=null;bool stable=false;
+         var clock=Stopwatch.StartNew();
+         EarlyStartupPatcher38.State? startupPatcher=null;
++        CaptureReflectionExporter38.IdentityDiagnostics? objectIdentity=null;
+         var readAttempts=new List<LiveReadRetry38.Attempt>();
+         try
+         {
+@@ -116,7 +117,7 @@
+             progress?.Report("Testing live objects, properties and dispatch addresses…");
+             startupPatcher=EarlyStartupPatcher38.Inspect(Raw,imageBase);
+             byte[] Boundary()=>Raw(imageBase+NamePool38.PoolRva+8,8).Concat(RuntimeObjectRegistry38.ReadBoundary(Raw,imageBase)).ToArray();
+-            evidence=LiveReadRetry38.Run(Boundary,()=>Inspect(Read,imageBase),pages.Clear,readAttempts);
++            evidence=LiveReadRetry38.Run(Boundary,()=>Inspect(Read,imageBase,d=>objectIdentity=d),()=>{pages.Clear();objectIdentity=null;},readAttempts);
+             stable=!process.HasExited;
+             if(!stable)failure="Name pool or runtime object registry changed during the test. Retry after the game settles.";
+         }
+@@ -125,7 +126,7 @@
+         bool passed=failure is null && stable && evidence is not null && evidence.Checks.All(c=>c.Passed);
+         File.WriteAllText(file,JsonSerializer.Serialize(new{FormatVersion=1,Test="38.00 read-only live binding probe",Utc=DateTime.UtcNow,ProcessId=target.Id,
+             ExecutableSha256=hash,Passed=passed,StableBoundaryCounters=stable,FunctionCallsAttempted=false,GameplayReady=false,
+-            Note="Reads are not an atomic snapshot; unchanged counters do not guarantee every object stayed unchanged.",Failure=failure,StartupPatcher=startupPatcher,BindingReadAttempts=readAttempts,Evidence=evidence},new JsonSerializerOptions{WriteIndented=true}));
++            Note="Reads are not an atomic snapshot; unchanged counters do not guarantee every object stayed unchanged.",Failure=failure,StartupPatcher=startupPatcher,BindingReadAttempts=readAttempts,ObjectIdentity=objectIdentity,Evidence=evidence},new JsonSerializerOptions{WriteIndented=true}));
+         return new(file,passed,passed?"Read-only binding checks passed. Game function calls were not tested.":"Checks failed or were inconclusive; see live-test.json.");
+     }
+     [DllImport("kernel32.dll",SetLastError=true)]private static extern SafeProcessHandle OpenProcess(uint access,bool inherit,int pid);
+diff --git a/launcher/Emilyfn.Core/RuntimeObjectRegistry38.cs b/launcher/Emilyfn.Core/RuntimeObjectRegistry38.cs
+--- a/launcher/Emilyfn.Core/RuntimeObjectRegistry38.cs
++++ b/launcher/Emilyfn.Core/RuntimeObjectRegistry38.cs
+@@ -8,7 +8,7 @@
+     public const uint CountMask=0xff3b3ceb,IndexMask=0x753838ab;
+     public const ulong ChunksMask=0xffffffff40f0f3b4;
+     public sealed record Entry(uint Index,ulong Address);
+-    public sealed record Rejection(uint Index,string Reason);
++    public sealed record Rejection(uint Index,string Reason,uint? ObservedInternalIndex=null);
+     public sealed record Observation(uint Slots,int EmptySlots,List<Entry> Entries,List<Rejection> Rejections);
+     public static ulong DecodeObject(ulong packed,uint low)=>( (packed&0x3fff00000000UL)|(low^0xcc9e16dbu) )<<3;
+     public static byte[] ReadBoundary(Func<ulong,int,byte[]> read,ulong image) =>
+@@ -25,6 +25,7 @@
+         var entries=new List<Entry>();var rejected=new List<Rejection>();int empty=0;
+         for(uint i=0;i<count;i++)
+         {
++            uint? observedIndex=null;
+             try
+             {
+                 ulong chunk=BinaryPrimitives.ReadUInt64LittleEndian(pointers.AsSpan((int)(i>>16)*8,8));
+@@ -33,10 +34,11 @@
+                 ulong obj=DecodeObject(BinaryPrimitives.ReadUInt64LittleEndian(item),BinaryPrimitives.ReadUInt32LittleEndian(item.AsSpan(8)));
+                 if(obj==0){empty++;continue;}
+                 uint index=BinaryPrimitives.ReadUInt32LittleEndian(read(checked(obj+0x14),4))^IndexMask;
++                observedIndex=index;
+                 if(index!=i)throw new InvalidDataException("Object internal index does not match the registry slot.");
+                 entries.Add(new(i,obj));
+             }
+-            catch(InvalidDataException error){rejected.Add(new(i,error.Message));}
++            catch(InvalidDataException error){rejected.Add(new(i,error.Message,observedIndex));}
+             catch(OverflowException){rejected.Add(new(i,"Registry address overflow."));}
+         }
+         return new(count,empty,entries,rejected);
+diff --git a/launcher/Emilyfn.SdkTests/ReflectionChecks.cs b/launcher/Emilyfn.SdkTests/ReflectionChecks.cs
+--- a/launcher/Emilyfn.SdkTests/ReflectionChecks.cs
++++ b/launcher/Emilyfn.SdkTests/ReflectionChecks.cs
+@@ -43,10 +43,34 @@
+             catch(InvalidDataException){return;}
+             throw new Exception("Malformed property chain was accepted");
+         }
++        CaptureReflectionExporter38.IdentityDiagnostics? identity=null;
++        void MissingObject()
++        {
++            identity=null;
++            try{CaptureReflectionExporter38.Inspect(Read,image,names,d=>identity=d);}
++            catch(InvalidDataException error) when(error.Message=="Required core class missing: Object")
++            {if(identity is null)throw new Exception("Core lookup discarded partial identity evidence.");return;}
++            throw new Exception("Missing core object was accepted.");
++        }
++        // A bad virtual table must be distinguishable from registry membership failure.
++        Q(segments[objects+0x100],0,image+0x18778000);MissingObject();
++        if(identity!.RegistryEntries!=5||identity.ReadableObjects!=4||identity.RejectedObjectHeaders!=1||
++            identity.CoreClassMatches["Object"]!=0||identity.CoreNameIndices["Object"].Single()!=1||
++            identity.HeaderSamples.Single().CoreName!="Object"||identity.HeaderSamples.Single().VtableRva is not null)
++            throw new Exception("Header failure evidence is incomplete or exposes an outside-image pointer.");
++        Q(segments[objects+0x100],0,image+0x1000);
++        D(segments[objects+0x100],0x14,2^0x753838ab);MissingObject();
++        if(identity!.RejectedRegistrySlots!=1||identity.RejectedObjectHeaders!=0||identity.RegistryRejectionSamples.Single().Index!=1||
++            identity.RegistryRejectionSamples.Single().ObservedInternalIndex!=2)
++            throw new Exception("Registry failure lost the observed/expected slot indices.");
++        D(segments[objects+0x100],0x14,1^0x753838ab);
++        CaptureReflectionExporter38.Inspect(Read,image,names,d=>identity=d);
++        if(identity!.CoreClassMatches.Values.Any(n=>n!=1)||identity.AcceptedHeaderSamples.Count!=5||identity.HeaderSamples.Count!=0)
++            throw new Exception("Recovered core identities were not reported.");
+         Q(property,16,field);Refuse();Q(property,16,0);
+         Q(property,0x20,objects|1);Refuse();Q(property,0x20,(objects+0x400)|1);
+         D(property,0x60,0);Refuse();D(property,0x60,1);
+         Q(segments[objects],0x18,objects+0x100);Refuse();
+-        Console.WriteLine("Reflection checks passed: core identity, coverage, property decoding, cycles, ownership and bounds.");
++        Console.WriteLine("Reflection checks passed: core identity, partial failure evidence, registry/header distinction, coverage, property decoding, cycles, ownership and bounds.");
+     }
+ }
