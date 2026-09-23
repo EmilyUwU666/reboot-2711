@@ -1,0 +1,115 @@
+diff --git a/launcher/Emilyfn.Core/LiveBindingProbe38.cs b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+--- a/launcher/Emilyfn.Core/LiveBindingProbe38.cs
++++ b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+@@ -10,7 +10,7 @@
+ public static class LiveBindingProbe38
+ {
+     public sealed record Check(string Name,bool Passed,string Detail,bool RequiredForDispatch=true);
+-    public sealed record Evidence(List<Check> Checks,int Names,int Owners,int Properties,int InvalidObjectSlots,int RejectedChains,int Functions,int RejectedBindings,string DispatchTargetStatus,uint RegistrySlots,int EmptyRegistrySlots,int RejectedRegistrySlots,EarlyStartupPatcher38.State StartupPatcher, CaptureFunctionMetadata38.Diagnostics MetadataDiagnostics);
++    public sealed record Evidence(List<Check> Checks,int Names,int Owners,int Properties,int InvalidObjectSlots,int RejectedChains,int Functions,int RejectedBindings,string DispatchTargetStatus,uint RegistrySlots,int EmptyRegistrySlots,int RejectedRegistrySlots,EarlyStartupPatcher38.State StartupPatcher, CaptureFunctionMetadata38.Diagnostics MetadataDiagnostics,WorldReadiness38.Report WorldReadiness);
+     public sealed record Result(string File,bool Passed,string Message);
+     public static Task<Evidence> InspectCaptureAsync(string dump) => Task.Run(() => CaptureNameExporter38.WithCapture(dump, view => Inspect(view.Read, view.ImageBase)));
+     public static Evidence Inspect(Func<ulong,int,byte[]> read,ulong imageBase,Action<CaptureReflectionExporter38.IdentityDiagnostics>? identityReport=null) => InspectForDispatch(read,imageBase,identityReport).Evidence;
+@@ -66,7 +66,7 @@
+             checks[index]=checks[index] with {RequiredForDispatch=false,
+                 Detail=checks[index].Detail+" Unresolved native entries remain excluded; the exact GetOwner target passed independent validation."};
+         }
+-        return new(new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count,target.Reason,registry.Slots,registry.EmptySlots,registry.Rejections.Count,EarlyStartupPatcher38.Inspect(read,imageBase),CaptureFunctionMetadata38.Summarize(bindings)),target.Value);
++        return new(new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count,target.Reason,registry.Slots,registry.EmptySlots,registry.Rejections.Count,EarlyStartupPatcher38.Inspect(read,imageBase),CaptureFunctionMetadata38.Summarize(bindings),WorldReadiness38.Inspect(read,observed,bindings)),target.Value);
+     }
+     internal static bool CanScopeUnboundMetadata(CaptureFunctionMetadata38.Observation metadata,bool exactTargetValidated) =>
+         exactTargetValidated && metadata.Functions.Count>0 && metadata.Rejections.Count>0 &&
+diff --git a/launcher/Emilyfn.Core/WorldReadiness38.cs b/launcher/Emilyfn.Core/WorldReadiness38.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.Core/WorldReadiness38.cs
+@@ -0,0 +1,51 @@
++using System.Buffers.Binary;
++namespace Emilyfn.Core;
++
++// Inventory only. Does not traverse unverified superclass layouts or invoke game code.
++public static class WorldReadiness38
++{
++    public sealed record ClassInventory(string ClassName,int ClassMatches,int ExactInstances,
++        int DefaultObjects,List<uint> InstanceSlots,int OmittedInstances,
++        List<CaptureReflectionExporter38.Property> DeclaredProperties,
++        List<CaptureFunctionMetadata38.Function> DeclaredFunctions,int OmittedFunctions);
++    public sealed record Report(bool GameplayReady,string Scope,int UnreadableHeaders,List<ClassInventory> Classes);
++    private static readonly string[] Targets = {
++        "/Script/Engine.World", "/Script/Engine.GameInstance", "/Script/FortniteGame.FortGameInstance",
++        "/Script/Engine.Engine", "/Script/FortniteGame.FortEngine",
++        "/Script/Engine.NetDriver", "/Script/OnlineSubsystemUtils.IpNetDriver",
++        "/Script/FortniteGame.FortGameModeAthena", "/Script/FortniteGame.FortGameStateAthena"
++    };
++    private static readonly HashSet<string> Fields = new(StringComparer.Ordinal) {
++        "PersistentLevel", "OwningGameInstance", "AuthorityGameMode", "GameState", "NetDriver",
++        "GameViewport", "LocalPlayers", "World", "ServerConnection", "ClientConnections"
++    };
++    public static Report Inspect(Func<ulong,int,byte[]> read,CaptureReflectionExporter38.Observation reflection,
++        CaptureFunctionMetadata38.Observation metadata)
++    {
++        var classes=Targets.ToDictionary(n=>n,n=>reflection.Candidates.Where(c=>c.Kind=="Class"&&c.Name==n).ToList());
++        var byAddress=classes.Where(c=>c.Value.Count==1).ToDictionary(c=>c.Value[0].Address,c=>c.Key);
++        var instances=Targets.ToDictionary(n=>n,_=>new List<uint>());
++        var defaults=Targets.ToDictionary(n=>n,_=>0); int unreadable=0;
++        foreach(var entry in reflection.Registry?.Entries ?? new List<RuntimeObjectRegistry38.Entry>())
++        {
++            try
++            {
++                ulong klass=BinaryPrimitives.ReadUInt64LittleEndian(read(checked(entry.Address+0x18),8));
++                if(!byAddress.TryGetValue(klass,out var name))continue;
++                uint flags=BinaryPrimitives.ReadUInt32LittleEndian(read(checked(entry.Address+0x10),4));
++                if((flags&0x10)!=0)defaults[name]++;
++                else instances[name].Add(entry.Index);
++            }
++            catch(Exception e) when(e is InvalidDataException or OverflowException){unreadable++;}
++        }
++        var result=new List<ClassInventory>();
++        foreach(var name in Targets)
++        {
++            var functions=metadata.Functions.Where(f=>f.Owner.StartsWith(name+".",StringComparison.Ordinal)).ToList();
++            result.Add(new(name,classes[name].Count,instances[name].Count,defaults[name],instances[name].Take(16).ToList(),
++                Math.Max(0,instances[name].Count-16),reflection.Properties.Where(p=>p.Owner==name&&Fields.Contains(p.Name)).ToList(),
++                functions.Take(48).ToList(),Math.Max(0,functions.Count-48)));
++        }
++        return new(false,"Read-only exact-class inventory; derived classes are not counted. Instances may be inactive or pending destruction. Presence does not prove a playable world, active net driver or server readiness. No object pointers are exported and no world functions are called.",unreadable,result);
++    }
++}
+diff --git a/launcher/Emilyfn.SdkTests/Program.cs b/launcher/Emilyfn.SdkTests/Program.cs
+--- a/launcher/Emilyfn.SdkTests/Program.cs
++++ b/launcher/Emilyfn.SdkTests/Program.cs
+@@ -51,3 +51,5 @@
+ }
+ 
+ BoundedReadCacheChecks.Run();
++
++WorldReadinessChecks.Run();
+diff --git a/launcher/Emilyfn.SdkTests/WorldReadinessChecks.cs b/launcher/Emilyfn.SdkTests/WorldReadinessChecks.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.SdkTests/WorldReadinessChecks.cs
+@@ -0,0 +1,24 @@
++using Emilyfn.Core;
++static class WorldReadinessChecks
++{
++    public static void Run()
++    {
++        const string name="/Script/Engine.World";
++        var reflection=new CaptureReflectionExporter38.Observation(new(),new(){new(name,"PersistentLevel","ObjectProperty",0x80,8,1)},new(),0,0,
++            new(){new(0x1000,name,"Class")}) { Registry=new(21,0,Enumerable.Range(0,21).Select(i=>new RuntimeObjectRegistry38.Entry((uint)i,0x2000UL+(ulong)i*0x100)).ToList(),new()) };
++        byte[] Read(ulong a,int n) {
++            if(n==8)return BitConverter.GetBytes(0x1000UL);
++            return BitConverter.GetBytes(a==0x2010?0x10u:0u);
++        }
++        var result=WorldReadiness38.Inspect(Read,reflection,new(new(),new(),new()));
++        var world=result.Classes.Single(c=>c.ClassName==name);
++        if(result.GameplayReady||world.ExactInstances!=20||world.DefaultObjects!=1||world.InstanceSlots.Count!=16||world.OmittedInstances!=4||world.DeclaredProperties.Count!=1)
++            throw new Exception("World inventory counts/default exclusion/bounds differ");
++        var ambiguous=reflection with { Candidates=new(){new(0x1000,name,"Class"),new(0x1100,name,"Class")} };
++        if(WorldReadiness38.Inspect(Read,ambiguous,new(new(),new(),new())).Classes.Single(c=>c.ClassName==name).ExactInstances!=0)
++            throw new Exception("Ambiguous world class selected");
++        var failed=WorldReadiness38.Inspect((a,n)=>throw new InvalidDataException(),reflection,new(new(),new(),new()));
++        if(failed.UnreadableHeaders!=21)throw new Exception("Unreadable world headers hidden");
++        Console.WriteLine("World inventory checks passed: exact classes, ambiguity, default exclusion, report bounds and read failures.");
++    }
++}
