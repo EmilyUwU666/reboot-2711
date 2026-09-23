@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/launcher/Emilyfn.Core/StartupCapture.cs
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,204 @@
 +using System.ComponentModel;
 +using System.Diagnostics;
 +using System.Runtime.InteropServices;
@@ -42,7 +42,7 @@
 +            if (ResumeThread(pi.thread) == uint.MaxValue) throw new Win32Exception(Marshal.GetLastWin32Error());
 +            resumed = true;
 +            progress?.Report("Waiting for the initial Windows loader breakpoint…");
-+            bool attached = true;
++            
 +            try
 +            {
 +                var loaderClock = Stopwatch.StartNew(); bool finished = false;
@@ -59,12 +59,7 @@
 +                    {
 +                        if (ev.code == 3 || ev.code == 6)
 +                            if (ev.file != IntPtr.Zero && ev.file != new IntPtr(-1)) CloseHandle(ev.file);
-+                        if (ev.code == 2 && ev.file != pi.thread) CloseHandle(ev.file);
-+                        if (ev.code == 3)
-+                        {
-+                            if (ev.debugProcess != pi.process) CloseHandle(ev.debugProcess);
-+                            if (ev.debugThread != pi.thread) CloseHandle(ev.debugThread);
-+                        }
++                        // Windows owns debug-event process/thread handles; close only image-file handles here.
 +                        if (ev.code == 1 && ev.exceptionCode == 0x80000003)
 +                        {
 +                            disposition = 0x10002; finished = true;
@@ -83,7 +78,7 @@
 +            }
 +            finally
 +            {
-+                if (attached && !DebugActiveProcessStop(pi.pid) && WaitForSingleObject(pi.process, 0) != 0)
++                if (!DebugActiveProcessStop(pi.pid) && WaitForSingleObject(pi.process, 0) != 0)
 +                {
 +                    TerminateProcess(pi.process, 1);
 +                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not detach startup debugger; stopped its own diagnostic process.");
@@ -128,7 +123,7 @@
 +                Thread.Sleep(100);
 +            }
 +            if (exit is null) Log("Root still running when observation ended.");
-+            File.WriteAllText(Path.Combine(folder, "README.txt"), "early.dmp is captured at the initial Windows loader breakpoint before the game entry point. It may lack live objects and cannot by itself generate an SDK.\nA later Emilyfn-memory-* folder is included only if a second capture succeeded.\nstartup.log records process startup, observed descendants and exit. Sampling may miss short processes or handoffs to an existing launcher.\nKeep dumps private: memory can contain sensitive information. Nothing was uploaded.\n");
++            File.WriteAllText(Path.Combine(folder, "README.txt"), "early.dmp is captured at the initial Windows loader breakpoint before the game entry point. It may lack live objects and cannot by itself generate an SDK.\nA later Emilyfn-memory-* folder is included only if a second capture succeeded.\nstartup.log records process startup, observed descendants and exit. Sampling may miss short processes or handoffs to an existing launcher.\nA temporary Windows debugger is used for the early snapshot and can affect startup behavior.\nKeep dumps private: memory can contain sensitive information. Nothing was uploaded.\n");
 +            return new((int)pi.pid, folder, early, exit);
 +        }
 +        finally
@@ -264,7 +259,7 @@
          var buttons = new StackPanel { Orientation = Orientation.Horizontal };
          buttons.Children.Add(capture); buttons.Children.Add(refresh); buttons.Children.Add(launch); panel.Children.Add(buttons); panel.Children.Add(status);
 -        panel.Children.Add(new TextBlock { Text = "38.00 diagnostic launch starts your matching executable without gameplay DLLs. It does not enable gameplay or remove Epic/EAC startup requirements. Keep the complete game installation in place.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
-+        panel.Children.Add(new TextBlock { Text = "Startup capture saves early memory before the game runs, observes startup, then attempts a later capture if it stays open. Early memory may lack SDK objects. It does not enable gameplay or remove Epic/EAC startup requirements. Keep the complete game installation in place.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
++        panel.Children.Add(new TextBlock { Text = "Startup capture saves memory at the initial Windows loader breakpoint, observes startup, then attempts a later capture if it stays open. Early memory may lack SDK objects. It does not enable gameplay or remove Epic/EAC startup requirements. Keep the complete game installation in place.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
          Content = panel;
          launch.Click += async (_, _) => await Launch();
          refresh.Click += (_, _) => Refresh();
