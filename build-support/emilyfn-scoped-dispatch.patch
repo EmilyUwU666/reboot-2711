@@ -1,0 +1,68 @@
+diff --git a/launcher/Emilyfn.Core/GameThreadProbe38.cs b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+--- a/launcher/Emilyfn.Core/GameThreadProbe38.cs
++++ b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+@@ -58,7 +58,7 @@
+             byte[] Boundary()=>Raw(imageBase+NamePool38.PoolRva+8,8).Concat(RuntimeObjectRegistry38.ReadBoundary(Raw,imageBase)).ToArray();
+             var inspected=LiveReadRetry38.Run(Boundary,()=>LiveBindingProbe38.InspectForDispatch(Read,imageBase,d=>objectIdentity=d),()=>{cache.Clear();objectIdentity=null;},readAttempts);
+             evidence=inspected.Evidence;stable=true;
+-            if(!stable||evidence.Checks.Any(c=>!c.Passed))throw new InvalidDataException("Live binding checks failed: " + string.Join("; ", evidence.Checks.Where(c=>!c.Passed).Select(c=>c.Name+": "+c.Detail)));
++            if(!stable||evidence.Checks.Any(c=>c.RequiredForDispatch&&!c.Passed))throw new InvalidDataException("Live binding checks failed: " + string.Join("; ", evidence.Checks.Where(c=>c.RequiredForDispatch&&!c.Passed).Select(c=>c.Name+": "+c.Detail)));
+             var threads=FindGameThreads(process);
+             if(threads.Count!=1)throw new InvalidOperationException($"Expected one thread named GameThread; found {threads.Count}. No hook was installed.");
+             threadId=threads[0];
+diff --git a/launcher/Emilyfn.Core/LiveBindingProbe38.cs b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+--- a/launcher/Emilyfn.Core/LiveBindingProbe38.cs
++++ b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+@@ -9,7 +9,7 @@
+ 
+ public static class LiveBindingProbe38
+ {
+-    public sealed record Check(string Name,bool Passed,string Detail);
++    public sealed record Check(string Name,bool Passed,string Detail,bool RequiredForDispatch=true);
+     public sealed record Evidence(List<Check> Checks,int Names,int Owners,int Properties,int InvalidObjectSlots,int RejectedChains,int Functions,int RejectedBindings,string DispatchTargetStatus,uint RegistrySlots,int EmptyRegistrySlots,int RejectedRegistrySlots,EarlyStartupPatcher38.State StartupPatcher, CaptureFunctionMetadata38.Diagnostics MetadataDiagnostics);
+     public sealed record Result(string File,bool Passed,string Message);
+     public static Task<Evidence> InspectCaptureAsync(string dump) => Task.Run(() => CaptureNameExporter38.WithCapture(dump, view => Inspect(view.Read, view.ImageBase)));
+@@ -58,8 +58,23 @@
+                 $"Storage={found.StorageSize}, parameter bytes={found.ParameterBufferSize}, native entry RVA=0x{found.NativeEntryRva:X}."));
+         }
+         var target=DispatchTarget38.Find(read,imageBase,names,registry);
++        // Complete SDK coverage is reported separately from this one exact guarded call.
++        // Only unresolved native entries may be non-blocking, and only after target validation.
++        if(CanScopeUnboundMetadata(bindings,target.Value is not null))
++        {
++            int index=checks.FindIndex(c=>c.Name=="Function and storage metadata");
++            checks[index]=checks[index] with {RequiredForDispatch=false,
++                Detail=checks[index].Detail+" Unresolved native entries remain excluded; the exact GetOwner target passed independent validation."};
++        }
+         return new(new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count,target.Reason,registry.Slots,registry.EmptySlots,registry.Rejections.Count,EarlyStartupPatcher38.Inspect(read,imageBase),CaptureFunctionMetadata38.Summarize(bindings)),target.Value);
+     }
++    internal static bool CanScopeUnboundMetadata(CaptureFunctionMetadata38.Observation metadata,bool exactTargetValidated) =>
++        exactTargetValidated && metadata.Functions.Count>0 && metadata.Rejections.Count>0 &&
++        metadata.Rejections.All(r=>r.Reason=="Native function has no entry pointer." &&
++            r.StorageSize.HasValue && r.ParameterBufferSize.HasValue && r.ParameterBufferSize<=r.StorageSize &&
++            r.LargestPropertyEnd.HasValue && r.LargestPropertyEnd<=r.StorageSize &&
++            r.RawFlags.HasValue && (r.RawFlags.Value&0x400)!=0 && r.NativeEntryRva is null &&
++            !r.Owner.EndsWith(".ActorComponent.GetOwner",StringComparison.Ordinal));
+     public static Task<Result> RunAsync(CaptureTarget target,string destination,IProgress<string>? progress=null)=>Task.Run(()=>Run(target,destination,progress));
+     private static Result Run(CaptureTarget target,string destination,IProgress<string>? progress)
+     {
+diff --git a/launcher/Emilyfn.SdkTests/FunctionMetadataChecks.cs b/launcher/Emilyfn.SdkTests/FunctionMetadataChecks.cs
+--- a/launcher/Emilyfn.SdkTests/FunctionMetadataChecks.cs
++++ b/launcher/Emilyfn.SdkTests/FunctionMetadataChecks.cs
+@@ -72,6 +72,16 @@
+         D(function, 0x68, 0x1000001 ^ 0x1937f47b); Refuse("supported bounds"); D(function, 0x68, 8 ^ 0x1937f47b);
+         foreach (ulong bad in new[] { image - 1, image + 0x8000, image + 0x18777000 }) { Q(function, 0xe0, bad); Refuse("executable game sections"); }
+         Q(function, 0xe0, 0); Refuse("no entry pointer"); Q(function, 0xe0, image + 0x2000);
++        Q(function, 0xe0, 0);
++        var unbound=Inspect();
++        Check(LiveBindingProbe38.CanScopeUnboundMetadata(unbound,true), "Unrelated unbound entries blocked exact target");
++        Check(!LiveBindingProbe38.CanScopeUnboundMetadata(unbound,false), "Missing target allowed scoped dispatch");
++        var targetRejected=unbound with {Rejections=unbound.Rejections.Select(r=>r with {Owner="/Script/Engine.ActorComponent.GetOwner"}).ToList()};
++        Check(!LiveBindingProbe38.CanScopeUnboundMetadata(targetRejected,true), "Rejected target allowed dispatch");
++        Q(function, 0xe0, image+0x2000);
++        W(function, 0xbc, 9 ^ 0x8250);
++        Check(!LiveBindingProbe38.CanScopeUnboundMetadata(Inspect(),true), "Invalid parameter layout allowed dispatch");
++        W(function, 0xbc, 5 ^ 0x8250);
+         void RejectProfile()
+         {
+             try { Inspect(); } catch (InvalidDataException) { return; }
