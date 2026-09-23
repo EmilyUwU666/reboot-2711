@@ -1,0 +1,551 @@
+diff --git a/launcher/Emilyfn.App/MainWindow.xaml b/launcher/Emilyfn.App/MainWindow.xaml
+--- a/launcher/Emilyfn.App/MainWindow.xaml
++++ b/launcher/Emilyfn.App/MainWindow.xaml
+@@ -144,7 +144,7 @@
+             <Border Background="{StaticResource Panel}" CornerRadius="14" Padding="24" Margin="0,20,0,0"><StackPanel><TextBlock Text="Local backend" FontSize="21" FontWeight="SemiBold"/><TextBlock Text="Emilyfn starts its bundled backend, or uses a compatible one already running on port 3551." Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,10,0,18"/><Button Content="Start / check backend" HorizontalAlignment="Left" Click="Backend_Click"/></StackPanel></Border>
+             <TextBlock Text="Emilyfn 0.3.1 · Experimental Seasons 19–30 support.&#10;A successful launch does not yet guarantee a complete match on every build." Foreground="#76829D" TextWrapping="Wrap" Margin="3,23,0,0" FontSize="12"/>
+           </StackPanel>
+-          <Grid x:Name="LogsPage" Visibility="Collapsed"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions><StackPanel Orientation="Horizontal" Margin="0,0,0,18"><Button Content="Export diagnostic ZIP" Style="{StaticResource Accent}" Click="ExportLogs_Click"/><Button Content="SDK headers" Margin="12,0,0,0" Click="SdkHeaders_Click"/><Button Content="Capture game memory" Margin="12,0,0,0" Click="CaptureMemory_Click"/><Button Content="Open logs folder" Margin="12,0,0,0" Click="OpenLogs_Click"/></StackPanel><Border Grid.Row="1" Background="#090F19" CornerRadius="12" Padding="18" MinHeight="470"><TextBox Text="{Binding LogText, Mode=OneWay}" FontFamily="Consolas" FontSize="11" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Height="500" BorderThickness="0" Background="Transparent" Foreground="#B1C5D9"/></Border></Grid>
++          <Grid x:Name="LogsPage" Visibility="Collapsed"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions><StackPanel Orientation="Horizontal" Margin="0,0,0,18"><Button Content="Export diagnostic ZIP" Style="{StaticResource Accent}" Click="ExportLogs_Click"/><Button Content="SDK headers" Margin="12,0,0,0" Click="SdkHeaders_Click"/><Button Content="Game diagnostics" Margin="12,0,0,0" Click="CaptureMemory_Click"/><Button Content="Open logs folder" Margin="12,0,0,0" Click="OpenLogs_Click"/></StackPanel><Border Grid.Row="1" Background="#090F19" CornerRadius="12" Padding="18" MinHeight="470"><TextBox Text="{Binding LogText, Mode=OneWay}" FontFamily="Consolas" FontSize="11" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Height="500" BorderThickness="0" Background="Transparent" Foreground="#B1C5D9"/></Border></Grid>
+         </Grid>
+       </ScrollViewer>
+       <TextBlock Grid.Row="3" Text="Host and client use the same selected build. Closing Emilyfn stops the instances it started." Foreground="#63708C" FontSize="10" Margin="0,15,0,0"/>
+diff --git a/launcher/Emilyfn.App/MainWindow.xaml.cs b/launcher/Emilyfn.App/MainWindow.xaml.cs
+--- a/launcher/Emilyfn.App/MainWindow.xaml.cs
++++ b/launcher/Emilyfn.App/MainWindow.xaml.cs
+@@ -363,6 +363,20 @@
+             var output = page == "Play" ? file : Path.Combine(Path.GetDirectoryName(file)!, Path.GetFileNameWithoutExtension(file) + "-" + page + ".png");
+             using var stream = File.Create(output); encoder.Save(stream);
+         }
++        var diagnostics = new MemoryCaptureWindow(_ => Task.CompletedTask, engine.LogsRoot) { Owner = this };
++        try
++        {
++            diagnostics.Show();
++            Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
++            diagnostics.UpdateLayout();
++            var visual = (FrameworkElement)diagnostics.Content;
++            var bitmap = new RenderTargetBitmap((int)visual.ActualWidth, (int)visual.ActualHeight, 96, 96, PixelFormats.Pbgra32);
++            bitmap.Render(visual);
++            var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
++            using var stream = File.Create(Path.Combine(Path.GetDirectoryName(file)!, Path.GetFileNameWithoutExtension(file) + "-GameDiagnostics.png"));
++            encoder.Save(stream);
++        }
++        finally { diagnostics.Close(); }
+         Navigate("Play");
+     }
+ }
+diff --git a/launcher/Emilyfn.App/MemoryCaptureWindow.cs b/launcher/Emilyfn.App/MemoryCaptureWindow.cs
+--- a/launcher/Emilyfn.App/MemoryCaptureWindow.cs
++++ b/launcher/Emilyfn.App/MemoryCaptureWindow.cs
+@@ -14,6 +14,7 @@
+     private readonly Button refresh = new() { Content = "Refresh" };
+     private readonly Func<string, Task> exportLogs;
+     private readonly string logsDirectory;
++    private readonly Button diagnosticLaunch = new() { Content = "Launch 38.00 diagnostic", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 12, 0, 0) };
+     private readonly Button launch = new() { Content = "Capture 38.00 startup", Margin = new Thickness(12, 0, 0, 0) };
+     private readonly ComboBox captureDelay = new() { ItemsSource = new[] { 15, 30, 60, 120 }, SelectedItem = 30, Width = 100, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 6, 0, 12) };
+     private readonly Button live = new() { Content = "Test 38.00 live bindings", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 12, 0, 0) };
+@@ -24,29 +25,62 @@
+     {
+         this.exportLogs = exportLogs;
+         this.logsDirectory = logsDirectory;
+-        Title = "Emilyfn — Capture game memory"; Width = 820; Height = 740;
++        Title = "Emilyfn — Game diagnostics"; Width = 820; Height = 740;
+         WindowStartupLocation = WindowStartupLocation.CenterOwner;
+         var panel = new StackPanel { Margin = new Thickness(24) };
+-        panel.Children.Add(new TextBlock { Text = "Select the running game to capture", FontSize = 20 });
+-        panel.Children.Add(new TextBlock { Text = "Keep Fortnite open at the lobby or stuck screen. This saves full game memory locally and may take several GB. Memory can contain session credentials; keep the files private. Nothing is uploaded automatically.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
++        panel.Children.Add(new TextBlock { Text = "38.00 startup and live diagnostics", FontSize = 20 });
++        panel.Children.Add(diagnosticLaunch);
++        panel.Children.Add(new TextBlock { Text = "Starts the matching 38.00 build with its built-in SkipPatchCheck option. Saves a small launch report and selects the new game for testing below. No memory dump is created. Startup completion and gameplay remain unverified.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
++        panel.Children.Add(new TextBlock { Text = "Select the running client or host", Margin = new Thickness(0, 12, 0, 0) });
+         panel.Children.Add(targets);
+-        panel.Children.Add(new TextBlock { Text = "Startup: seconds to wait before the later snapshot" });
++        refresh.HorizontalAlignment = HorizontalAlignment.Left;
++        panel.Children.Add(refresh);
++        panel.Children.Add(live);
++        panel.Children.Add(new TextBlock { Text = "Reads the selected 38.00 process and saves a small live-test.json. It does not call game functions or create a memory dump.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
++        panel.Children.Add(dispatch);
++        panel.Children.Add(new TextBlock { Text = "Loads the diagnostic DLL to test a GameThread callback. Calls GetOwner once only when the matching default component and bindings validate. Saves a small dispatch-test.json with the callback stack and startup-patcher state.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
++        panel.Children.Add(status);
++        panel.Children.Add(new TextBlock { Text = "Full memory captures", FontSize = 18, Margin = new Thickness(0, 20, 0, 0) });
++        panel.Children.Add(new TextBlock { Text = "These captures may take several GB and contain session credentials. Keep them private. Nothing is uploaded automatically. Keep the complete game installation in place.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
++        panel.Children.Add(new TextBlock { Text = "Startup: seconds to wait before the later snapshot", Margin = new Thickness(0, 8, 0, 0) });
+         panel.Children.Add(captureDelay);
+         var buttons = new StackPanel { Orientation = Orientation.Horizontal };
+-        buttons.Children.Add(capture); buttons.Children.Add(refresh); buttons.Children.Add(launch); panel.Children.Add(buttons); panel.Children.Add(live);
+-        panel.Children.Add(new TextBlock { Text = "Live binding test reads the selected 38.00 process and saves a small live-test.json. It does not call game functions or create a memory dump.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
+-        panel.Children.Add(dispatch);
+-        panel.Children.Add(new TextBlock { Text = "Loads the diagnostic DLL into the selected game to test a GameThread callback. Calls GetOwner once only when the matching default component and bindings validate. Saves a small dispatch-test.json with the game-thread callback stack; no full memory dump is needed.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
+-        panel.Children.Add(status);
+-        panel.Children.Add(new TextBlock { Text = "Startup capture saves memory at the initial Windows loader breakpoint, observes startup, then attempts a later capture if it stays open. Early memory may lack SDK objects. It does not enable gameplay or remove Epic/EAC startup requirements. Keep the complete game installation in place.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
++        buttons.Children.Add(capture); buttons.Children.Add(launch); panel.Children.Add(buttons);
++        panel.Children.Add(new TextBlock { Text = "Startup capture saves memory before engine initialization, observes startup, then attempts a later capture if it stays open. It uses the same diagnostic startup option and does not enable gameplay.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
+         Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
++        diagnosticLaunch.Click += async (_, _) => await LaunchDiagnostic();
+         dispatch.Click += async (_, _) => await DispatchTest();
+         live.Click += async (_, _) => await LiveTest();
+         launch.Click += async (_, _) => await Launch();
+         refresh.Click += (_, _) => Refresh();
+         capture.Click += async (_, _) => await Capture();
+-        Closing += (_, e) => { if (busy) { e.Cancel = true; status.Text = "Please wait for the capture to finish before closing this window."; } };
++        Closing += (_, e) => { if (busy) { e.Cancel = true; status.Text = "Please wait for the current operation to finish before closing this window."; } };
+         Refresh();
++    }
++    private void SetBusy(bool value)
++    {
++        busy = value;
++        diagnosticLaunch.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = !value;
++        dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = !value && targets.Items.Count > 0;
++    }
++    private async Task LaunchDiagnostic()
++    {
++        var dialog = new OpenFileDialog { Title = "Select the matching 38.00 game executable", Filter = "Fortnite executable|FortniteClient-Win64-Shipping.exe", CheckFileExists = true };
++        if (dialog.ShowDialog(this) != true) return;
++        SetBusy(true); status.Text = "Checking the 38.00 executable…";
++        try
++        {
++            var result = await DiagnosticGameLaunch.StartWithoutCaptureAsync(dialog.FileName, logsDirectory, new Progress<string>(s => status.Text = s));
++            Refresh();
++            if (result.Target is CaptureTarget target)
++            {
++                targets.SelectedItem = targets.Items.OfType<CaptureTarget>().FirstOrDefault(t => t.Id == target.Id && t.StartedUtc == target.StartedUtc);
++                status.Text = $"Started PID {target.Id}. Wait about 30 seconds, then use Test 38.00 game-thread dispatch and send dispatch-test.json. Launch report: {result.Report}";
++            }
++            else status.Text = $"The game exited with code {result.ExitCode}. Launch report: {result.Report}. Use Capture 38.00 startup to trace an early exit.";
++        }
++        catch (Exception error) { status.Text = error.Message; }
++        finally { SetBusy(false); }
+     }
+     private void Refresh()
+     {
+@@ -66,7 +100,7 @@
+         var output = new OpenFolderDialog { Title = "Choose space for startup memory captures" };
+         if (output.ShowDialog(this) != true) return;
+         var folder = System.IO.Path.Combine(output.FolderName, "Emilyfn-startup-" + Guid.NewGuid().ToString("N"));
+-        busy = true; dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = false;
++        SetBusy(true);
+         status.Text = "Checking the 38.00 executable…";
+         try
+         {
+@@ -80,14 +114,14 @@
+ 
+         }
+         catch (Exception error) { status.Text = error.Message; }
+-        finally { busy = false; dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = true; }
++        finally { SetBusy(false); }
+     }
+     private async Task LiveTest()
+     {
+         if (targets.SelectedItem is not CaptureTarget target) { status.Text = "Select a game process first."; return; }
+         var dialog = new OpenFolderDialog { Title = "Choose where to save live-test.json" };
+         if (dialog.ShowDialog(this) != true) return;
+-        busy = true; dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = false;
++        SetBusy(true);
+         try
+         {
+             var result = await LiveBindingProbe38.RunAsync(target, dialog.FolderName, new Progress<string>(s => status.Text = s));
+@@ -95,14 +129,14 @@
+             try { Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { System.IO.Path.GetDirectoryName(result.File)! } }); } catch { }
+         }
+         catch (Exception error) { status.Text = error.Message; }
+-        finally { busy = false; dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = true; }
++        finally { SetBusy(false); }
+     }
+     private async Task DispatchTest()
+     {
+         if (targets.SelectedItem is not CaptureTarget target) { status.Text = "Select a game process first."; return; }
+         var dialog = new OpenFolderDialog { Title = "Choose where to save dispatch-test.json" };
+         if (dialog.ShowDialog(this) != true) return;
+-        busy = true; dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = false;
++        SetBusy(true);
+         try
+         {
+             var result = await GameThreadProbe38.RunAsync(target, dialog.FolderName, new Progress<string>(s => status.Text = s));
+@@ -110,14 +144,14 @@
+             try { Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { System.IO.Path.GetDirectoryName(result.File)! } }); } catch { }
+         }
+         catch (Exception error) { status.Text = error.Message; }
+-        finally { busy = false; dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = true; }
++        finally { SetBusy(false); }
+     }
+     private async Task Capture()
+     {
+         if (targets.SelectedItem is not CaptureTarget target) { status.Text = "Select a game process first."; return; }
+         var dialog = new OpenFolderDialog { Title = "Choose a folder with space for a full memory dump" };
+         if (dialog.ShowDialog(this) != true) return;
+-        busy = true; dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = false;
++        SetBusy(true);
+         try
+         {
+             var folder = await GameMemoryCapture.CaptureAsync(target, dialog.FolderName, new Progress<string>(s => status.Text = s));
+@@ -129,6 +163,6 @@
+             catch { /* Saved files remain usable if Explorer is unavailable. */ }
+         }
+         catch (Exception error) { status.Text = error.Message; }
+-        finally { busy = false; dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = true; }
++        finally { SetBusy(false); }
+     }
+ }
+diff --git a/launcher/Emilyfn.Core/DiagnosticGameLaunch.cs b/launcher/Emilyfn.Core/DiagnosticGameLaunch.cs
+--- a/launcher/Emilyfn.Core/DiagnosticGameLaunch.cs
++++ b/launcher/Emilyfn.Core/DiagnosticGameLaunch.cs
+@@ -1,39 +1,74 @@
+ using System.Diagnostics;
+ using System.Security.Cryptography;
++using System.Text.Json;
+ 
+ namespace Emilyfn.Core;
+ 
+ public static class DiagnosticGameLaunch
+ {
+-    // The exact uploaded 38.00 CL47722112 image. This is not a supported gameplay profile.
++    // Exact supplied CL47722112 image; this is still a diagnostic profile, not gameplay support.
+     public const string ImageSha256 = "f4ddac1044edd0e8cc123f586f7204de8724989b6adcf25b2e34b4855747a5c0";
++    public const string Profile = "38.00 CL47722112 diagnostic / SkipPatchCheck";
++    public sealed record LaunchResult(CaptureTarget? Target,string Report,int? ExitCode);
++    private sealed record Prepared(FileStream Image,ProcessStartInfo Start,string Log) : IDisposable
++    { public void Dispose()=>Image.Dispose(); }
++
+     public static async Task<StartupCapture.Result> StartAsync(string executable, string logsDirectory, string? captureFolder = null, IProgress<string>? progress = null, int laterCaptureDelaySeconds = 30)
++    {
++        using var launch=await PrepareAsync(executable,logsDirectory);
++        captureFolder ??= Path.Combine(logsDirectory,"startup-capture-"+Guid.NewGuid().ToString("N"));
++        return await StartupCapture.RunAsync(launch.Start,captureFolder,launch.Log+".startup.log",progress,laterCaptureDelaySeconds);
++    }
++
++    public static async Task<LaunchResult> StartWithoutCaptureAsync(string executable,string logsDirectory,IProgress<string>? progress=null)
++    {
++        using var launch=await PrepareAsync(executable,logsDirectory);
++        progress?.Report("Starting the 38.00 diagnostic profile with SkipPatchCheck…");
++        using var process=Process.Start(launch.Start) ?? throw new InvalidOperationException("Windows did not create the game process.");
++        int pid=process.Id;DateTime started=process.StartTime.ToUniversalTime();
++        await Task.Delay(1500);
++        process.Refresh();int? exit=process.HasExited?process.ExitCode:null;
++        var target=exit is null?new CaptureTarget(pid,started,launch.Start.FileName):null;
++        string report=launch.Log+".launch.json";
++        File.WriteAllText(report,JsonSerializer.Serialize(new {
++            FormatVersion=1,Profile,ExecutableSha256=ImageSha256,ProcessId=pid,StartedUtc=started,
++            ObservedUtc=DateTime.UtcNow,ExitCode=exit,SkipPatchCheckRequested=true,MemoryDumpRequested=false,
++            Note="The built-in switch skips applicable patch checks. It does not prove content completeness, startup completion, lobby access or gameplay compatibility."
++        },new JsonSerializerOptions{WriteIndented=true}));
++        return new(target,report,exit);
++    }
++
++    private static async Task<Prepared> PrepareAsync(string executable,string logsDirectory)
+     {
+         if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess)
+             throw new PlatformNotSupportedException("Diagnostic launch requires Windows x64.");
+-        executable = Path.GetFullPath(executable);
+-        if (!Path.GetFileName(executable).Equals("FortniteClient-Win64-Shipping.exe", StringComparison.OrdinalIgnoreCase))
++        executable=Path.GetFullPath(executable);
++        if (!Path.GetFileName(executable).Equals("FortniteClient-Win64-Shipping.exe",StringComparison.OrdinalIgnoreCase))
+             throw new ArgumentException("Select FortniteClient-Win64-Shipping.exe inside the complete 38.00 build's FortniteGame/Binaries/Win64 folder.");
+-        // Keep the verified file read-locked until CreateProcess returns.
+-        using var image = new FileStream(executable, FileMode.Open, FileAccess.Read, FileShare.Read);
+-        var hash = Convert.ToHexString(await SHA256.HashDataAsync(image)).ToLowerInvariant();
+-        if (hash != ImageSha256)
+-            throw new InvalidOperationException("This diagnostic path requires the exact uploaded 38.00 CL47722112 executable. The selected file has a different SHA-256. Gameplay support has not been enabled.");
+-        var binaryDirectory = Path.GetDirectoryName(executable)!;
+-        var gameDirectory = Directory.GetParent(binaryDirectory)?.Parent?.FullName;
+-        if (gameDirectory is null || !Directory.Exists(Path.Combine(gameDirectory, "Content", "Paks")))
+-            throw new DirectoryNotFoundException("This executable needs the complete matching game installation. FortniteGame/Content/Paks was not found.");
+-        Directory.CreateDirectory(logsDirectory);
+-        string log = Path.Combine(Path.GetFullPath(logsDirectory), $"diagnostic-38-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.log");
+-        var start = new ProcessStartInfo(executable) { UseShellExecute = false, WorkingDirectory = binaryDirectory };
+-        // Match the normal launcher's non-secret Epic startup metadata.
+-        foreach (var argument in new[] { "-EpicPortal", "-epicapp=Fortnite", "-epicenv=Prod", "-epiclocale=en-us" })
++        var image=new FileStream(executable,FileMode.Open,FileAccess.Read,FileShare.Read);
++        try
++        {
++            var hash=Convert.ToHexString(await SHA256.HashDataAsync(image)).ToLowerInvariant();
++            if(hash!=ImageSha256)
++                throw new InvalidOperationException("This diagnostic path requires the exact uploaded 38.00 CL47722112 executable. The selected file has a different SHA-256. Gameplay support has not been enabled.");
++            var binaryDirectory=Path.GetDirectoryName(executable)!;
++            var gameDirectory=Directory.GetParent(binaryDirectory)?.Parent?.FullName;
++            if(gameDirectory is null || !Directory.Exists(Path.Combine(gameDirectory,"Content","Paks")))
++                throw new DirectoryNotFoundException("This executable needs the complete matching game installation. FortniteGame/Content/Paks was not found.");
++            Directory.CreateDirectory(logsDirectory);
++            string log=Path.Combine(Path.GetFullPath(logsDirectory),$"diagnostic-38-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.log");
++            return new(image,CreateStartInfo(executable,log),log);
++        }
++        catch { image.Dispose();throw; }
++    }
++
++    internal static ProcessStartInfo CreateStartInfo(string executable,string log)
++    {
++        var start=new ProcessStartInfo(executable){UseShellExecute=false,WorkingDirectory=Path.GetDirectoryName(executable)!};
++        // SkipPatchCheck is parsed by the supplied executable; it is not a memory patch.
++        foreach(var argument in new[]{"-EpicPortal","-epicapp=Fortnite","-epicenv=Prod","-epiclocale=en-us","-SkipPatchCheck","-log","-FORCELOGFLUSH"})
+             start.ArgumentList.Add(argument);
+-        start.ArgumentList.Add("-log");
+-        start.ArgumentList.Add("-FORCELOGFLUSH");
+-        start.ArgumentList.Add("-abslog=" + log);
+-        // No auth/game DLL injection, companion processes, or changes to EAC or launcher requirements.
+-        captureFolder ??= Path.Combine(logsDirectory, "startup-capture-" + Guid.NewGuid().ToString("N"));
+-        return await StartupCapture.RunAsync(start, captureFolder, log + ".startup.log", progress, laterCaptureDelaySeconds);
++        start.ArgumentList.Add("-abslog="+log);
++        return start;
+     }
+ }
+diff --git a/launcher/Emilyfn.Core/EarlyStartupPatcher38.cs b/launcher/Emilyfn.Core/EarlyStartupPatcher38.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.Core/EarlyStartupPatcher38.cs
+@@ -0,0 +1,98 @@
++using System.Buffers.Binary;
++using System.Text;
++namespace Emilyfn.Core;
++
++// Read-only observation of the CL47722112 early startup screen. Never changes completion flags.
++public static class EarlyStartupPatcher38
++{
++    public sealed record State(bool ProfileMatched,bool Active,bool? PatchCompleted,bool? ScreenFinished,
++        bool? MinimumDisplayTimeElapsed,uint? RawPatchState,float? DownloadProgress,float? InstallProgress,float? CombinedProgress,
++        bool? SkipPatchCheckTokenObserved,string? Failure);
++    public static State Inspect(Func<ulong,int,byte[]> read,ulong image)
++    {
++        bool profile=false,active=false;bool? skip=null;
++        var source=read;
++        read=(address,length)=>
++        {
++            var bytes=source(address,length);
++            if(bytes.Length!=length)throw new InvalidDataException("Incomplete startup-state read.");
++            return bytes;
++        };
++        try
++        {
++            foreach(var a in Anchors)
++                if(!read(checked(image+a.Rva),a.Bytes.Length).AsSpan().SequenceEqual(a.Bytes))
++                    throw new InvalidDataException("Early startup instruction profile does not match.");
++            profile=true;
++            uint D(ulong a)=>BinaryPrimitives.ReadUInt32LittleEndian(read(a,4));
++            ulong Q(ulong a)=>BinaryPrimitives.ReadUInt64LittleEndian(read(a,8));
++            skip=ObserveSkipPatchCheck(read,image);
++            ulong screen=Q(image+0x16e1b900);
++            if(screen==0)return new(profile,false,null,null,null,null,null,null,null,skip,null);
++            ulong vt=Q(screen);
++            if(vt!=image+0x1543a2e0 || Q(vt+0x10)!=image+0x8b84524 || Q(vt+0x40)!=image+0x70f7664 || Q(vt+0x50)!=image+0x1a38c0)
++                return new(profile,false,null,null,null,null,null,null,null,skip,"The active screen is not the verified early startup patcher.");
++            active=true;
++            bool Flag(ulong offset)
++            {
++                byte value=read(checked(screen+offset),1)[0];
++                if(value>1)throw new InvalidDataException("Unexpected startup-screen boolean.");
++                return value==1;
++            }
++            float Progress(ulong offset)
++            {
++                float value=BitConverter.Int32BitsToSingle(unchecked((int)D(checked(screen+offset))));
++                if(!float.IsFinite(value)||value < -1 || value > 2)throw new InvalidDataException("Unexpected startup progress value.");
++                return value;
++            }
++            return new(profile,active,Flag(0x74),Flag(0x75),Flag(0x63),D(screen+0x1f8),Progress(0x188),Progress(0x18c),Progress(0x184),skip,null);
++        }
++        catch(Exception e) when(e is InvalidDataException or IOException or OverflowException or ArgumentException)
++        {return new(profile,active,null,null,null,null,null,null,null,skip,e.Message);}
++    }
++    private static bool? ObserveSkipPatchCheck(Func<ulong,int,byte[]> read,ulong image)
++    {
++        // Only report the switch's presence. Do not retain or export the command line.
++        // An unavailable command line must not discard otherwise readable patcher state.
++        try
++        {
++            if(read(image+0x16be4514,1)[0]!=1)return null;
++            var command=new List<byte>();
++            for(int offset=0;offset<16384;offset+=256)
++            {
++                var chunk=read(image+0x16be4520+(ulong)offset,256);
++                for(int i=0;i<chunk.Length;i+=2)
++                {
++                    if(chunk[i]==0&&chunk[i+1]==0)return HasSkipPatchCheck(Encoding.Unicode.GetString(command.ToArray()));
++                    command.Add(chunk[i]);command.Add(chunk[i+1]);
++                }
++            }
++        }
++        catch(Exception e) when(e is InvalidDataException or IOException or OverflowException or ArgumentException) { }
++        return null;
++    }
++    internal static bool HasSkipPatchCheck(string command)
++    {
++        // Respect quoted arguments so an unrelated argument value is not mistaken for a flag.
++        var token=new StringBuilder();bool quoted=false;
++        foreach(char c in command+' ')
++        {
++            if(c=='"'){quoted=!quoted;continue;}
++            if(char.IsWhiteSpace(c)&&!quoted)
++            {
++                if(token.ToString().Equals("-SkipPatchCheck",StringComparison.OrdinalIgnoreCase))return true;
++                token.Clear();
++            }
++            else token.Append(c);
++        }
++        return false;
++    }
++    private static readonly (ulong Rva,byte[] Bytes)[] Anchors={
++        (0x70f7664,Convert.FromHexString("8a4175c3")),
++        (0x1a38c0,Convert.FromHexString("b001c3")),
++        (0x201a7de,Convert.FromHexString("488b14014889151711e014")),
++        (0x201a9cc,Convert.FromHexString("488b074889f9ff504084c00f85370200004889f1e8e5003efeebe5")),
++        (0x5a5d6c,Convert.FromHexString("803da1e7631600")),
++        (0x5a5dd9,Convert.FromHexString("488d0540e76316"))
++    };
++}
+diff --git a/launcher/Emilyfn.Core/LiveBindingProbe38.cs b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+--- a/launcher/Emilyfn.Core/LiveBindingProbe38.cs
++++ b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+@@ -10,7 +10,7 @@
+ public static class LiveBindingProbe38
+ {
+     public sealed record Check(string Name,bool Passed,string Detail);
+-    public sealed record Evidence(List<Check> Checks,int Names,int Owners,int Properties,int InvalidObjectSlots,int RejectedChains,int Functions,int RejectedBindings,string DispatchTargetStatus,uint RegistrySlots,int EmptyRegistrySlots,int RejectedRegistrySlots);
++    public sealed record Evidence(List<Check> Checks,int Names,int Owners,int Properties,int InvalidObjectSlots,int RejectedChains,int Functions,int RejectedBindings,string DispatchTargetStatus,uint RegistrySlots,int EmptyRegistrySlots,int RejectedRegistrySlots,EarlyStartupPatcher38.State StartupPatcher);
+     public sealed record Result(string File,bool Passed,string Message);
+     public static Task<Evidence> InspectCaptureAsync(string dump) => Task.Run(() => CaptureNameExporter38.WithCapture(dump, view => Inspect(view.Read, view.ImageBase)));
+     public static Evidence Inspect(Func<ulong,int,byte[]> read,ulong imageBase) => InspectForDispatch(read,imageBase).Evidence;
+@@ -57,7 +57,7 @@
+                 $"Storage={found.StorageSize}, parameter bytes={found.ParameterBufferSize}, native entry RVA=0x{found.NativeEntryRva:X}."));
+         }
+         var target=DispatchTarget38.Find(read,imageBase,names,registry);
+-        return new(new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count,target.Reason,registry.Slots,registry.EmptySlots,registry.Rejections.Count),target.Value);
++        return new(new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count,target.Reason,registry.Slots,registry.EmptySlots,registry.Rejections.Count,EarlyStartupPatcher38.Inspect(read,imageBase)),target.Value);
+     }
+     public static Task<Result> RunAsync(CaptureTarget target,string destination,IProgress<string>? progress=null)=>Task.Run(()=>Run(target,destination,progress));
+     private static Result Run(CaptureTarget target,string destination,IProgress<string>? progress)
+diff --git a/launcher/Emilyfn.SdkTests/EarlyStartupPatcherChecks.cs b/launcher/Emilyfn.SdkTests/EarlyStartupPatcherChecks.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.SdkTests/EarlyStartupPatcherChecks.cs
+@@ -0,0 +1,61 @@
++using Emilyfn.Core;
++using System.Buffers.Binary;
++using System.Text;
++
++static class EarlyStartupPatcherChecks
++{
++    public static void Run()
++    {
++        const ulong image=0x140000000,screen=0x200000000,vt=image+0x1543a2e0;
++        var memory=new SortedDictionary<ulong,byte[]>();
++        byte[] Alloc(ulong a,int n){var b=new byte[n];memory.Add(a,b);return b;}
++        void Q(byte[] b,int o,ulong v)=>BinaryPrimitives.WriteUInt64LittleEndian(b.AsSpan(o),v);
++        void D(byte[] b,int o,uint v)=>BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(o),v);
++        void F(byte[] b,int o,float v)=>D(b,o,unchecked((uint)BitConverter.SingleToInt32Bits(v)));
++        foreach(var (rva,hex) in new (ulong,string)[]{
++            (0x70f7664,"8a4175c3"),(0x1a38c0,"b001c3"),(0x201a7de,"488b14014889151711e014"),
++            (0x201a9cc,"488b074889f9ff504084c00f85370200004889f1e8e5003efeebe5"),
++            (0x5a5d6c,"803da1e7631600"),(0x5a5dd9,"488d0540e76316")})memory.Add(image+rva,Convert.FromHexString(hex));
++        var initialized=Alloc(image+0x16be4514,1);initialized[0]=1;
++        var command=Alloc(image+0x16be4520,16384);
++        void Command(string text){Array.Clear(command);Encoding.Unicode.GetBytes(text).CopyTo(command,0);}
++        Command("-EpicPortal -abslog=\"C:\\logs with spaces\\test.log\" -sKiPpAtChChEcK");
++        var global=Alloc(image+0x16e1b900,8);Q(global,0,screen);
++        var vtable=Alloc(vt,0x58);Q(vtable,0x10,image+0x8b84524);Q(vtable,0x40,image+0x70f7664);Q(vtable,0x50,image+0x1a38c0);
++        var state=Alloc(screen,0x200);Q(state,0,vt);state[0x63]=1;D(state,0x1f8,2);
++        F(state,0x188,0.25f);F(state,0x18c,0.5f);F(state,0x184,0.375f);
++        byte[] Read(ulong a,int n)
++        {
++            foreach(var p in memory)if(a>=p.Key&&a-p.Key<=(ulong)p.Value.Length&&(ulong)n<=(ulong)p.Value.Length-(a-p.Key))
++                return p.Value.AsSpan((int)(a-p.Key),n).ToArray();
++            throw new InvalidDataException("Fixture memory unavailable.");
++        }
++        EarlyStartupPatcher38.State Inspect()=>EarlyStartupPatcher38.Inspect(Read,image);
++        var found=Inspect();
++        if(!found.ProfileMatched||!found.Active||found.Failure is not null||found.SkipPatchCheckTokenObserved!=true||
++            found.PatchCompleted!=false||found.ScreenFinished!=false||found.MinimumDisplayTimeElapsed!=true||
++            found.RawPatchState!=2||found.DownloadProgress!=0.25f||found.InstallProgress!=0.5f||found.CombinedProgress!=0.375f)
++            throw new Exception("Patcher observation did not preserve the independent state fields.");
++        foreach(var text in new[]{"-NoSkipPatchCheck","-SkipPatchCheckExtra","-abslog=\"C:\\log -SkipPatchCheck more.log\"","-AUTH_PASSWORD=\"secret -SkipPatchCheck secret\""})
++        {Command(text);if(Inspect().SkipPatchCheckTokenObserved!=false)throw new Exception("An unrelated argument became a startup switch.");}
++        initialized[0]=0;
++        if(Inspect().SkipPatchCheckTokenObserved is not null)throw new Exception("An uninitialized command line became a negative observation.");
++        initialized[0]=1;Array.Fill(command,(byte)0x20);
++        if(Inspect().SkipPatchCheckTokenObserved is not null)throw new Exception("An unterminated command line was trusted.");
++        memory.Remove(image+0x16be4520);
++        found=Inspect();
++        if(found.SkipPatchCheckTokenObserved is not null||!found.Active||found.Failure is not null)throw new Exception("Unreadable command line discarded valid patcher state.");
++        Q(global,0,0);found=Inspect();
++        if(!found.ProfileMatched||found.Active||found.PatchCompleted is not null||found.Failure is not null)throw new Exception("No active screen was reported as completed.");
++        Q(global,0,screen);Q(vtable,0x40,image+0x70f7665);
++        if(Inspect().Active||Inspect().Failure is null)throw new Exception("A different virtual layout was accepted.");
++        Q(vtable,0x40,image+0x70f7664);state[0x74]=2;
++        if(Inspect().Failure is null)throw new Exception("Invalid boolean accepted.");
++        state[0x74]=0;F(state,0x188,float.NaN);
++        if(Inspect().Failure is null)throw new Exception("Non-finite progress accepted.");
++        F(state,0x188,0);memory[image+0x201a9cc][0]^=1;
++        found=Inspect();
++        if(found.ProfileMatched||found.Active||found.Failure is null)throw new Exception("Unverified startup instruction profile accepted.");
++        Console.WriteLine("Early startup checks passed: state fields, command-line privacy/token boundaries, unavailable data, inactive/different screens and malformed-state rejection.");
++    }
++}
+diff --git a/launcher/Emilyfn.SdkTests/Program.cs b/launcher/Emilyfn.SdkTests/Program.cs
+--- a/launcher/Emilyfn.SdkTests/Program.cs
++++ b/launcher/Emilyfn.SdkTests/Program.cs
+@@ -37,10 +37,13 @@
+ ReflectionChecks.Run();
+ FunctionMetadataChecks.Run(root);
+ DispatchTargetChecks.Run();
++EarlyStartupPatcherChecks.Run();
+ 
+ if (args.Length > 1)
+ {
+     var evidence = await LiveBindingProbe38.InspectCaptureAsync(args[1]);
+     Console.WriteLine(JsonSerializer.Serialize(evidence, new JsonSerializerOptions { WriteIndented = true }));
+     if (evidence.Checks.Any(c => !c.Passed)) throw new Exception("Capture binding checks failed");
++    if (!evidence.StartupPatcher.ProfileMatched || evidence.StartupPatcher.Failure is not null)
++        throw new Exception("Capture startup-patcher profile failed");
+ }
+diff --git a/launcher/Emilyfn.ThreadProbeTests/Program.cs b/launcher/Emilyfn.ThreadProbeTests/Program.cs
+--- a/launcher/Emilyfn.ThreadProbeTests/Program.cs
++++ b/launcher/Emilyfn.ThreadProbeTests/Program.cs
+@@ -47,6 +47,11 @@
+     using var json=JsonDocument.Parse(File.ReadAllText(gate.File));
+     Check(!json.RootElement.GetProperty("FunctionCallsAttempted").GetBoolean(),"Unverified executable attempted a call");
+     Check(json.RootElement.GetProperty("Failure").GetString()!.Contains("exact 38.00"),"Exact-image gate missing");
++    rejected=false;
++    try{await DiagnosticGameLaunch.StartWithoutCaptureAsync(exe,root);}
++    catch(InvalidOperationException error) when(error.Message.Contains("different SHA-256")){rejected=true;}
++    Check(rejected,"New diagnostic launch accepted a different executable");
++    Check(!Directory.EnumerateFiles(root,"*.launch.json").Any(),"Rejected image produced a successful launch report");
+     Check(!child.Process.HasExited,"Probe terminated fixture");
+     Console.WriteLine($"THREAD PROBE: {checks} checks passed; native callback ran in synthetic GameThread, no game functions called.");
+ }
+diff --git a/launcher/README.md b/launcher/README.md
+--- a/launcher/README.md
++++ b/launcher/README.md
+@@ -53,7 +53,34 @@
+ does not expose the class or asset information needed to implement those modes.
+ See `30.40-ANALYSIS.md` for the inspected file and remaining requirements.
+ 
+-## Data
++## 38.00 startup test
++
++Use the latest **Emilyfn-Memory-Capture-Windows-x64** artifact and extract the
++whole ZIP. The 38.00 diagnostic profile requires the exact supplied CL47722112
++executable inside its complete matching installation; it does not enable 38.00
++in the normal Play workflow.
++
++1. Close the previous game instance.
++2. Open **Logs → Game diagnostics → Launch 38.00 diagnostic** and select
++   `FortniteGame/Binaries/Win64/FortniteClient-Win64-Shipping.exe`.
++3. Wait about 30 seconds. The newly started process is selected automatically.
++4. Select **Test 38.00 game-thread dispatch**, choose a report folder, and share
++   the small `dispatch-test.json` file.
++
++The diagnostic launch passes the game's built-in `-SkipPatchCheck` option and
++saves a small launch report. This tests whether that option advances startup;
++it is not a verified fix for the early content-patcher wait. The JSON reports
++patch completion, progress, active-screen identity and whether the option was
++observed in the game's command line. It never exports the command line itself.
++No full memory dump is needed for this test. Close the diagnostic game manually
++when finished; it is separate from the normal Play session lifecycle.
++
++If this launch exits immediately, its report includes the observed exit code;
++**Capture 38.00 startup** remains available for a full early-exit trace. The
++binding/dispatch checks still decline function calls without a verified target.
++Full 38.00 lobby/gameplay, server hooks, LEGO Fortnite and Festival remain unfinished.
++
++## Data and settings
+ 
+ Settings and logs: `%LOCALAPPDATA%\Emilyfn`.
+ 
