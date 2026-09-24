@@ -40,3 +40,7 @@ The encoded labels use a byte recurrence k=(97*k+68) mod 256 followed by XOR, wi
 The routine at 0x1FAFE5E–0x1FB00AD contains two CreateNamedNetDriver labels, checks a collection at its second argument+0x208, and directly calls 0x482F38E. It passes its original fourth argument in r8d and original third argument in r9d, and tests the returned pointer. The callee (runtime interval 0x482F38E–0x4830253) reads engine-side array fields at rcx+0xF50/+0xF58 and decodes name indices using the already observed XOR constant 0x6F01622B. It includes a driver-definition failure label. This is a stronger driver-creation candidate, but names, definition-vs-driver-name argument order, object ownership and the calling contract still require verification.
 
 No live network function has been invoked. World-context lookup remains unresolved. Next, correlate these tables with live NetDriver class defaults and derive the world-context and construction contracts before adding a state-changing test. This investigation does not require repeating the unchanged GetOwner test.
+
+## Update: live table correlation and argument contracts
+
+Report 15 resolves the live class-default table associations for NetDriver, IpNetDriver and NetDriverEOSBase, and supplies DemoNetDriver's distinct table. See `network-contracts.md` and `network-contract-evidence.json` for the superseding observations and exact argument-forwarding evidence. Earlier unresolved-table statements above describe the historical static investigation. Callable bindings and hosting remain unverified.
