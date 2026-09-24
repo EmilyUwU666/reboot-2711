@@ -1,0 +1,64 @@
+{
+  "ImageSha256": "f4ddac1044edd0e8cc123f586f7204de8724989b6adcf25b2e34b4855747a5c0",
+  "InitializerRva": "0x9e674c2",
+  "InitializerEndRva": "0x9e68a60",
+  "InitializerSha256": "d1d2d1a7973430058e4c229b8fe306ed22fa5fb4646b517f0eb8d4e44767e332",
+  "Slot87Rva": "0x9e674c2",
+  "Windows": [
+    {
+      "Rva": "0x464289b",
+      "Instructions": [
+        "464289B: mov rcx, qword ptr [rsi + 0x290]",
+        "46428A2: call 0x9fa51aa"
+      ]
+    },
+    {
+      "Rva": "0x9fa51aa",
+      "Instructions": [
+        "9FA51AA: push rsi",
+        "9FA51AB: push rdi",
+        "9FA51AC: sub rsp, 0x28",
+        "9FA51B0: mov rsi, rcx",
+        "9FA51B3: mov eax, dword ptr [rcx + 0x80]",
+        "9FA51B9: cmp eax, dword ptr [rcx + 0xac]"
+      ]
+    },
+    {
+      "Rva": "0x155e801",
+      "Instructions": [
+        "155E801: mov rax, qword ptr [rsi]",
+        "155E804: mov rcx, rsi",
+        "155E807: call qword ptr [rax + 0x2b8]"
+      ]
+    },
+    {
+      "Rva": "0x9e674c2",
+      "Instructions": [
+        "9E674C2: push rsi",
+        "9E674C3: push rdi",
+        "9E674C4: sub rsp, 0x28",
+        "9E674C8: mov rsi, rcx",
+        "9E674CB: call 0x135269a",
+        "9E674D0: mov rcx, rax",
+        "9E674D3: call 0x9e68a60",
+        "9E674D8: mov rdi, rax",
+        "9E674DB: add rsi, 0x290",
+        "9E674E2: mov al, byte ptr [rip + 0xce80e89]",
+        "9E674E8: mov ecx, eax",
+        "9E674EA: xor cl, 1",
+        "9E674ED: test rdi, rdi",
+        "9E674F0: sete dl",
+        "9E674F3: or dl, cl",
+        "9E674F5: je 0x9e68512",
+        "9E674FB: mov qword ptr [rsi], rdi",
+        "9E674FE: test rdi, rdi",
+        "9E67501: je 0x9e6750b",
+        "9E67503: test al, 1",
+        "9E67505: jne 0x9e68a53",
+        "9E6750B: mov edx, dword ptr [rip + 0xd022efb]",
+        "9E67511: mov rcx, rdi",
+        "9E67514: xor r8d, r8d"
+      ]
+    }
+  ]
+}
