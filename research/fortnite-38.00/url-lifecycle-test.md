@@ -1,0 +1,11 @@
+# Temporary default URL lifecycle diagnostic
+
+The separate **Test 38.00 URL lifecycle** action saves `url-lifecycle-test.json`. It first runs the existing exact-image, live-binding, thread-identity and guarded GetOwner checks. Immediately before lifecycle execution it observes the TLS profile again and requires raw value 2. The existing dispatch action does not opt into this test.
+
+The native implementation compares the complete bytes of the observed default constructor (0xB2FC82–0xB2FF2B) and destructor (0x1B609FA–0x1B60A75). It constructs one aligned 0x68-byte temporary using a null optional string, checks the returned address, records validity/port as scalars, and invokes the matching engine destructor once. No URL parser, driver creation, SetWorld, listen, network connection or gameplay operation is called. Engine allocation/global-default effects of construction are not claimed to be read-only.
+
+Structured exception containment records constructor/destructor exceptions. A failed or unexpected constructor return does not trigger destruction of an uncertain partial object. A destructor exception is not retried. These outcomes require closing that game process before further diagnostics; the launcher blocks another test in the same process for its remaining lifetime. This is not transactional recovery from an engine exception, nor protection against every possible crash or native hang. The request wait is bounded; an in-flight native call cannot be forcibly cancelled safely.
+
+The report contains `Callback.UrlLifecycle` with status, call counts, exception code and, after completed cleanup, validity and port. `UrlLifecyclePassed` additionally requires successful GetOwner, a live process, removed hook, one constructor, one destructor and validity 1. `GameplayReady` remains false. Shared protocol version 4 prevents older DLLs from interpreting the new request fields.
+
+Local synthetic sequence tests verify constructor-before-destructor ordering, no cleanup after constructor exception or unexpected return, and no double cleanup after destructor exception. Windows tests also exercise the real thread callback against a synthetic nonmatching image and require zero URL calls. These tests validate sequencing and rejection, not successful execution inside Fortnite; that requires the user-run diagnostic.
