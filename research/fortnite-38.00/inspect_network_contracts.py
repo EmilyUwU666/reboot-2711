@@ -12,6 +12,9 @@ import capstone
 
 EXPECTED = "f4ddac1044edd0e8cc123f586f7204de8724989b6adcf25b2e34b4855747a5c0"
 RANGES = {
+    "NamedGameThreadTlsRead": (0x3D71AB1, 0x3D71AD0),
+    "NamedGameThreadPredicate": (0x3D71E93, 0x3D71EC5),
+    "NamedGameThreadFailureLog": (0x3D71EFE, 0x3D71F77),
     "EngineContextIteration": (0x444867D, 0x4448785),
     "EngineThreadLocalRead": (0x44495F7, 0x444962B),
     "EngineThreadLocalBranches": (0x44499BA, 0x4449A3B),
@@ -57,6 +60,23 @@ TABLES = {
     "/Script/Engine.DemoNetDriver": (0x11B9D340, [0xC306F9A, 0xC30583C, 0xFC2ECE]),
     "/Script/SocketSubsystemEOS.NetDriverEOSBase": (0x1220CC80, [0xC306F9A, 0x500F0CA, 0xFC3134]),
 }
+
+def classify_thread_report(live):
+    result = {"RawValue": None, "Observed": False,
+        "MatchesObservedGameThreadPredicate": None, "NetworkingCallsApproved": False}
+    if not live or live.get("ExecutableSha256") != EXPECTED:
+        return result
+    callback = live.get("Callback") or {}
+    context = callback.get("ThreadContext") or {}
+    if callback.get("State") != 3 or context.get("Status") != 5:
+        return result
+    value = context.get("RawValue")
+    if type(value) is not int or not 0 <= value <= 0xffffffff:
+        return result
+    result.update(RawValue=value, Observed=True)
+    # Value 1 requires a thread-ID fallback unavailable in this report.
+    result["MatchesObservedGameThreadPredicate"] = None if value == 1 else value == 2
+    return result
 
 def inspect(path, live_report=None):
     data = Path(path).read_bytes()
@@ -182,6 +202,11 @@ def inspect(path, live_report=None):
         tables.append({"Class": name, "TableRva": hex(table),
             "Slots": dict(zip((50, 93, 130), map(hex, entries))),
             "SuppliedLiveReportMatchesFileTable": live_match})
+    label = "caller is !IsInGameThread()".encode("utf-16le") + b"\0\0"
+    if read(0x1672C640, len(label)) != label:
+        raise ValueError("Game-thread diagnostic label differs")
+    thread_context["SuppliedLiveObservation"] = classify_thread_report(live)
+    thread_context["Scope"] = "Value 2 matches the observed named game-thread predicate, not a general startup or reentrancy contract."
     return {"ImageSha256": digest, "NetworkingCallsAttempted": False,
         "CallableBindingsVerified": False, "InstructionEvidence": evidence, "Tables": tables, "CleanupTables": cleanup_tables, "PostWorkTables": postwork_tables, "ConnectionWorkPath": connection_path, "ThreadContextCandidate": thread_context,
         "Limitations": "Report correlation trusts supplied JSON. File table matches do not validate live method bytes, full parameter layouts, construction, engine task tags, or side effects."}

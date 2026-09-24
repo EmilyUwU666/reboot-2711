@@ -27,3 +27,15 @@ The valid execution boundary, required task state, reentrancy rules and active e
 ## Verification
 
 `inspect_network_contracts.py` now validates 38 complete instruction windows, three context-travel table associations, one engine-update table entry and the named OS-thread import, alongside prior driver checks. It reports `EngineTaskTagMeaningVerified=false`, `LiveCallbackValueObserved=false` and `StartupBoundaryApproved=false`. All offline checks passed for the supplied image; no live networking call was attempted.
+
+## Report 16: named game-thread predicate correlated
+
+The supplied report 16 successfully observes raw TLS value 2 (index 0) at callback entry. Guarded GetOwner still passes, the hook is removed, and the game remains alive. No networking call was attempted.
+
+Further static inspection connects the same TLS field to a named diagnostic. Routine 0x3D7193E reads the module TLS index using 0x3D71AB1 and saves a pointer to block+0xCA0. At 0x3D71E93 a configuration-dependent check reads this field: value 2 takes the accepted path directly; value 1 calls the thread-identity helper and compares against GetCurrentThreadId; other values take the diagnostic path. That path selects the UTF-16 literal `caller is !IsInGameThread()` at RVA 0x1672C640 and passes it to the logging call. The checker verifies the literal, complete instruction windows and the existing thread-ID import evidence.
+
+This supports the narrow conclusion that the callback's observed value matches a named game-thread predicate in this image. It is stronger than an unnamed TLS guess. It does not establish the complete task-tag enum, all call preconditions, non-reentrancy, or safe networking initialization during a Windows message callback. The check can also be disabled by configuration; the classifier evaluates its enabled predicate, not whether that branch executed during the user's capture.
+
+The offline checker now correlates a completed, matching-image report's raw value to this predicate. Value 1 remains unknown without the helper/thread-ID comparison; other values fail this particular predicate. Failed or incomplete reads remain unknown. No classification approves networking calls. Five tests exercise positive, fallback, negative, malformed, incomplete and wrong-image cases. All pass; 41 instruction windows and the literal validation pass on the executable.
+
+The thread-value ambiguity is now reduced. The remaining implementation work is a bounded temporary URL lifecycle test, followed by driver creation/listen and rollback validation at a suitable execution boundary. No change to the user-facing launcher or new capture is needed to interpret report 16; the current launcher still truthfully reports that general engine task-tag verification is false.

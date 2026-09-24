@@ -3,6 +3,71 @@
   "NetworkingCallsAttempted": false,
   "CallableBindingsVerified": false,
   "InstructionEvidence": {
+    "NamedGameThreadTlsRead": {
+      "StartRva": "0x3d71ab1",
+      "EndRvaExclusive": "0x3d71ad0",
+      "Sha256": "b6e00d8911ee11157fba6cc4b5d43101954f23576813e5251fe2db6ba9ced930",
+      "Instructions": [
+        "0x3D71AB1: mov eax, dword ptr [rip + 0x12dd1f6d]",
+        "0x3D71AB7: mov rcx, qword ptr gs:[0x58]",
+        "0x3D71AC0: mov rax, qword ptr [rcx + rax*8]",
+        "0x3D71AC4: lea rax, [rax + 0xca0]",
+        "0x3D71ACB: mov qword ptr [rsp + 0x30], rax"
+      ]
+    },
+    "NamedGameThreadPredicate": {
+      "StartRva": "0x3d71e93",
+      "EndRvaExclusive": "0x3d71ec5",
+      "Sha256": "a3612c69859aaa2c89da0889527ba2cde530e4e8dce581a9f7a89c33ba4d2852",
+      "Instructions": [
+        "0x3D71E93: cmp byte ptr [rip + 0x12e95b76], 1",
+        "0x3D71E9A: jne 0x3d71ec5",
+        "0x3D71E9C: mov rax, qword ptr [rsp + 0x30]",
+        "0x3D71EA1: mov eax, dword ptr [rax]",
+        "0x3D71EA3: cmp eax, 2",
+        "0x3D71EA6: je 0x3d71ec5",
+        "0x3D71EA8: lea rsi, [rip + 0x129ba791]",
+        "0x3D71EAF: cmp eax, 1",
+        "0x3D71EB2: jne 0x3d71efe",
+        "0x3D71EB4: call 0x8bf44e",
+        "0x3D71EB9: mov edi, eax",
+        "0x3D71EBB: call qword ptr [rip + 0x12adbfa7]",
+        "0x3D71EC1: cmp edi, eax",
+        "0x3D71EC3: jne 0x3d71efe"
+      ]
+    },
+    "NamedGameThreadFailureLog": {
+      "StartRva": "0x3d71efe",
+      "EndRvaExclusive": "0x3d71f77",
+      "Sha256": "2018c33b0b7c0b864a83dad6a07fa1fc13d06407dc886c3a397560351c51dbdf",
+      "Instructions": [
+        "0x3D71EFE: cmp byte ptr [rip + 0x12fc34ef], 3",
+        "0x3D71F05: jb 0x3d71f77",
+        "0x3D71F07: lea rdx, [rip + 0xda1ae22]",
+        "0x3D71F0E: lea rcx, [rsp + 0xf0]",
+        "0x3D71F16: mov r8d, 0x1a6",
+        "0x3D71F1C: call 0x1121a9b0",
+        "0x3D71F21: mov al, 0xe1",
+        "0x3D71F23: xor ecx, ecx",
+        "0x3D71F25: movzx eax, al",
+        "0x3D71F28: imul eax, eax, 0x61",
+        "0x3D71F2B: add al, 0x44",
+        "0x3D71F2D: xor byte ptr [rsp + rcx + 0xf0], al",
+        "0x3D71F34: inc rcx",
+        "0x3D71F37: cmp rcx, 0x1a6",
+        "0x3D71F3E: jne 0x3d71f25",
+        "0x3D71F40: lea rdi, [rsp + 0x2a0]",
+        "0x3D71F48: lea rdx, [rsp + 0xf0]",
+        "0x3D71F50: mov r8d, 0x1a6",
+        "0x3D71F56: mov rcx, rdi",
+        "0x3D71F59: call 0x1121a9b0",
+        "0x3D71F5E: lea rcx, [rip + 0x12a29715]",
+        "0x3D71F65: lea rdx, [rip + 0x12fc3488]",
+        "0x3D71F6C: mov r8, rdi",
+        "0x3D71F6F: mov r9, rsi",
+        "0x3D71F72: call 0x2b9eef"
+      ]
+    },
     "EngineContextIteration": {
       "StartRva": "0x444867d",
       "EndRvaExclusive": "0x4448785",
@@ -2160,7 +2225,14 @@
     "EngineUpdateRva": "0x44481DA",
     "EngineTaskTagMeaningVerified": false,
     "LiveCallbackValueObserved": false,
-    "StartupBoundaryApproved": false
+    "StartupBoundaryApproved": false,
+    "SuppliedLiveObservation": {
+      "RawValue": 2,
+      "Observed": true,
+      "MatchesObservedGameThreadPredicate": true,
+      "NetworkingCallsApproved": false
+    },
+    "Scope": "Value 2 matches the observed named game-thread predicate, not a general startup or reentrancy contract."
   },
   "Limitations": "Report correlation trusts supplied JSON. File table matches do not validate live method bytes, full parameter layouts, construction, engine task tags, or side effects."
 }
