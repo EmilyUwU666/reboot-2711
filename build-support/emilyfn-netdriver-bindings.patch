@@ -1,0 +1,139 @@
+diff --git a/launcher/Emilyfn.Core/LiveBindingProbe38.cs b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+--- a/launcher/Emilyfn.Core/LiveBindingProbe38.cs
++++ b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+@@ -10,7 +10,7 @@
+ public static class LiveBindingProbe38
+ {
+     public sealed record Check(string Name,bool Passed,string Detail,bool RequiredForDispatch=true);
+-    public sealed record Evidence(List<Check> Checks,int Names,int Owners,int Properties,int InvalidObjectSlots,int RejectedChains,int Functions,int RejectedBindings,string DispatchTargetStatus,uint RegistrySlots,int EmptyRegistrySlots,int RejectedRegistrySlots,EarlyStartupPatcher38.State StartupPatcher, CaptureFunctionMetadata38.Diagnostics MetadataDiagnostics,WorldReadiness38.Report WorldReadiness);
++    public sealed record Evidence(List<Check> Checks,int Names,int Owners,int Properties,int InvalidObjectSlots,int RejectedChains,int Functions,int RejectedBindings,string DispatchTargetStatus,uint RegistrySlots,int EmptyRegistrySlots,int RejectedRegistrySlots,EarlyStartupPatcher38.State StartupPatcher, CaptureFunctionMetadata38.Diagnostics MetadataDiagnostics,WorldReadiness38.Report WorldReadiness,NetDriverBindings38.Report NetDriverBindings);
+     public sealed record Result(string File,bool Passed,string Message);
+     public static Task<Evidence> InspectCaptureAsync(string dump) => Task.Run(() => CaptureNameExporter38.WithCapture(dump, view => Inspect(view.Read, view.ImageBase)));
+     public static Evidence Inspect(Func<ulong,int,byte[]> read,ulong imageBase,Action<CaptureReflectionExporter38.IdentityDiagnostics>? identityReport=null) => InspectForDispatch(read,imageBase,identityReport).Evidence;
+@@ -66,7 +66,7 @@
+             checks[index]=checks[index] with {RequiredForDispatch=false,
+                 Detail=checks[index].Detail+" Unresolved native entries remain excluded; the exact GetOwner target passed independent validation."};
+         }
+-        return new(new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count,target.Reason,registry.Slots,registry.EmptySlots,registry.Rejections.Count,EarlyStartupPatcher38.Inspect(read,imageBase),CaptureFunctionMetadata38.Summarize(bindings),WorldReadiness38.Inspect(read,observed,bindings,imageBase)),target.Value);
++        return new(new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count,target.Reason,registry.Slots,registry.EmptySlots,registry.Rejections.Count,EarlyStartupPatcher38.Inspect(read,imageBase),CaptureFunctionMetadata38.Summarize(bindings),WorldReadiness38.Inspect(read,observed,bindings,imageBase),NetDriverBindings38.Inspect(read,imageBase,observed,names)),target.Value);
+     }
+     internal static bool CanScopeUnboundMetadata(CaptureFunctionMetadata38.Observation metadata,bool exactTargetValidated) =>
+         exactTargetValidated && metadata.Functions.Count>0 && metadata.Rejections.Count>0 &&
+diff --git a/launcher/Emilyfn.Core/NetDriverBindings38.cs b/launcher/Emilyfn.Core/NetDriverBindings38.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.Core/NetDriverBindings38.cs
+@@ -0,0 +1,71 @@
++using System.Buffers.Binary;
++namespace Emilyfn.Core;
++
++public static class NetDriverBindings38
++{
++    public sealed record Method(int Slot,string CandidateRole,string? EntryRva,bool KnownCandidate,bool EntryBytesMatch);
++    public sealed record Driver(string ClassName,int ClassMatches,int DefaultMatches,uint? DefaultSlot,
++        string? VtableRva,bool KnownTable,List<Method> Methods,string? Failure);
++    public sealed record Report(List<Driver> Drivers,bool NetworkingCallsAttempted=false,bool CallableBindingsVerified=false)
++    {public string Scope=>"Read-only cached class-default identity and virtual-table observations. Byte matches do not validate parameters, engine task tags or networking side effects.";}
++    internal static readonly Dictionary<ulong,byte[]> Anchors=new()
++    {
++        [0xC306F9AUL]=Convert.FromHexString("488b81b0010000c3"),
++        [0xFC3134UL]=Convert.FromHexString("41565657534883ec284889d64889cf48"),
++        [0x4655228UL]=Convert.FromHexString("564881ecb0000000488b05c9313b1248"),
++        [0x49354B8UL]=Convert.FromHexString("415741564154565755534881ecf00000"),
++        [0x500F0CAUL]=Convert.FromHexString("415741564154565755534881ec100100"),
++    };
++    private static readonly HashSet<ulong> Tables=new(){0x11ca8470,0x11e085c0,0x11e1b630,0x1220cc80,0x12496770};
++    public static Report Inspect(Func<ulong,int,byte[]> read,ulong image,CaptureReflectionExporter38.Observation reflection,IReadOnlyDictionary<uint,string> names)
++    {
++        uint D(ulong a)=>BinaryPrimitives.ReadUInt32LittleEndian(read(a,4));
++        ulong Q(ulong a)=>BinaryPrimitives.ReadUInt64LittleEndian(read(a,8));
++        bool Image(ulong a)=>a>=image&&a-image<0x18777000;
++        var output=new List<Driver>();
++        var entries=reflection.Registry?.Entries??new();
++        // Index exact classes once; never use a substring or guessed subclass match.
++        var byClass=new Dictionary<ulong,List<RuntimeObjectRegistry38.Entry>>();
++        foreach(var e in entries)
++        {
++            try {ulong c=Q(checked(e.Address+0x18));if(!byClass.TryGetValue(c,out var list))byClass[c]=list=new();list.Add(e);}
++            catch(Exception error) when(error is InvalidDataException or OverflowException) {}
++        }
++        foreach(string name in new[]{"/Script/Engine.NetDriver","/Script/OnlineSubsystemUtils.IpNetDriver",
++            "/Script/Engine.DemoNetDriver","/Script/SocketSubsystemEOS.NetDriverEOSBase"})
++        {
++            var classes=reflection.Candidates.Where(c=>c.Kind=="Class"&&c.Name==name).ToList();
++            int matches=0;uint? slot=null;string? vtRva=null;bool knownTable=false;var methods=new List<Method>();
++            try
++            {
++                if(classes.Count!=1)throw new InvalidDataException("Class missing or ambiguous.");
++                string expected="Default__"+name[(name.LastIndexOf('.')+1)..];
++                var defaults=new List<RuntimeObjectRegistry38.Entry>();
++                foreach(var e in byClass.GetValueOrDefault(classes[0].Address)??new())
++                {
++                    uint flags=D(checked(e.Address+0x10));uint nameId=NamePool38.DecodeIndex(D(checked(e.Address+0x20)));
++                    if((flags&0x10)!=0&&names.TryGetValue(nameId,out var actual)&&actual==expected)defaults.Add(e);
++                }
++                matches=defaults.Count;
++                if(matches!=1)throw new InvalidDataException("Class default missing or ambiguous.");
++                var target=defaults[0];slot=target.Index;
++                if((D(checked(target.Address+0x14))^RuntimeObjectRegistry38.IndexMask)!=target.Index||Q(checked(target.Address+0x18))!=classes[0].Address)
++                    throw new InvalidDataException("Class-default identity changed.");
++                ulong vt=Q(target.Address);
++                if(!Image(vt)||!Image(checked(vt+130*8+7)))throw new InvalidDataException("Virtual table outside image.");
++                vtRva=$"0x{vt-image:X}";knownTable=Tables.Contains(vt-image);
++                foreach(var (index,role) in new[]{(50,"World getter"),(93,"Listen"),(130,"World assignment")})
++                {
++                    ulong entry=Q(checked(vt+(ulong)index*8));ulong rva=Image(entry)?entry-image:ulong.MaxValue;
++                    bool known=index switch {50=>rva==0xc306f9a,130=>rva==0xfc3134,_=>rva is 0x4655228 or 0x49354b8 or 0x500f0ca};
++                    bool bytes=known&&Anchors.TryGetValue(rva,out var anchor)&&read(entry,anchor.Length).AsSpan().SequenceEqual(anchor);
++                    methods.Add(new(index,role,Image(entry)?$"0x{rva:X}":null,known,bytes));
++                }
++                output.Add(new(name,classes.Count,matches,slot,vtRva,knownTable,methods,null));
++            }
++            catch(Exception error) when(error is InvalidDataException or OverflowException)
++            {output.Add(new(name,classes.Count,matches,slot,vtRva,knownTable,methods,error.Message));}
++        }
++        return new(output);
++    }
++}
+diff --git a/launcher/Emilyfn.SdkTests/NetDriverBindingChecks.cs b/launcher/Emilyfn.SdkTests/NetDriverBindingChecks.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.SdkTests/NetDriverBindingChecks.cs
+@@ -0,0 +1,28 @@
++using Emilyfn.Core;
++static class NetDriverBindingChecks
++{
++    public static void Run()
++    {
++        ulong image=0x10000000,vt=image+0x11ca8470;
++        var memory=new Dictionary<ulong,byte[]>();
++        void D(ulong a,uint v)=>memory[a]=BitConverter.GetBytes(v);
++        void Q(ulong a,ulong v)=>memory[a]=BitConverter.GetBytes(v);
++        byte[] Read(ulong a,int n)=>memory.TryGetValue(a,out var b)&&b.Length==n?b:throw new InvalidDataException("Missing fixture memory");
++        Q(0x2000,vt);Q(0x2018,0x1000);D(0x2010,0x10);D(0x2014,1u^RuntimeObjectRegistry38.IndexMask);D(0x2020,0);
++        Q(vt+50*8,image+0xc306f9a);Q(vt+93*8,image+0x4655228);Q(vt+130*8,image+0xfc3134);
++        foreach(var a in NetDriverBindings38.Anchors)memory[image+a.Key]=a.Value.ToArray();
++        var reflection=new CaptureReflectionExporter38.Observation(new(),new(),new(),0,0,new(){new(0x1000,"/Script/Engine.NetDriver","Class")})
++            {Registry=new(2,0,new(){new(1,0x2000)},new())};
++        var names=new Dictionary<uint,string>{{0,"Default__NetDriver"}};
++        NetDriverBindings38.Report Run()=>NetDriverBindings38.Inspect(Read,image,reflection,names);
++        void Check(bool b){if(!b)throw new Exception("NetDriver binding fixture failed");}
++        var good=Run();Check(!good.CallableBindingsVerified&&!good.NetworkingCallsAttempted&&good.Drivers[0].KnownTable&&good.Drivers[0].Methods.All(m=>m.EntryBytesMatch));
++        memory[image+0xfc3134][0]^=1;Check(!Run().Drivers[0].Methods.Single(m=>m.Slot==130).EntryBytesMatch);memory[image+0xfc3134][0]^=1;
++        Q(vt+93*8,image+0x999);Check(!Run().Drivers[0].Methods.Single(m=>m.Slot==93).KnownCandidate);Q(vt+93*8,image+0x4655228);
++        D(0x2014,2u^RuntimeObjectRegistry38.IndexMask);Check(Run().Drivers[0].Failure is not null);D(0x2014,1u^RuntimeObjectRegistry38.IndexMask);
++        names[0]="WrongName";Check(Run().Drivers[0].DefaultMatches==0);names[0]="Default__NetDriver";
++        D(0x2010,0);Check(Run().Drivers[0].DefaultMatches==0);
++        Check(good.Drivers.Skip(1).All(d=>d.Failure is not null));
++        Console.WriteLine("NetDriver binding checks passed: identity, known tables, changed bytes, unknown entries and no callable approval.");
++    }
++}
+diff --git a/launcher/Emilyfn.SdkTests/Program.cs b/launcher/Emilyfn.SdkTests/Program.cs
+--- a/launcher/Emilyfn.SdkTests/Program.cs
++++ b/launcher/Emilyfn.SdkTests/Program.cs
+@@ -57,3 +57,5 @@
+ WorldLinksChecks.Run();
+ 
+ EngineWorldContextChecks.Run();
++
++NetDriverBindingChecks.Run();
