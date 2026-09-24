@@ -34,3 +34,7 @@ The parser's complete syntax, all enum values, defaults and exception behavior a
 The expanded `inspect_network_contracts.py` checks 30 complete instruction windows, four slot-110 entries, four cleanup table mappings and the four previous live table associations against the exact executable. It emits `EngineTaskContextVerified=false` for every slot-110 observation. All checks passed offline.
 
 These are source/research changes, not a new launcher or live test. Hosting remains disabled. The next concrete blocker is establishing a legitimate engine execution boundary and containment for the temporary URL lifecycle before introducing any networking side effect.
+
+## Context-path follow-up
+
+`network-context-path.md` traces the slot-110 work caller back through a separate context+0x188 object with an embedded URL. This narrows the earlier scheduling evidence to a connection-management path; it does not validate a server startup boundary.

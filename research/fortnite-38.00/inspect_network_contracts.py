@@ -12,6 +12,9 @@ import capstone
 
 EXPECTED = "f4ddac1044edd0e8cc123f586f7204de8724989b6adcf25b2e34b4855747a5c0"
 RANGES = {
+    "ContextConnectionWorkPrefix": (0x4832B9A, 0x4832C85),
+    "ConnectionObjectConstruction": (0xA9EDE75, 0xA9EDEC6),
+    "ConnectionObjectDestruction": (0x18E770E, 0x18E77C2),
     "DriverPostWorkCaller": (0x46BA5F2, 0x46BA88F),
     "DemoPostWorkOverride": (0x33584A, 0x335923),
     "UrlInvalidBranch1": (0x47CF4DD, 0x47CF531),
@@ -79,6 +82,15 @@ def inspect(path, live_report=None):
         evidence[name] = {"StartRva": hex(start), "EndRvaExclusive": hex(end),
             "Sha256": hashlib.sha256(code).hexdigest(),
             "Instructions": [f"0x{i.address:X}: {i.mnemonic} {i.op_str}".rstrip() for i in ins]}
+    connection_table = 0x11CD07B0
+    connection_work = struct.unpack("<Q", read(connection_table + 86 * 8, 8))[0] - imagebase
+    if connection_work != 0x46BA5F2:
+        raise ValueError("Unexpected connection-work table entry")
+    connection_path = {"ContextObjectOffset": "0x188", "ContextWorldOffset": "0x2B8",
+        "CandidateObjectTableRva": hex(connection_table), "WorkSlot": 86,
+        "WorkEntryRva": hex(connection_work), "DriverMemberOffset": "0x30",
+        "EmbeddedUrlOffset": "0x40", "LiveObjectClassVerified": False,
+        "ServerStartupBoundaryVerified": False, "EngineTaskContextVerified": False}
     postwork_tables = []
     for name, (table, _) in TABLES.items():
         entry = struct.unpack("<Q", read(table + 110 * 8, 8))[0] - imagebase
@@ -128,7 +140,7 @@ def inspect(path, live_report=None):
             "Slots": dict(zip((50, 93, 130), map(hex, entries))),
             "SuppliedLiveReportMatchesFileTable": live_match})
     return {"ImageSha256": digest, "NetworkingCallsAttempted": False,
-        "CallableBindingsVerified": False, "InstructionEvidence": evidence, "Tables": tables, "CleanupTables": cleanup_tables, "PostWorkTables": postwork_tables,
+        "CallableBindingsVerified": False, "InstructionEvidence": evidence, "Tables": tables, "CleanupTables": cleanup_tables, "PostWorkTables": postwork_tables, "ConnectionWorkPath": connection_path,
         "Limitations": "Report correlation trusts supplied JSON. File table matches do not validate live method bytes, full parameter layouts, construction, engine task tags, or side effects."}
 
 if __name__ == "__main__":
