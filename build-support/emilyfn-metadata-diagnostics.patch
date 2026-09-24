@@ -1,0 +1,104 @@
+diff --git a/launcher/Emilyfn.Core/CaptureFunctionMetadata38.cs b/launcher/Emilyfn.Core/CaptureFunctionMetadata38.cs
+--- a/launcher/Emilyfn.Core/CaptureFunctionMetadata38.cs
++++ b/launcher/Emilyfn.Core/CaptureFunctionMetadata38.cs
+@@ -9,7 +9,15 @@
+     public sealed record OwnerSize(string Owner, uint StorageSize);
+     public sealed record Function(string Owner, string Kind, uint StorageSize, ushort ParameterBufferSize,
+         uint RawFlags, bool DeclaredNative, ulong? NativeEntryRva);
+-    public sealed record Rejection(string Owner, string Reason);
++    public sealed record Rejection(string Owner, string Reason, uint? StorageSize = null,
++        ushort? ParameterBufferSize = null, uint? RawFlags = null, ulong? NativeEntryRva = null,
++        ulong? LargestPropertyEnd = null);
++    public sealed record Diagnostics(int TotalRejected, Dictionary<string,int> Reasons,
++        List<Rejection> Entries, int OmittedEntries);
++    public static Diagnostics Summarize(Observation observation) => new(
++        observation.Rejections.Count,
++        observation.Rejections.GroupBy(r => r.Reason).ToDictionary(g => g.Key, g => g.Count()),
++        observation.Rejections.Take(200).ToList(), Math.Max(0, observation.Rejections.Count - 200));
+     public sealed record Observation(List<OwnerSize> OwnerSizes, List<Function> Functions, List<Rejection> Rejections);
+ 
+     public static Observation Inspect(Func<ulong, int, byte[]> read, ulong imageBase, CaptureReflectionExporter38.Observation reflection)
+@@ -50,10 +58,15 @@
+         {
+             bool isFunction = owner.Kind is "Function" or "DelegateFunction" or "SparseDelegateFunction";
+             if (!isFunction && !withProperties.Contains(owner.Name)) continue;
++            uint? decodedStorage = null, decodedFlags = null;
++            ushort? decodedParameters = null;
++            ulong? decodedRva = null, propertyEnd = null;
+             try
+             {
+                 if (!seen.Add(owner.Name)) throw new InvalidDataException("Duplicate qualified owner name.");
+                 uint storage = D(checked(owner.Address + 0x68)) ^ 0x1937f47b;
++                decodedStorage = storage;
++                propertyEnd = fields[owner.Name].Select(p => (ulong)p.Offset + (ulong)p.ElementSize * p.ArrayDim).DefaultIfEmpty(0UL).Max();
+                 if (storage > 0x1000000) throw new InvalidDataException("Owner storage size exceeds supported bounds.");
+                 foreach (var property in fields[owner.Name])
+                     if ((ulong)property.Offset + (ulong)property.ElementSize * property.ArrayDim > storage)
+@@ -63,6 +76,8 @@
+                 ushort parameters = (ushort)(W(checked(owner.Address + 0xbc)) ^ 0x8250);
+                 uint flags = D(checked(owner.Address + 0xb8));
+                 ulong native = Q(checked(owner.Address + 0xe0));
++                decodedParameters = parameters; decodedFlags = flags;
++                if (native >= imageBase && native - imageBase < 0x18777000) decodedRva = native - imageBase;
+                 bool declaredNative = (flags & 0x400) != 0;
+                 if (parameters > storage) throw new InvalidDataException("Parameter buffer exceeds owner storage size.");
+                 if (native == 0 && declaredNative) throw new InvalidDataException("Native function has no entry pointer.");
+@@ -75,8 +90,8 @@
+                 }
+                 functions.Add(new(owner.Name, owner.Kind, storage, parameters, flags, declaredNative, rva));
+             }
+-            catch (InvalidDataException error) { rejected.Add(new(owner.Name, error.Message)); }
+-            catch (OverflowException) { rejected.Add(new(owner.Name, "Address overflow.")); }
++            catch (InvalidDataException error) { rejected.Add(new(owner.Name, error.Message, decodedStorage, decodedParameters, decodedFlags, decodedRva, propertyEnd)); }
++            catch (OverflowException) { rejected.Add(new(owner.Name, "Address overflow.", decodedStorage, decodedParameters, decodedFlags, decodedRva, propertyEnd)); }
+         }
+         return new(sizes, functions, rejected);
+     }
+diff --git a/launcher/Emilyfn.Core/GameThreadProbe38.cs b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+--- a/launcher/Emilyfn.Core/GameThreadProbe38.cs
++++ b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+@@ -58,7 +58,7 @@
+             byte[] Boundary()=>Raw(imageBase+NamePool38.PoolRva+8,8).Concat(RuntimeObjectRegistry38.ReadBoundary(Raw,imageBase)).ToArray();
+             var inspected=LiveReadRetry38.Run(Boundary,()=>LiveBindingProbe38.InspectForDispatch(Read,imageBase,d=>objectIdentity=d),()=>{cache.Clear();objectIdentity=null;},readAttempts);
+             evidence=inspected.Evidence;stable=true;
+-            if(!stable||evidence.Checks.Any(c=>!c.Passed))throw new InvalidDataException("Live bindings failed or changed during verification. Wait for the game to settle and retry.");
++            if(!stable||evidence.Checks.Any(c=>!c.Passed))throw new InvalidDataException("Live binding checks failed: " + string.Join("; ", evidence.Checks.Where(c=>!c.Passed).Select(c=>c.Name+": "+c.Detail)));
+             var threads=FindGameThreads(process);
+             if(threads.Count!=1)throw new InvalidOperationException($"Expected one thread named GameThread; found {threads.Count}. No hook was installed.");
+             threadId=threads[0];
+diff --git a/launcher/Emilyfn.Core/LiveBindingProbe38.cs b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+--- a/launcher/Emilyfn.Core/LiveBindingProbe38.cs
++++ b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+@@ -10,7 +10,7 @@
+ public static class LiveBindingProbe38
+ {
+     public sealed record Check(string Name,bool Passed,string Detail);
+-    public sealed record Evidence(List<Check> Checks,int Names,int Owners,int Properties,int InvalidObjectSlots,int RejectedChains,int Functions,int RejectedBindings,string DispatchTargetStatus,uint RegistrySlots,int EmptyRegistrySlots,int RejectedRegistrySlots,EarlyStartupPatcher38.State StartupPatcher);
++    public sealed record Evidence(List<Check> Checks,int Names,int Owners,int Properties,int InvalidObjectSlots,int RejectedChains,int Functions,int RejectedBindings,string DispatchTargetStatus,uint RegistrySlots,int EmptyRegistrySlots,int RejectedRegistrySlots,EarlyStartupPatcher38.State StartupPatcher, CaptureFunctionMetadata38.Diagnostics MetadataDiagnostics);
+     public sealed record Result(string File,bool Passed,string Message);
+     public static Task<Evidence> InspectCaptureAsync(string dump) => Task.Run(() => CaptureNameExporter38.WithCapture(dump, view => Inspect(view.Read, view.ImageBase)));
+     public static Evidence Inspect(Func<ulong,int,byte[]> read,ulong imageBase,Action<CaptureReflectionExporter38.IdentityDiagnostics>? identityReport=null) => InspectForDispatch(read,imageBase,identityReport).Evidence;
+@@ -58,7 +58,7 @@
+                 $"Storage={found.StorageSize}, parameter bytes={found.ParameterBufferSize}, native entry RVA=0x{found.NativeEntryRva:X}."));
+         }
+         var target=DispatchTarget38.Find(read,imageBase,names,registry);
+-        return new(new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count,target.Reason,registry.Slots,registry.EmptySlots,registry.Rejections.Count,EarlyStartupPatcher38.Inspect(read,imageBase)),target.Value);
++        return new(new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count,target.Reason,registry.Slots,registry.EmptySlots,registry.Rejections.Count,EarlyStartupPatcher38.Inspect(read,imageBase),CaptureFunctionMetadata38.Summarize(bindings)),target.Value);
+     }
+     public static Task<Result> RunAsync(CaptureTarget target,string destination,IProgress<string>? progress=null)=>Task.Run(()=>Run(target,destination,progress));
+     private static Result Run(CaptureTarget target,string destination,IProgress<string>? progress)
+diff --git a/launcher/Emilyfn.SdkTests/FunctionMetadataChecks.cs b/launcher/Emilyfn.SdkTests/FunctionMetadataChecks.cs
+--- a/launcher/Emilyfn.SdkTests/FunctionMetadataChecks.cs
++++ b/launcher/Emilyfn.SdkTests/FunctionMetadataChecks.cs
+@@ -59,6 +59,11 @@
+         {
+             var rejected = Inspect();
+             Check(rejected.Rejections.Any(r => r.Owner == name && r.Reason.Contains(expected, StringComparison.Ordinal)), "Malformed function accepted: " + expected);
++            var diagnostics = CaptureFunctionMetadata38.Summarize(rejected);
++            Check(diagnostics.TotalRejected == rejected.Rejections.Count && diagnostics.Reasons.Values.Sum() == diagnostics.TotalRejected && diagnostics.Entries.Any(r => r.Owner == name && r.StorageSize.HasValue), "Missing rejection diagnostics");
++            var expanded = rejected with { Rejections = Enumerable.Repeat(rejected.Rejections[0], 205).ToList() };
++            var limited = CaptureFunctionMetadata38.Summarize(expanded);
++            Check(limited.Entries.Count == 200 && limited.OmittedEntries == 5 && limited.TotalRejected == 205, "Unbounded rejection report");
+             Check(rejected.Functions.All(f => f.Owner != name), "Rejected function was exported");
+             Check(rejected.Functions.Any(f => f.Owner == "NoArgs"), "One rejected function discarded valid functions");
+         }

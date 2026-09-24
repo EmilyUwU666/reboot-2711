@@ -1,0 +1,212 @@
+diff --git a/launcher/Emilyfn.Core/GameThreadProbe38.cs b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+--- a/launcher/Emilyfn.Core/GameThreadProbe38.cs
++++ b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+@@ -23,6 +23,8 @@
+         string folder=Path.Combine(Path.GetFullPath(destination),"Emilyfn-dispatch-test-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
+         string file=Path.Combine(folder,"dispatch-test.json");string? failure=null;LiveBindingProbe38.Evidence? evidence=null;CallbackResult? callback=null;
+         string? imageHash=null;int? threadId=null;bool stable=false,alive=false;
++        EarlyStartupPatcher38.State? startupPatcher=null;
++        var readAttempts=new List<LiveReadRetry38.Attempt>();
+         try
+         {
+             if(InFlight.ContainsKey((target.Id,target.StartedUtc)))throw new InvalidOperationException("A previous callback may still be running in this game. Close that game instance before testing again.");
+@@ -65,9 +67,10 @@
+                 }
+                 return b;
+             }
+-            var pool=Raw(imageBase+NamePool38.PoolRva+8,8);var table=RuntimeObjectRegistry38.ReadBoundary(Raw,imageBase);
+-            var inspected=LiveBindingProbe38.InspectForDispatch(Read,imageBase);evidence=inspected.Evidence;
+-            stable=pool.AsSpan().SequenceEqual(Raw(imageBase+NamePool38.PoolRva+8,8))&&table.AsSpan().SequenceEqual(RuntimeObjectRegistry38.ReadBoundary(Raw,imageBase));
++            startupPatcher=EarlyStartupPatcher38.Inspect(Raw,imageBase);
++            byte[] Boundary()=>Raw(imageBase+NamePool38.PoolRva+8,8).Concat(RuntimeObjectRegistry38.ReadBoundary(Raw,imageBase)).ToArray();
++            var inspected=LiveReadRetry38.Run(Boundary,()=>LiveBindingProbe38.InspectForDispatch(Read,imageBase),pages.Clear,readAttempts);
++            evidence=inspected.Evidence;stable=true;
+             if(!stable||evidence.Checks.Any(c=>!c.Passed))throw new InvalidDataException("Live bindings failed or changed during verification. Wait for the game to settle and retry.");
+             var threads=FindGameThreads(process);
+             if(threads.Count!=1)throw new InvalidOperationException($"Expected one thread named GameThread; found {threads.Count}. No hook was installed.");
+@@ -91,16 +94,16 @@
+             });
+             if(!alive)failure??="The game exited during the probe.";
+         }
+-        catch(Exception error) when(error is Win32Exception or InvalidOperationException or IOException or UnauthorizedAccessException or OverflowException or ArgumentException or TimeoutException)
++        catch(Exception error) when(error is InvalidDataException or Win32Exception or InvalidOperationException or IOException or UnauthorizedAccessException or OverflowException or ArgumentException or TimeoutException)
+         {failure=error.Message;}
+         bool observed=callback is {State:3} && callback.CallbackProcessId==target.Id&&callback.CallbackThreadId==threadId&&callback.Status is >=1 and <=6;
+         bool callPassed=observed&&alive&&callback is {Status:4,FunctionCallsAttempted:true,HookRemoved:true};
+         string message=callPassed?"The guarded GetOwner call passed on GameThread.":observed&&callback?.Status==2?
+             "GameThread callback passed. GetOwner was skipped because its default component is not initialized. The callback stack is included in dispatch-test.json.":"The game-thread/dispatch test did not pass; see dispatch-test.json.";
+         File.WriteAllText(file,JsonSerializer.Serialize(new{FormatVersion=2,Test="38.00 game-thread and guarded GetOwner dispatch",Utc=DateTime.UtcNow,ProcessId=target.Id,GameThreadId=threadId,
+-            ExecutableSha256=imageHash,StableBoundaryCounters=stable,GameAliveAfterProbe=alive,GameThreadCallbackObserved=observed,EngineTaskTagVerified=false,
++            ExecutableSha256=imageHash,StableBoundaryCounters=stable,GameAliveAfterProbe=callback is null?(bool?)null:alive,GameThreadCallbackObserved=observed,EngineTaskTagVerified=false,
+             FunctionCallsAttempted=callback is null?(bool?)false:callback.FunctionCallsAttempted,ControlledGetOwnerPassed=callPassed,GameplayReady=false,
+-            Failure=failure,Message=message,Evidence=evidence,Callback=callback,
++            Failure=failure,Message=message,StartupPatcher=startupPatcher,BindingReadAttempts=readAttempts,Evidence=evidence,Callback=callback,
+             Note="Thread identity uses a unique Windows GameThread description and matching process/thread IDs. GameFrameRvas records the callback-delivery stack, not a GetOwner execution trace. It may omit callers across native callback boundaries. This does not validate Unreal task tags or general gameplay dispatch. No arbitrary function is exposed."},new JsonSerializerOptions{WriteIndented=true}));
+         return new(file,message);
+     }
+diff --git a/launcher/Emilyfn.Core/LiveBindingProbe38.cs b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+--- a/launcher/Emilyfn.Core/LiveBindingProbe38.cs
++++ b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+@@ -66,6 +66,8 @@
+         string folder=Path.Combine(Path.GetFullPath(destination),"Emilyfn-live-test-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
+         string file=Path.Combine(folder,"live-test.json");Evidence? evidence=null;string? failure=null;string? hash=null;bool stable=false;
+         var clock=Stopwatch.StartNew();
++        EarlyStartupPatcher38.State? startupPatcher=null;
++        var readAttempts=new List<LiveReadRetry38.Attempt>();
+         try
+         {
+             using var process=Process.GetProcessById(target.Id);
+@@ -110,19 +112,19 @@
+                 }
+                 return data;
+             }
+-            var beforePool=Raw(imageBase+NamePool38.PoolRva+8,8);var beforeTable=RuntimeObjectRegistry38.ReadBoundary(Raw,imageBase);
+             progress?.Report("Testing live objects, properties and dispatch addresses…");
+-            evidence=Inspect(Read,imageBase);
+-            stable=!process.HasExited && beforePool.AsSpan().SequenceEqual(Raw(imageBase+NamePool38.PoolRva+8,8)) &&
+-                beforeTable.AsSpan().SequenceEqual(RuntimeObjectRegistry38.ReadBoundary(Raw,imageBase));
++            startupPatcher=EarlyStartupPatcher38.Inspect(Raw,imageBase);
++            byte[] Boundary()=>Raw(imageBase+NamePool38.PoolRva+8,8).Concat(RuntimeObjectRegistry38.ReadBoundary(Raw,imageBase)).ToArray();
++            evidence=LiveReadRetry38.Run(Boundary,()=>Inspect(Read,imageBase),pages.Clear,readAttempts);
++            stable=!process.HasExited;
+             if(!stable)failure="Name pool or runtime object registry changed during the test. Retry after the game settles.";
+         }
+-        catch(Exception error) when(error is Win32Exception or InvalidOperationException or IOException or OverflowException or TimeoutException or ArgumentException or UnauthorizedAccessException)
++        catch(Exception error) when(error is InvalidDataException or Win32Exception or InvalidOperationException or IOException or OverflowException or TimeoutException or ArgumentException or UnauthorizedAccessException)
+         {failure=error.Message;}
+         bool passed=failure is null && stable && evidence is not null && evidence.Checks.All(c=>c.Passed);
+         File.WriteAllText(file,JsonSerializer.Serialize(new{FormatVersion=1,Test="38.00 read-only live binding probe",Utc=DateTime.UtcNow,ProcessId=target.Id,
+             ExecutableSha256=hash,Passed=passed,StableBoundaryCounters=stable,FunctionCallsAttempted=false,GameplayReady=false,
+-            Note="Reads are not an atomic snapshot; unchanged counters do not guarantee every object stayed unchanged.",Failure=failure,Evidence=evidence},new JsonSerializerOptions{WriteIndented=true}));
++            Note="Reads are not an atomic snapshot; unchanged counters do not guarantee every object stayed unchanged.",Failure=failure,StartupPatcher=startupPatcher,BindingReadAttempts=readAttempts,Evidence=evidence},new JsonSerializerOptions{WriteIndented=true}));
+         return new(file,passed,passed?"Read-only binding checks passed. Game function calls were not tested.":"Checks failed or were inconclusive; see live-test.json.");
+     }
+     [DllImport("kernel32.dll",SetLastError=true)]private static extern SafeProcessHandle OpenProcess(uint access,bool inherit,int pid);
+diff --git a/launcher/Emilyfn.Core/LiveReadRetry38.cs b/launcher/Emilyfn.Core/LiveReadRetry38.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.Core/LiveReadRetry38.cs
+@@ -0,0 +1,27 @@
++namespace Emilyfn.Core;
++
++// A bounded retry of read-only verification, never a relaxation of its validation.
++internal static class LiveReadRetry38
++{
++    internal sealed record Attempt(int Number,bool BoundaryCountersStable,bool Decoded,string? Failure);
++    internal static T Run<T>(Func<byte[]> boundary,Func<T> inspect,Action resetCache,List<Attempt> attempts)
++    {
++        for(int number=1;number<=3;number++)
++        {
++            resetCache();
++            byte[] before=boundary();
++            T result=default!;bool decoded=false;string? failure=null;
++            try { result=inspect();decoded=true; }
++            catch(InvalidDataException error) { failure=error.Message; }
++            bool stable=before.AsSpan().SequenceEqual(boundary());
++            attempts.Add(new(number,stable,decoded,failure));
++            if(decoded&&stable)return result;
++            if(number==3)
++                throw new InvalidDataException($"Live binding verification failed after {number} fresh reads. " +
++                    (stable?"Boundary counters were unchanged; this does not prove an atomic snapshot. ":"Name pool or object registry changed during the last read. ")+
++                    (failure??"Wait for startup to settle and retry."));
++            Thread.Sleep(75);
++        }
++        throw new InvalidOperationException("Unreachable read retry state.");
++    }
++}
+diff --git a/launcher/Emilyfn.Core/NamePool38.cs b/launcher/Emilyfn.Core/NamePool38.cs
+--- a/launcher/Emilyfn.Core/NamePool38.cs
++++ b/launcher/Emilyfn.Core/NamePool38.cs
+@@ -57,7 +57,7 @@
+                 int length = (h >> 6) ^ 0x26f;
+                 if (length == 0)
+                 {
+-                    if (offset + 10 > data.Length) throw new InvalidDataException("Invalid numbered entry.");
++                    if (offset + 10 > data.Length) throw new InvalidDataException($"Numbered name crosses block boundary: block={block}, offset=0x{offset:X}, available={data.Length-offset}, required=10, blockBytes={data.Length}, currentBlock={block==blocks.Count-1}.");
+                     numbered.Add(index, (BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(offset + 2)),
+                         DecodeIndex(BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(offset + 6)))));
+                     offset += 10;
+@@ -65,7 +65,7 @@
+                 else
+                 {
+                     int size = (2 + length * ((h & 1) != 0 ? 2 : 1) + 1) & ~1;
+-                    if (offset + size > data.Length) throw new InvalidDataException("Name crosses block boundary.");
++                    if (offset + size > data.Length) throw new InvalidDataException($"Name crosses block boundary: block={block}, offset=0x{offset:X}, header=0x{h:X4}, characters={length}, wide={(h&1)!=0}, available={data.Length-offset}, required={size}, blockBytes={data.Length}, currentBlock={block==blocks.Count-1}.");
+                     plain.Add(index, DecodePlain(data.AsSpan(offset, size))); offset += size;
+                 }
+             }
+diff --git a/launcher/Emilyfn.SdkTests/LiveReadRetryChecks.cs b/launcher/Emilyfn.SdkTests/LiveReadRetryChecks.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.SdkTests/LiveReadRetryChecks.cs
+@@ -0,0 +1,43 @@
++using Emilyfn.Core;
++
++static class LiveReadRetryChecks
++{
++    public static void Run()
++    {
++        var attempts=new List<LiveReadRetry38.Attempt>();int generation=0,reads=0;
++        int value=LiveReadRetry38.Run(()=>new byte[]{1},()=>
++        {
++            reads++;
++            if(generation==1)throw new InvalidDataException("Name crosses block boundary.");
++            return generation;
++        },()=>generation++,attempts);
++        if(value!=2||generation!=2||reads!=2||attempts.Count!=2||attempts[0].Decoded||!attempts[1].Decoded)
++            throw new Exception("Transient decode failure did not restart with a fresh cache.");
++        attempts.Clear();generation=0;int boundaries=0;
++        value=LiveReadRetry38.Run(()=>new byte[]{(byte)(++boundaries==1?0:1)},()=>generation,()=>generation++,attempts);
++        if(value!=2||attempts.Count!=2||attempts[0].BoundaryCountersStable||!attempts[1].BoundaryCountersStable)
++            throw new Exception("A decoded result with changed counters was accepted.");
++        attempts.Clear();generation=0;bool rejected=false;
++        try { LiveReadRetry38.Run<int>(()=>new byte[]{1},()=>throw new InvalidDataException("block=4, offset=0x1FFF0"),()=>generation++,attempts); }
++        catch(InvalidDataException error) { rejected=error.Message.Contains("block=4")&&error.Message.Contains("3 fresh reads"); }
++        if(!rejected||generation!=3||attempts.Count!=3||attempts.Any(a=>a.Decoded))
++            throw new Exception("Persistent malformed data was accepted or its context lost.");
++        attempts.Clear();generation=0;boundaries=0;rejected=false;
++        try { LiveReadRetry38.Run(()=>new byte[]{(byte)++boundaries},()=>1,()=>generation++,attempts); }
++        catch(InvalidDataException) { rejected=true; }
++        if(!rejected||generation!=3||attempts.Any(a=>a.BoundaryCountersStable))throw new Exception("Unstable reads escaped the retry bound.");
++        attempts.Clear();generation=0;rejected=false;
++        try { LiveReadRetry38.Run<int>(()=>new byte[]{1},()=>throw new TimeoutException(),()=>generation++,attempts); }
++        catch(TimeoutException) { rejected=true; }
++        if(!rejected||generation!=1)throw new Exception("Retry extended an expired read deadline.");
++        var shortBlock=Convert.FromHexString("de9a5c39743b409a");rejected=false;
++        try { NamePool38.DecodeBlocks(new[]{shortBlock}); }
++        catch(InvalidDataException error)
++        {
++            rejected=error.Message.Contains("block=0")&&error.Message.Contains("offset=0x6")&&
++                error.Message.Contains("available=2")&&error.Message.Contains("required=8")&&error.Message.Contains("currentBlock=True");
++        }
++        if(!rejected)throw new Exception("Truncated name lost its block/offset/size diagnostics.");
++        Console.WriteLine("Live read recovery checks passed: fresh-cache retry, changed counters, persistent corruption, retry/deadline bounds and precise name-boundary errors.");
++    }
++}
+diff --git a/launcher/Emilyfn.SdkTests/Program.cs b/launcher/Emilyfn.SdkTests/Program.cs
+--- a/launcher/Emilyfn.SdkTests/Program.cs
++++ b/launcher/Emilyfn.SdkTests/Program.cs
+@@ -38,6 +38,7 @@
+ FunctionMetadataChecks.Run(root);
+ DispatchTargetChecks.Run();
+ EarlyStartupPatcherChecks.Run();
++LiveReadRetryChecks.Run();
+ 
+ if (args.Length > 1)
+ {
+diff --git a/launcher/README.md b/launcher/README.md
+--- a/launcher/README.md
++++ b/launcher/README.md
+@@ -74,6 +74,12 @@
+ observed in the game's command line. It never exports the command line itself.
+ No full memory dump is needed for this test. Close the diagnostic game manually
+ when finished; it is separate from the normal Play session lifecycle.
++
++Live tests retry verification up to three times with fresh read caches if decoding
++fails or boundary counters change. Persistent name-boundary errors are saved in
++the JSON with the block, offset and required/available sizes. Share that report
++even when the test fails: startup-patcher observations are retained independently
++of name decoding. Invalid or incomplete data never permits a function call.
+ 
+ If this launch exits immediately, its report includes the observed exit code;
+ **Capture 38.00 startup** remains available for a full early-exit trace. The

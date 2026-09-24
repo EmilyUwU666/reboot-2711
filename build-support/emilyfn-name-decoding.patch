@@ -1,0 +1,499 @@
+--- /dev/null
++++ b/launcher/Emilyfn.Core/NamePool38.cs
+@@ -0,0 +1,87 @@
++using System.Buffers.Binary;
++using System.Text;
++namespace Emilyfn.Core;
++
++// Exact CL47722112 name format; does not describe UObject layouts.
++public static class NamePool38
++{
++    public const ulong PoolRva = 0x16c1c5c0;
++    public sealed record Entry(uint Index, string Name, bool Numbered);
++    public static uint DecodeIndex(uint stored)
++    {
++        if (stored == 0) return 0;
++        uint value = unchecked(((stored - 1) ^ 0x6f01622bu) + 1);
++        return value == 0 ? 0x90fe9dd5u : value;
++    }
++    public static string DecodePlain(ReadOnlySpan<byte> entry)
++    {
++        if (entry.Length < 2) throw new InvalidDataException("Missing name header.");
++        ushort h = BinaryPrimitives.ReadUInt16LittleEndian(entry);
++        int length = (h >> 6) ^ 0x26f;
++        if (length == 0) throw new InvalidDataException("Numbered name needs pool resolution.");
++        bool wide = (h & 1) != 0;
++        int count = length * (wide ? 2 : 1);
++        if (entry.Length < count + 2) throw new InvalidDataException("Truncated name payload.");
++        byte[] bytes = new byte[count]; uint state = (uint)length;
++        for (int i = 0; i < count; i++)
++        {
++            state = unchecked(state * 0xffffde61u + 0xfe93e844u);
++            bytes[i] = (byte)(entry[i + 2] ^ unchecked((byte)(state + 0x4a)));
++        }
++        if (wide) return new UnicodeEncoding(false, false, true).GetString(bytes);
++        return new string(bytes.Select(b => b < 128 ? (char)b : (char)(0xff00 + b)).ToArray());
++    }
++    public static List<Entry> DecodeBlocks(IReadOnlyList<byte[]> blocks)
++    {
++        if (blocks.Count is < 1 or > 2048) throw new InvalidDataException("Invalid block count.");
++        var plain = new Dictionary<uint, string>();
++        var numbered = new Dictionary<uint, (uint Number, uint Reference)>();
++        for (int block = 0; block < blocks.Count; block++)
++        {
++            byte[] data = blocks[block];
++            if (data.Length > 131072 || data.Length % 2 != 0 || (block < blocks.Count - 1 && data.Length != 131072))
++                throw new InvalidDataException("Invalid name block bounds.");
++            for (int offset = 0; offset < data.Length;)
++            {
++                ushort h = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(offset));
++                if (h == 0)
++                {
++                    // Some numbered allocations include two bytes of alignment padding.
++                    if (offset % 4 == 0 && offset + 4 <= data.Length &&
++                        (BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(offset + 2)) >> 6) == 0x26f)
++                    { offset += 2; continue; }
++                    if (data.AsSpan(offset).IndexOfAnyExcept((byte)0) < 0) break;
++                    throw new InvalidDataException($"Unknown name padding: block {block}, offset {offset:X}.");
++                }
++                uint index = ((uint)block << 16) | ((uint)offset / 2);
++                int length = (h >> 6) ^ 0x26f;
++                if (length == 0)
++                {
++                    if (offset + 10 > data.Length) throw new InvalidDataException("Invalid numbered entry.");
++                    numbered.Add(index, (BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(offset + 2)),
++                        DecodeIndex(BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(offset + 6)))));
++                    offset += 10;
++                }
++                else
++                {
++                    int size = (2 + length * ((h & 1) != 0 ? 2 : 1) + 1) & ~1;
++                    if (offset + size > data.Length) throw new InvalidDataException("Name crosses block boundary.");
++                    plain.Add(index, DecodePlain(data.AsSpan(offset, size))); offset += size;
++                }
++            }
++        }
++        var result = plain.Select(p => new Entry(p.Key, p.Value, false)).ToList();
++        foreach (var pair in numbered)
++        {
++            if (!plain.TryGetValue(pair.Value.Reference, out string? name))
++                throw new InvalidDataException("Numbered name reference is missing or is not plain.");
++            uint stored = pair.Value.Number, v = unchecked(stored - 1);
++            int number = stored == 0 ? -1 : unchecked((int)(v == 0x0685c294u ? v : v ^ 0xf97a3d6bu));
++            result.Add(new(pair.Key, name + "_" + number.ToString(System.Globalization.CultureInfo.InvariantCulture), true));
++        }
++        result.Sort((a,b) => a.Index.CompareTo(b.Index));
++        if (result.Count == 0 || result[0].Index != 0 || result[0].Name != "None")
++            throw new InvalidDataException("Name sentinel did not decode to None.");
++        return result;
++    }
++}
+--- /dev/null
++++ b/launcher/Emilyfn.Core/CaptureNameExporter38.cs
+@@ -0,0 +1,122 @@
++using System.Buffers.Binary;
++using System.Text;
++using System.Text.Json;
++namespace Emilyfn.Core;
++
++public static class CaptureNameExporter38
++{
++    public sealed record Result(string Folder, int PlainNames, int NumberedNames);
++    private sealed record Range(ulong Start, ulong Size, long FileOffset);
++    public static Task<Result> ExportAsync(string dump, string destination) => Task.Run(() => Export(dump, destination));
++    private static Result Export(string dump, string destination)
++    {
++        using var input = new FileStream(dump, FileMode.Open, FileAccess.Read, FileShare.Read);
++        byte[] At(long offset, int size)
++        {
++            if (offset < 0 || size < 0 || offset > input.Length - size) throw new InvalidDataException("Truncated minidump.");
++            input.Position = offset; var data = new byte[size]; input.ReadExactly(data); return data;
++        }
++        static uint U32(byte[] b, int i = 0) => BinaryPrimitives.ReadUInt32LittleEndian(b.AsSpan(i));
++        static ulong U64(byte[] b, int i = 0) => BinaryPrimitives.ReadUInt64LittleEndian(b.AsSpan(i));
++        byte[] header = At(0, 32);
++        if (U32(header) != 0x504d444d) throw new InvalidDataException("Select a Windows minidump (.dmp).");
++        uint count = U32(header, 8), directory = U32(header, 12);
++        if (count is 0 or > 128) throw new InvalidDataException("Invalid minidump directory.");
++        var streams = new Dictionary<uint, (uint Size, uint Offset)>();
++        for (uint i = 0; i < count; i++)
++        {
++            byte[] entry = At((long)directory + i * 12L, 12);
++            uint type = U32(entry), size = U32(entry,4), offset = U32(entry,8);
++            if ((ulong)offset + size > (ulong)input.Length) throw new InvalidDataException("Invalid stream bounds.");
++            if (type != 0 && !streams.TryAdd(type,(size,offset))) throw new InvalidDataException("Duplicate minidump stream.");
++        }
++        if (!streams.TryGetValue(9, out var memory) || !streams.TryGetValue(4, out var modules))
++            throw new InvalidDataException("A full-memory dump with its module list is required.");
++        if (memory.Size < 16) throw new InvalidDataException("Missing memory directory.");
++        byte[] mh = At(memory.Offset,16); ulong ranges = U64(mh), cursor = U64(mh,8);
++        if (ranges > 1_000_000 || ranges > ((ulong)memory.Size - 16) / 16) throw new InvalidDataException("Invalid memory-range count.");
++        var map = new List<Range>();
++        for (ulong i = 0; i < ranges; i++)
++        {
++            byte[] entry = At(checked((long)memory.Offset + 16 + (long)i * 16),16);
++            ulong start = U64(entry), size = U64(entry,8);
++            if (cursor > (ulong)input.Length || size > (ulong)input.Length - cursor || start > ulong.MaxValue - size)
++                throw new InvalidDataException("Incomplete memory payload.");
++            if (size != 0) map.Add(new(start,size,(long)cursor)); cursor += size;
++        }
++        map.Sort((a,b) => a.Start.CompareTo(b.Start));
++        for (int i = 1; i < map.Count; i++) if (map[i-1].Start + map[i-1].Size > map[i].Start)
++            throw new InvalidDataException("Overlapping memory ranges.");
++        byte[] Read(ulong address, int size)
++        {
++            byte[] result = new byte[size]; int copied = 0;
++            while (copied < size)
++            {
++                int lo=0, hi=map.Count-1, found=-1;
++                while (lo<=hi) { int mid=lo+(hi-lo)/2; if(map[mid].Start<=address) {found=mid;lo=mid+1;} else hi=mid-1; }
++                if(found<0 || address-map[found].Start>=map[found].Size) throw new InvalidDataException("Required memory was not captured.");
++                var range=map[found]; ulong within=address-range.Start;
++                int take=(int)Math.Min((ulong)(size-copied),range.Size-within);
++                At(checked(range.FileOffset+(long)within),take).CopyTo(result,copied);
++                copied+=take;address=checked(address+(ulong)take);
++            }
++            return result;
++        }
++        if (modules.Size < 4) throw new InvalidDataException("Missing module directory.");
++        uint moduleCount=U32(At(modules.Offset,4));
++        if (moduleCount > (modules.Size-4)/108) throw new InvalidDataException("Invalid module count.");
++        ulong imageBase=0; bool foundImage=false;
++        for(uint i=0;i<moduleCount;i++)
++        {
++            byte[] entry=At((long)modules.Offset+4+i*108L,108);
++            uint nr=U32(entry,20), length=U32(At(nr,4));
++            if(length>65536 || length%2!=0) throw new InvalidDataException("Invalid module name.");
++            string name=Encoding.Unicode.GetString(At((long)nr+4,(int)length)).Replace('\\','/').Split('/').Last();
++            if(!name.Equals("FortniteClient-Win64-Shipping.exe",StringComparison.OrdinalIgnoreCase)) continue;
++            if(foundImage || U32(entry,8)!=0x18777000) throw new InvalidDataException("Unsupported/ambiguous game image.");
++            imageBase=U64(entry);foundImage=true;
++        }
++        if(!foundImage) throw new InvalidDataException("Fortnite module was not found.");
++        foreach(var anchor in Anchors)
++            if(!Read(checked(imageBase+anchor.Rva),anchor.Bytes.Length).AsSpan().SequenceEqual(anchor.Bytes))
++                throw new InvalidDataException("The dump does not match the validated 38.00 name-decoding instructions.");
++        if(Read(checked(imageBase+0x16c1c5a8),1)[0]!=1) throw new InvalidDataException("Name pool is not initialized. Capture the running game later.");
++        ulong pool=checked(imageBase+NamePool38.PoolRva);
++        byte[] ph=Read(pool+8,8);uint current=U32(ph), position=U32(ph,4);
++        if(current>=2048 || position>131072 || position%2!=0) throw new InvalidDataException("Invalid or oversized name pool.");
++        var blocks=new List<byte[]>();
++        for(uint i=0;i<=current;i++)
++        {
++            ulong address=U64(Read(checked(pool+16+i*8),8));
++            if(address==0) throw new InvalidDataException("Missing name block.");
++            blocks.Add(Read(address,(int)(i==current?position:131072)));
++        }
++        var names=NamePool38.DecodeBlocks(blocks);
++        string folder=Path.Combine(Path.GetFullPath(destination),"Emilyfn-38-name-metadata-"+Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(folder);
++        try
++        {
++            using(var output=new StreamWriter(Path.Combine(folder,"names.hpp"),false,new UTF8Encoding(false)))
++            {
++                output.WriteLine("#pragma once\n#include <array>\n#include <cstdint>\nnamespace emilyfn_names38 {\n// Captured names only: no verified UObject layouts or dispatch wrappers.\ninline constexpr bool sdk_ready = false;\nstruct Name { std::uint32_t index; const char* text; bool numbered; };\ninline constexpr std::array<Name, "+names.Count+"> names = {{");
++                foreach(var name in names)
++                {
++                    string escaped=string.Concat(Encoding.UTF8.GetBytes(name.Name).Select(b=>"\\"+Convert.ToString(b,8).PadLeft(3,'0')));
++                    output.WriteLine("{"+name.Index+"u, \""+escaped+"\", "+(name.Numbered?"true":"false")+"},");
++                }
++                output.WriteLine("}};\n}");
++            }
++            int numbered=names.Count(n=>n.Numbered);
++            File.WriteAllText(Path.Combine(folder,"report.json"),JsonSerializer.Serialize(new {
++                Profile="38.00 CL47722112 name-decoding anchors",SourceDumpBytes=input.Length,ModuleCount=moduleCount,
++                MemoryRanges=map.Count,NameBlocks=blocks.Count,PlainNames=names.Count-numbered,NumberedNames=numbered,
++                UObjectRegistryVerified=false,FunctionDispatchVerified=false,SdkReady=false,
++                Limitation="Name metadata only. Class/property layouts and function dispatch are not verified."
++            },new JsonSerializerOptions{WriteIndented=true}));
++            File.WriteAllText(Path.Combine(folder,"README.txt"),"names.hpp contains captured names, not a usable gameplay SDK. UObject registry, layouts and function dispatch remain unverified. Runtime names may be private; keep generated files private.\n");
++            return new(folder,names.Count-numbered,numbered);
++        }
++        catch { Directory.Delete(folder,true); throw; }
++    }
++    private static readonly (ulong Rva, byte[] Bytes)[] Anchors = { (0x28daeUL, Convert.FromHexString("8b0185c07413ffc8352b62016fffc0bfd59dfe900f45f8eb0231ff")), (0x3a00362UL, Convert.FromHexString("4889d00fb711f6c201750fc1ea0681fa6f020000751631d2eb56c1ea0681fa6f020000756b31c9e9a70000000fb7d281f26f02000083fa014189d04183d0004531c969d261deffff81c244e893fe448d524a46325409024688140849ffc14d39c875df0fb711c1ea064881f26f020000c60410000fb709c1e9064881f16f0200000fbe1408668914484883c1ff72f2c381f26f020000448d04124183f8014183d0004531c969d261deffff81c244e893fe448d524a46325409024688140849ffc14d39c875df0fb709c1e9064881f16f02000066c704480000c3")) };
++}
+--- a/launcher/Emilyfn.Core/StartupCapture.cs
++++ b/launcher/Emilyfn.Core/StartupCapture.cs
+@@ -9,11 +9,12 @@
+ public static class StartupCapture
+ {
+     public sealed record Result(int ProcessId, string Folder, bool EarlyDumpSaved, int? ExitCode);
+-    public static Task<Result> RunAsync(ProcessStartInfo start, string folder, string tracePath, IProgress<string>? progress = null) =>
+-        Task.Run(() => Run(start, folder, tracePath, progress));
++    public static Task<Result> RunAsync(ProcessStartInfo start, string folder, string tracePath, IProgress<string>? progress = null, int laterCaptureDelaySeconds = 2) =>
++        Task.Run(() => Run(start, folder, tracePath, progress, laterCaptureDelaySeconds));
+ 
+-    private static Result Run(ProcessStartInfo start, string folder, string tracePath, IProgress<string>? progress)
+-    {
++    private static Result Run(ProcessStartInfo start, string folder, string tracePath, IProgress<string>? progress, int laterCaptureDelaySeconds)
++    {
++        if (laterCaptureDelaySeconds is < 2 or > 120) throw new ArgumentOutOfRangeException(nameof(laterCaptureDelaySeconds));
+         if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess) throw new PlatformNotSupportedException("Startup capture requires Windows x64.");
+         Directory.CreateDirectory(folder);
+         Directory.CreateDirectory(Path.GetDirectoryName(tracePath)!);
+@@ -83,10 +84,13 @@
+                 }
+             }
+             var clock = Stopwatch.StartNew(); Log("Startup debugger detached; observing game execution.");
+-            progress?.Report("Observing startup for 10 seconds…");
++            int observationSeconds = Math.Max(10, laterCaptureDelaySeconds + 2);
++            Log($"Later capture delay: {laterCaptureDelaySeconds} seconds; elapsed time does not confirm engine readiness.");
++            progress?.Report($"Waiting {laterCaptureDelaySeconds} seconds before the later capture…");
++            int lastCountdown = -1;
+             var descendants = new HashSet<uint> { pi.pid }; var seen = new HashSet<uint>();
+             int? exit = null; bool laterAttempted = false;
+-            while (clock.Elapsed < TimeSpan.FromSeconds(10))
++            while (clock.Elapsed < TimeSpan.FromSeconds(observationSeconds))
+             {
+                 try
+                 {
+@@ -102,7 +106,7 @@
+                     if (!GetExitCodeProcess(pi.process, out uint code)) throw new Win32Exception(Marshal.GetLastWin32Error());
+                     exit = unchecked((int)code); Log($"Root exited: code {exit}; observed running duration after debugger detach {clock.ElapsedMilliseconds} ms.");
+                 }
+-                if (!laterAttempted && exit is null && clock.ElapsedMilliseconds >= 2000)
++                if (!laterAttempted && exit is null && clock.ElapsedMilliseconds >= laterCaptureDelaySeconds * 1000L)
+                 {
+                     laterAttempted = true;
+                     try
+@@ -117,6 +121,12 @@
+                         }
+                     }
+                     catch (Exception error) { Log("Later capture failed: " + error.Message); }
++                }
++                if (exit is not null && clock.Elapsed.TotalSeconds >= 2) break;
++                if (!laterAttempted)
++                {
++                    int remaining = Math.Max(0, laterCaptureDelaySeconds - (int)clock.Elapsed.TotalSeconds);
++                    if (remaining != lastCountdown) { progress?.Report($"Later capture in {remaining} seconds. Keep the game open…"); lastCountdown = remaining; }
+                 }
+                 Thread.Sleep(100);
+             }
+--- a/launcher/Emilyfn.Core/DiagnosticGameLaunch.cs
++++ b/launcher/Emilyfn.Core/DiagnosticGameLaunch.cs
+@@ -7,7 +7,7 @@
+ {
+     // The exact uploaded 38.00 CL47722112 image. This is not a supported gameplay profile.
+     public const string ImageSha256 = "f4ddac1044edd0e8cc123f586f7204de8724989b6adcf25b2e34b4855747a5c0";
+-    public static async Task<StartupCapture.Result> StartAsync(string executable, string logsDirectory, string? captureFolder = null, IProgress<string>? progress = null)
++    public static async Task<StartupCapture.Result> StartAsync(string executable, string logsDirectory, string? captureFolder = null, IProgress<string>? progress = null, int laterCaptureDelaySeconds = 30)
+     {
+         if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess)
+             throw new PlatformNotSupportedException("Diagnostic launch requires Windows x64.");
+@@ -34,6 +34,6 @@
+         start.ArgumentList.Add("-abslog=" + log);
+         // No auth/game DLL injection, companion processes, or changes to EAC or launcher requirements.
+         captureFolder ??= Path.Combine(logsDirectory, "startup-capture-" + Guid.NewGuid().ToString("N"));
+-        return await StartupCapture.RunAsync(start, captureFolder, log + ".startup.log", progress);
++        return await StartupCapture.RunAsync(start, captureFolder, log + ".startup.log", progress, laterCaptureDelaySeconds);
+     }
+ }
+--- a/launcher/Emilyfn.App/MemoryCaptureWindow.cs
++++ b/launcher/Emilyfn.App/MemoryCaptureWindow.cs
+@@ -15,18 +15,21 @@
+     private readonly Func<string, Task> exportLogs;
+     private readonly string logsDirectory;
+     private readonly Button launch = new() { Content = "Capture 38.00 startup", Margin = new Thickness(12, 0, 0, 0) };
++    private readonly ComboBox captureDelay = new() { ItemsSource = new[] { 15, 30, 60, 120 }, SelectedItem = 30, Width = 100, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 6, 0, 12) };
+     private bool busy;
+ 
+     public MemoryCaptureWindow(Func<string, Task> exportLogs, string logsDirectory)
+     {
+         this.exportLogs = exportLogs;
+         this.logsDirectory = logsDirectory;
+-        Title = "Emilyfn — Capture game memory"; Width = 820; Height = 430;
++        Title = "Emilyfn — Capture game memory"; Width = 820; Height = 520;
+         WindowStartupLocation = WindowStartupLocation.CenterOwner;
+         var panel = new StackPanel { Margin = new Thickness(24) };
+         panel.Children.Add(new TextBlock { Text = "Select the running game to capture", FontSize = 20 });
+         panel.Children.Add(new TextBlock { Text = "Keep Fortnite open at the lobby or stuck screen. This saves full game memory locally and may take several GB. Memory can contain session credentials; keep the files private. Nothing is uploaded automatically.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
+         panel.Children.Add(targets);
++        panel.Children.Add(new TextBlock { Text = "Startup: seconds to wait before the later snapshot" });
++        panel.Children.Add(captureDelay);
+         var buttons = new StackPanel { Orientation = Orientation.Horizontal };
+         buttons.Children.Add(capture); buttons.Children.Add(refresh); buttons.Children.Add(launch); panel.Children.Add(buttons); panel.Children.Add(status);
+         panel.Children.Add(new TextBlock { Text = "Startup capture saves memory at the initial Windows loader breakpoint, observes startup, then attempts a later capture if it stays open. Early memory may lack SDK objects. It does not enable gameplay or remove Epic/EAC startup requirements. Keep the complete game installation in place.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
+@@ -55,11 +58,11 @@
+         var output = new OpenFolderDialog { Title = "Choose space for startup memory captures" };
+         if (output.ShowDialog(this) != true) return;
+         var folder = System.IO.Path.Combine(output.FolderName, "Emilyfn-startup-" + Guid.NewGuid().ToString("N"));
+-        busy = true; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = false;
++        busy = true; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = false;
+         status.Text = "Checking the 38.00 executable…";
+         try
+         {
+-            var result = await DiagnosticGameLaunch.StartAsync(dialog.FileName, logsDirectory, folder, new Progress<string>(message => status.Text = message));
++            var result = await DiagnosticGameLaunch.StartAsync(dialog.FileName, logsDirectory, folder, new Progress<string>(message => status.Text = message), (int)captureDelay.SelectedItem);
+             Refresh();
+             status.Text = $"Saved to {result.Folder}. Early snapshot: {(result.EarlyDumpSaved ? "saved before engine initialization" : "failed; see startup.log")}. " +
+                 (result.ExitCode is int code ? $"Game exited with code {code}." : $"PID {result.ProcessId} was still running when observation ended.");
+@@ -69,14 +72,14 @@
+ 
+         }
+         catch (Exception error) { status.Text = error.Message; }
+-        finally { busy = false; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = true; }
++        finally { busy = false; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = true; }
+     }
+     private async Task Capture()
+     {
+         if (targets.SelectedItem is not CaptureTarget target) { status.Text = "Select a game process first."; return; }
+         var dialog = new OpenFolderDialog { Title = "Choose a folder with space for a full memory dump" };
+         if (dialog.ShowDialog(this) != true) return;
+-        busy = true; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = false;
++        busy = true; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = false;
+         try
+         {
+             var folder = await GameMemoryCapture.CaptureAsync(target, dialog.FolderName, new Progress<string>(s => status.Text = s));
+@@ -88,6 +91,6 @@
+             catch { /* Saved files remain usable if Explorer is unavailable. */ }
+         }
+         catch (Exception error) { status.Text = error.Message; }
+-        finally { busy = false; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = true; }
++        finally { busy = false; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = true; }
+     }
+ }
+--- a/launcher/Emilyfn.App/SdkExportWindow.cs
++++ b/launcher/Emilyfn.App/SdkExportWindow.cs
+@@ -11,17 +11,36 @@
+     private readonly TextBox build = new() { Margin = new Thickness(0, 8, 0, 12) };
+     private readonly Button export = new() { Content = "Choose decoded dump and export headers" };
+     private readonly TextBlock status = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) };
++    private readonly Button inspect = new() { Content = "Export 38.00 names from a memory capture", Margin = new Thickness(0, 12, 0, 0) };
+     private bool busy;
+     public SdkExportWindow()
+     {
+-        Title = "Emilyfn — SDK metadata headers"; Width = 720; Height = 400; WindowStartupLocation = WindowStartupLocation.CenterOwner;
++        Title = "Emilyfn — SDK metadata headers"; Width = 720; Height = 480; WindowStartupLocation = WindowStartupLocation.CenterOwner;
+         var panel = new StackPanel { Margin = new Thickness(24) };
+         panel.Children.Add(new TextBlock { Text = "Generate SDK metadata headers", FontSize = 20 });
+-        panel.Children.Add(new TextBlock { Text = "Import ClassesInfo.json, StructsInfo.json and FunctionsInfo.json from one Dumpspace snapshot. Exports C++17 class, property and function metadata. Raw memory dumps cannot be decoded here yet; live 38.00 SDK generation is still unavailable.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 12) });
++        panel.Children.Add(new TextBlock { Text = "Import ClassesInfo.json, StructsInfo.json and FunctionsInfo.json from one Dumpspace snapshot. Exports C++17 class, property and function metadata. The separate 38.00 capture export produces decoded names only. Complete live SDK generation remains unavailable.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 12) });
+         panel.Children.Add(new TextBlock { Text = "Source dump build and CL (as reported by its author)" });
+-        panel.Children.Add(build); panel.Children.Add(export); panel.Children.Add(status); Content = panel;
++        panel.Children.Add(build); panel.Children.Add(export); panel.Children.Add(inspect); panel.Children.Add(status); Content = panel;
++        inspect.Click += async (_, _) => await InspectCapture();
+         export.Click += async (_, _) => await Export();
+         Closing += (_, e) => { if (busy) e.Cancel = true; };
++    }
++    private async Task InspectCapture()
++    {
++        var source = new OpenFileDialog { Title = "Select the 38.00 full memory capture", Filter = "Windows minidump|*.dmp", CheckFileExists = true };
++        if (source.ShowDialog(this) != true) return;
++        var output = new OpenFolderDialog { Title = "Choose name metadata output folder" };
++        if (output.ShowDialog(this) != true) return;
++        busy = true; export.IsEnabled = inspect.IsEnabled = build.IsEnabled = false;
++        status.Text = "Checking captured memory and decoding names…";
++        try
++        {
++            var result = await CaptureNameExporter38.ExportAsync(source.FileName, output.FolderName);
++            status.Text = $"Saved {result.PlainNames:N0} plain names and {result.NumberedNames:N0} numbered names to {result.Folder}. These are name metadata only; UObject layouts and a full SDK are not verified.";
++            try { Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { result.Folder } }); } catch { }
++        }
++        catch (Exception error) { status.Text = error.Message; }
++        finally { busy = false; export.IsEnabled = inspect.IsEnabled = build.IsEnabled = true; }
+     }
+     private async Task Export()
+     {
+@@ -30,7 +49,7 @@
+         if (source.ShowDialog(this) != true) return;
+         var output = new OpenFolderDialog { Title = "Choose SDK output folder" };
+         if (output.ShowDialog(this) != true) return;
+-        busy = true; export.IsEnabled = build.IsEnabled = false; status.Text = "Generating headers…";
++        busy = true; export.IsEnabled = inspect.IsEnabled = build.IsEnabled = false; status.Text = "Generating headers…";
+         try
+         {
+             var result = await SdkHeaderExporter.ExportAsync(source.FolderName, output.FolderName, build.Text.Trim());
+@@ -38,6 +57,6 @@
+             try { Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { result.Folder } }); } catch { }
+         }
+         catch (Exception error) { status.Text = error.Message; }
+-        finally { busy = false; export.IsEnabled = build.IsEnabled = true; }
++        finally { busy = false; export.IsEnabled = inspect.IsEnabled = build.IsEnabled = true; }
+     }
+ }
+--- /dev/null
++++ b/launcher/Emilyfn.SdkTests/NamePoolChecks.cs
+@@ -0,0 +1,69 @@
++using Emilyfn.Core;
++using System.Buffers.Binary;
++using System.Text;
++static class NamePoolChecks
++{
++    public static async Task Run(string root)
++    {
++        void Check(bool value,string reason) { if(!value) throw new Exception(reason); }
++        void Reject(Action action) { try {action();} catch(InvalidDataException) {return;} throw new Exception("Invalid name data accepted"); }
++        Check(NamePool38.DecodePlain(Convert.FromHexString("de9a5c39743b"))=="None","Captured None vector");
++        Check(NamePool38.DecodePlain(Convert.FromHexString("409a9bba3605879c"))=="Object","Captured Object vector");
++        Check(NamePool38.DecodePlain(Convert.FromHexString("969a32744fb071"))=="Actor","Captured Actor vector");
++        Check(NamePool38.DecodePlain(Convert.FromHexString("ac9a307b5aac70"))=="Class","Captured Class vector");
++        Check(NamePool38.DecodePlain(Convert.FromHexString("e899d02ff001d203c11c"))=="Function","Captured Function vector");
++        Check(NamePool38.DecodePlain(Convert.FromHexString("709a87ac2e15879c"))=="Struct","Captured Struct vector");
++        Reject(()=>NamePool38.DecodePlain(new byte[]{0xde}));
++        Reject(()=>NamePool38.DecodePlain(new byte[]{0xde,0x9a,0x5c}));
++        byte[] block=new byte[32];
++        Convert.FromHexString("de9a5c39743b").CopyTo(block,0);
++        Convert.FromHexString("2e99eae964842472c51aacde4900").CopyTo(block,6);
++        BinaryPrimitives.WriteUInt16LittleEndian(block.AsSpan(22),0x9bda);
++        BinaryPrimitives.WriteUInt32LittleEndian(block.AsSpan(24),0xf97a3d6c);
++        BinaryPrimitives.WriteUInt32LittleEndian(block.AsSpan(28),((3u-1)^0x6f01622bu)+1);
++        var names=NamePool38.DecodeBlocks(new[]{block});
++        Check(names.Count==3 && names[2].Name=="Steam_Touch_0" && names[2].Numbered,"Numbered name and alignment");
++        byte[] invalid=(byte[])block.Clone();invalid[20]=1;
++        Reject(()=>NamePool38.DecodeBlocks(new[]{invalid}));
++        invalid=(byte[])block.Clone();Array.Fill<byte>(invalid,0xff,28,4);
++        Reject(()=>NamePool38.DecodeBlocks(new[]{invalid}));
++        const ulong image=0x4b0000,nameAddress=0x23000000000;
++        byte[] poolBytes=new byte[32];BinaryPrimitives.WriteUInt32LittleEndian(poolBytes.AsSpan(12),32);
++        BinaryPrimitives.WriteUInt64LittleEndian(poolBytes.AsSpan(16),nameAddress);
++        var memory=new List<(ulong Address,byte[] Bytes)> {
++            (image+0x16c1c5a8,new byte[]{1}), (image+0x16c1c5c0,poolBytes), (nameAddress,block),
++            (image+0x28dae,Convert.FromHexString("8b0185c07413ffc8352b62016fffc0bfd59dfe900f45f8eb0231ff")),
++            (image+0x3a00362,Convert.FromHexString("4889d00fb711f6c201750fc1ea0681fa6f020000751631d2eb56c1ea0681fa6f020000756b31c9e9a70000000fb7d281f26f02000083fa014189d04183d0004531c969d261deffff81c244e893fe448d524a46325409024688140849ffc14d39c875df0fb711c1ea064881f26f020000c60410000fb709c1e9064881f16f0200000fbe1408668914484883c1ff72f2c381f26f020000448d04124183f8014183d0004531c969d261deffff81c244e893fe448d524a46325409024688140849ffc14d39c875df0fb709c1e9064881f16f02000066c704480000c3"))
++        };
++        byte[] moduleName=Encoding.Unicode.GetBytes(@"C:\Game\FortniteClient-Win64-Shipping.exe");
++        const int directory=32,memoryDirectory=56;
++        int memorySize=16+memory.Count*16,moduleDirectory=memoryDirectory+memorySize;
++        int stringOffset=moduleDirectory+112,dataOffset=stringOffset+4+moduleName.Length;
++        using var bytes=new MemoryStream();using(var writer=new BinaryWriter(bytes,Encoding.UTF8,true))
++        {
++            writer.Write(0x504d444du);writer.Write(0xa793u);writer.Write(2u);writer.Write((uint)directory);writer.Write(new byte[16]);
++            writer.Write(9u);writer.Write((uint)memorySize);writer.Write((uint)memoryDirectory);
++            writer.Write(4u);writer.Write(112u);writer.Write((uint)moduleDirectory);
++            writer.Write((ulong)memory.Count);writer.Write((ulong)dataOffset);
++            foreach(var range in memory){writer.Write(range.Address);writer.Write((ulong)range.Bytes.Length);}
++            writer.Write(1u);writer.Write(image);writer.Write(0x18777000u);writer.Write(0u);writer.Write(0u);writer.Write((uint)stringOffset);writer.Write(new byte[84]);
++            writer.Write((uint)moduleName.Length);writer.Write(moduleName);
++            foreach(var range in memory)writer.Write(range.Bytes);
++        }
++        string file=Path.Combine(root,"names-valid.dmp");File.WriteAllBytes(file,bytes.ToArray());
++        var exported=await CaptureNameExporter38.ExportAsync(file,root);
++        Check(exported.PlainNames==2 && exported.NumberedNames==1,"Dump export counts");
++        Check(File.ReadAllText(Path.Combine(exported.Folder,"report.json")).Contains("\"SdkReady\": false"),"SDK readiness incorrectly claimed");
++        File.AppendAllText(Path.Combine(root,"sdk-smoke.cpp"),"\n#include \""+Path.Combine(exported.Folder,"names.hpp").Replace('\\','/')+"\"\nstatic_assert(emilyfn_names38::names.size()==3);\nstatic_assert(!emilyfn_names38::sdk_ready);\n");
++        byte[] truncated=bytes.ToArray()[..^1];File.WriteAllBytes(file,truncated);
++        bool refused=false;try{await CaptureNameExporter38.ExportAsync(file,root);}catch(InvalidDataException){refused=true;}
++        Check(refused,"Truncated dump accepted");
++        byte[] uninitialized=bytes.ToArray();uninitialized[dataOffset]=0;File.WriteAllBytes(file,uninitialized);
++        refused=false;try{await CaptureNameExporter38.ExportAsync(file,root);}catch(InvalidDataException){refused=true;}
++        Check(refused,"Uninitialized pool accepted");
++        byte[] wrong=bytes.ToArray();wrong[^1]^=1;File.WriteAllBytes(file,wrong);
++        refused=false;try{await CaptureNameExporter38.ExportAsync(file,root);}catch(InvalidDataException){refused=true;}
++        Check(refused,"Wrong instruction anchors accepted");
++        Console.WriteLine("38.00 names: captured vectors, numbered alignment, invalid references, dump parsing, truncation and readiness checks passed.");
++    }
++}
+--- a/launcher/Emilyfn.SdkTests/Program.cs
++++ b/launcher/Emilyfn.SdkTests/Program.cs
+@@ -19,3 +19,10 @@
+ if (!rejected) throw new Exception("Mixed snapshots accepted");
+ File.WriteAllText(Path.Combine(root, "sdk-smoke.cpp"), "#include \"" + result.Folder.Replace('\\','/') + "/sdk.hpp\"\nstatic_assert(emilyfn_sdk::types.size() == 2);\nstatic_assert(emilyfn_sdk::members[0].size == 8);\nstatic_assert(emilyfn_sdk::functions[0].reported_address == 1234);\nstatic_assert(!emilyfn_sdk::runtime_verified);\nint main() {}\n");
+ Console.WriteLine("SDK exporter checks passed: counts, C++ escaping, provenance and mixed-snapshot rejection.");
++
++await NamePoolChecks.Run(root);
++if (args.Length > 1)
++{
++    var live = await CaptureNameExporter38.ExportAsync(args[1], root);
++    Console.WriteLine($"Capture name export: {live.PlainNames} plain, {live.NumberedNames} numbered; {live.Folder}");
++}

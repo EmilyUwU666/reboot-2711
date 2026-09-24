@@ -1,0 +1,138 @@
+--- /dev/null
++++ b/launcher/Emilyfn.Core/DiagnosticGameLaunch.cs
+@@ -0,0 +1,35 @@
++using System.Diagnostics;
++using System.Security.Cryptography;
++
++namespace Emilyfn.Core;
++
++public static class DiagnosticGameLaunch
++{
++    // The exact uploaded 38.00 CL47722112 image. This is not a supported gameplay profile.
++    public const string ImageSha256 = "f4ddac1044edd0e8cc123f586f7204de8724989b6adcf25b2e34b4855747a5c0";
++    public static async Task<Process> StartAsync(string executable, string logsDirectory)
++    {
++        if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess)
++            throw new PlatformNotSupportedException("Diagnostic launch requires Windows x64.");
++        executable = Path.GetFullPath(executable);
++        if (!Path.GetFileName(executable).Equals("FortniteClient-Win64-Shipping.exe", StringComparison.OrdinalIgnoreCase))
++            throw new ArgumentException("Select FortniteClient-Win64-Shipping.exe inside the complete 38.00 build's FortniteGame/Binaries/Win64 folder.");
++        // Keep the verified file read-locked until CreateProcess returns.
++        using var image = new FileStream(executable, FileMode.Open, FileAccess.Read, FileShare.Read);
++        var hash = Convert.ToHexString(await SHA256.HashDataAsync(image)).ToLowerInvariant();
++        if (hash != ImageSha256)
++            throw new InvalidOperationException("This diagnostic path requires the exact uploaded 38.00 CL47722112 executable. The selected file has a different SHA-256. Gameplay support has not been enabled.");
++        var binaryDirectory = Path.GetDirectoryName(executable)!;
++        var gameDirectory = Directory.GetParent(binaryDirectory)?.Parent?.FullName;
++        if (gameDirectory is null || !Directory.Exists(Path.Combine(gameDirectory, "Content", "Paks")))
++            throw new DirectoryNotFoundException("This executable needs the complete matching game installation. FortniteGame/Content/Paks was not found.");
++        Directory.CreateDirectory(logsDirectory);
++        string log = Path.Combine(Path.GetFullPath(logsDirectory), $"diagnostic-38-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.log");
++        var start = new ProcessStartInfo(executable) { UseShellExecute = false, WorkingDirectory = binaryDirectory };
++        start.ArgumentList.Add("-log");
++        start.ArgumentList.Add("-FORCELOGFLUSH");
++        start.ArgumentList.Add("-abslog=" + log);
++        // No auth/game DLL injection, companion processes, or changes to EAC or launcher requirements.
++        return Process.Start(start) ?? throw new IOException("Windows did not start the diagnostic game process.");
++    }
++}
+--- a/launcher/Emilyfn.App/MemoryCaptureWindow.cs
++++ b/launcher/Emilyfn.App/MemoryCaptureWindow.cs
+@@ -13,20 +13,25 @@
+     private readonly Button capture = new() { Content = "Choose folder and capture", Margin = new Thickness(0, 0, 12, 0) };
+     private readonly Button refresh = new() { Content = "Refresh" };
+     private readonly Func<string, Task> exportLogs;
++    private readonly string logsDirectory;
++    private readonly Button launch = new() { Content = "Launch 38.00 for capture", Margin = new Thickness(12, 0, 0, 0) };
+     private bool busy;
+ 
+-    public MemoryCaptureWindow(Func<string, Task> exportLogs)
++    public MemoryCaptureWindow(Func<string, Task> exportLogs, string logsDirectory)
+     {
+         this.exportLogs = exportLogs;
+-        Title = "Emilyfn — Capture game memory"; Width = 720; Height = 370;
++        this.logsDirectory = logsDirectory;
++        Title = "Emilyfn — Capture game memory"; Width = 820; Height = 430;
+         WindowStartupLocation = WindowStartupLocation.CenterOwner;
+         var panel = new StackPanel { Margin = new Thickness(24) };
+         panel.Children.Add(new TextBlock { Text = "Select the running game to capture", FontSize = 20 });
+         panel.Children.Add(new TextBlock { Text = "Keep Fortnite open at the lobby or stuck screen. This saves full game memory locally and may take several GB. Memory can contain session credentials; keep the files private. Nothing is uploaded automatically.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
+         panel.Children.Add(targets);
+         var buttons = new StackPanel { Orientation = Orientation.Horizontal };
+-        buttons.Children.Add(capture); buttons.Children.Add(refresh); panel.Children.Add(buttons); panel.Children.Add(status);
++        buttons.Children.Add(capture); buttons.Children.Add(refresh); buttons.Children.Add(launch); panel.Children.Add(buttons); panel.Children.Add(status);
++        panel.Children.Add(new TextBlock { Text = "38.00 diagnostic launch starts your matching executable without gameplay DLLs. It does not enable gameplay or remove Epic/EAC startup requirements. Keep the complete game installation in place.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
+         Content = panel;
++        launch.Click += async (_, _) => await Launch();
+         refresh.Click += (_, _) => Refresh();
+         capture.Click += async (_, _) => await Capture();
+         Closing += (_, e) => { if (busy) { e.Cancel = true; status.Text = "Please wait for the capture to finish before closing this window."; } };
+@@ -43,12 +48,34 @@
+         }
+         catch (Exception error) { status.Text = error.Message; capture.IsEnabled = false; }
+     }
++    private async Task Launch()
++    {
++        var dialog = new OpenFileDialog { Title = "Select the matching 38.00 game executable", Filter = "Fortnite executable|FortniteClient-Win64-Shipping.exe", CheckFileExists = true };
++        if (dialog.ShowDialog(this) != true) return;
++        busy = true; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = false;
++        status.Text = "Checking the 38.00 executable…";
++        try
++        {
++            using var process = await DiagnosticGameLaunch.StartAsync(dialog.FileName, logsDirectory);
++            await Task.Delay(1500);
++            Refresh();
++            if (process.HasExited)
++                status.Text = $"The game exited during startup (code {process.ExitCode}). Export the diagnostic logs. The 19–30 gameplay range check was not used.";
++            else
++            {
++                targets.SelectedItem = targets.Items.Cast<CaptureTarget>().FirstOrDefault(t => t.Id == process.Id);
++                status.Text = $"Diagnostic process started: PID {process.Id}. Wait for initialization, then capture. This is not a gameplay-ready signal.";
++            }
++        }
++        catch (Exception error) { status.Text = error.Message; }
++        finally { busy = false; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = true; }
++    }
+     private async Task Capture()
+     {
+         if (targets.SelectedItem is not CaptureTarget target) { status.Text = "Select a game process first."; return; }
+         var dialog = new OpenFolderDialog { Title = "Choose a folder with space for a full memory dump" };
+         if (dialog.ShowDialog(this) != true) return;
+-        busy = true; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = false;
++        busy = true; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = false;
+         try
+         {
+             var folder = await GameMemoryCapture.CaptureAsync(target, dialog.FolderName, new Progress<string>(s => status.Text = s));
+@@ -60,6 +87,6 @@
+             catch { /* Saved files remain usable if Explorer is unavailable. */ }
+         }
+         catch (Exception error) { status.Text = error.Message; }
+-        finally { busy = false; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = true; }
++        finally { busy = false; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = true; }
+     }
+ }
+--- a/launcher/Emilyfn.App/MainWindow.xaml.cs
++++ b/launcher/Emilyfn.App/MainWindow.xaml.cs
+@@ -212,7 +212,7 @@
+     }
+     private void CaptureMemory_Click(object sender, RoutedEventArgs e)
+     {
+-        new MemoryCaptureWindow(path => engine.ExportLogsAsync(path)) { Owner = this }.ShowDialog();
++        new MemoryCaptureWindow(path => engine.ExportLogsAsync(path), engine.LogsRoot) { Owner = this }.ShowDialog();
+     }
+     private async void ExportLogs_Click(object sender, RoutedEventArgs e) => await ActionAsync(async () =>
+     {
+--- a/launcher/Emilyfn.CaptureTests/Program.cs
++++ b/launcher/Emilyfn.CaptureTests/Program.cs
+@@ -11,6 +11,11 @@
+ {
+     var exe = Path.Combine(root, "FortniteClient-Win64-Shipping.exe");
+     File.Copy(Path.GetFullPath(args[0]), exe);
++    bool refusedDiagnostic = false;
++    try { await DiagnosticGameLaunch.StartAsync(exe, root); }
++    catch (InvalidOperationException) { refusedDiagnostic = true; }
++    Check(refusedDiagnostic, "Diagnostic launch rejects an unverified executable");
++    Check(!Directory.EnumerateFiles(root, "*.started-*").Any(), "Rejected diagnostic launch did not start a process");
+     child = Process.Start(new ProcessStartInfo(exe) { UseShellExecute = false })!;
+     CaptureTarget? target = null;
+     for (int i = 0; i < 100 && target is null; i++)

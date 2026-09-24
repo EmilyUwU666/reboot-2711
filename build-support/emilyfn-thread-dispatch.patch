@@ -1,0 +1,668 @@
+diff --git a/launcher/Emilyfn.Core/AssemblyInfo.cs b/launcher/Emilyfn.Core/AssemblyInfo.cs
+--- a/launcher/Emilyfn.Core/AssemblyInfo.cs
++++ b/launcher/Emilyfn.Core/AssemblyInfo.cs
+@@ -1 +1,2 @@
+ [assembly: System.Runtime.CompilerServices.InternalsVisibleTo("Emilyfn.SdkTests")]
++[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("Emilyfn.ThreadProbeTests")]
+diff --git a/launcher/Emilyfn.Core/DispatchTarget38.cs b/launcher/Emilyfn.Core/DispatchTarget38.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.Core/DispatchTarget38.cs
+@@ -0,0 +1,40 @@
++using System.Buffers.Binary;
++namespace Emilyfn.Core;
++
++internal static class DispatchTarget38
++{
++    internal sealed record Target(ulong Class,ulong Object,ulong Function,uint ObjectName,uint ClassName,uint FunctionName);
++    internal sealed record Selection(Target? Value,string Reason);
++    internal static Selection Find(Func<ulong,int,byte[]> read,ulong image,IReadOnlyDictionary<uint,string> names)
++    {
++        uint D(ulong a)=>BinaryPrimitives.ReadUInt32LittleEndian(read(a,4));
++        ulong Q(ulong a)=>BinaryPrimitives.ReadUInt64LittleEndian(read(a,8));
++        string Name(ulong a)=>names.TryGetValue(NamePool38.DecodeIndex(D(checked(a+0x20))),out var n)?n:throw new InvalidDataException("Unknown target name.");
++        var classes=new List<ulong>();var objects=new List<ulong>();var functions=new List<ulong>();
++        ulong table=Q(checked(image+0x16cfacd8));uint count=D(checked(image+0x16cface0));
++        if(count is 0 or >1000000)throw new InvalidDataException("Invalid object table.");
++        for(uint i=0;i<count;i++)
++        {
++            try
++            {
++                ulong obj=Q(checked(table+i*32UL+8));string name=Name(obj),kind=Name(Q(checked(obj+0x18)));
++                if(name=="ActorComponent" && kind=="Class")classes.Add(obj);
++                if(name=="Default__ActorComponent" && kind=="ActorComponent")objects.Add(obj);
++                if(name=="GetOwner" && kind=="Function")functions.Add(obj);
++            }
++            catch(InvalidDataException){} catch(OverflowException){}
++        }
++        if(classes.Count!=1)return new(null,"ActorComponent class is missing or ambiguous.");
++        ulong klass=classes[0];
++        objects=objects.Where(a=>Q(checked(a+0x18))==klass).ToList();
++        functions=functions.Where(a=>Q(checked(a+8))==klass).ToList();
++        if(objects.Count!=1)return new(null,"No unique initialized Default__ActorComponent is present; the function-call test will be skipped.");
++        if(functions.Count!=1)return new(null,"ActorComponent.GetOwner is missing or ambiguous.");
++        ulong o=objects[0],f=functions[0];
++        uint flags=D(o+0x10);ushort parameters=BinaryPrimitives.ReadUInt16LittleEndian(read(f+0xbc,2));
++        if((flags&0x10)==0 || (flags&0x40000000)!=0 || D(f+0xb8)!=0x54020401 ||
++            (D(f+0x68)^0x1937f47b)!=8 || (parameters^0x8250)!=8 || Q(f+0xe0)!=image+0x432782a || Q(Q(o)+28*8)!=image+0x3729a)
++            return new(null,"The default component or GetOwner call layout failed validation.");
++        return new(new(klass,o,f,D(o+0x20),D(klass+0x20),D(f+0x20)),"ActorComponent.GetOwner default-object target is available for a guarded call.");
++    }
++}
+diff --git a/launcher/Emilyfn.Core/GameThreadProbe38.cs b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+@@ -0,0 +1,178 @@
++using Microsoft.Win32.SafeHandles;
++using System.Buffers.Binary;
++using System.ComponentModel;
++using System.Diagnostics;
++using System.IO.MemoryMappedFiles;
++using System.Runtime.InteropServices;
++using System.Security.Cryptography;
++using System.Text.Json;
++
++namespace Emilyfn.Core;
++
++public static class GameThreadProbe38
++{
++    public sealed record Result(string File,string Message);
++    internal sealed record CallbackResult(int State,int Status,int CallbackProcessId,int CallbackThreadId,bool? FunctionCallsAttempted,
++        ulong Returned,ulong Expected,uint ExceptionCode,bool HookRemoved,string? Failure);
++    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(int,DateTime),byte> InFlight=new();
++    public static Task<Result> RunAsync(CaptureTarget target,string destination,IProgress<string>? progress=null)=>Task.Run(()=>Run(target,destination,progress));
++    private static Result Run(CaptureTarget target,string destination,IProgress<string>? progress)
++    {
++        if(!OperatingSystem.IsWindows()||!Environment.Is64BitProcess)throw new PlatformNotSupportedException("The game-thread test requires Windows x64.");
++        string folder=Path.Combine(Path.GetFullPath(destination),"Emilyfn-dispatch-test-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
++        string file=Path.Combine(folder,"dispatch-test.json");string? failure=null;LiveBindingProbe38.Evidence? evidence=null;CallbackResult? callback=null;
++        string? imageHash=null;int? threadId=null;bool stable=false,alive=false;
++        try
++        {
++            if(InFlight.ContainsKey((target.Id,target.StartedUtc)))throw new InvalidOperationException("A previous callback may still be running in this game. Close that game instance before testing again.");
++            using var process=Process.GetProcessById(target.Id);
++            using var handle=OpenProcess(0x0400|0x0010,false,target.Id);
++            if(handle.IsInvalid)throw new Win32Exception(Marshal.GetLastWin32Error());
++            if(process.HasExited||process.StartTime.ToUniversalTime()!=target.StartedUtc||
++                !string.Equals(process.ProcessName,"FortniteClient-Win64-Shipping",StringComparison.OrdinalIgnoreCase)||
++                !string.Equals(process.MainModule?.FileName,target.Executable,StringComparison.OrdinalIgnoreCase)||
++                !GetProcessTimes(handle,out long created,out _,out _,out _)||DateTime.FromFileTimeUtc(created)!=target.StartedUtc)
++                throw new InvalidOperationException("The selected game changed or exited. Refresh the process list.");
++            using var image=new FileStream(target.Executable,FileMode.Open,FileAccess.Read,FileShare.Read);
++            progress?.Report("Verifying the exact 38.00 executable and live bindings…");
++            imageHash=Convert.ToHexString(SHA256.HashData(image)).ToLowerInvariant();
++            if(imageHash!=DiagnosticGameLaunch.ImageSha256)throw new InvalidOperationException("The dispatch test requires the exact 38.00 CL47722112 executable.");
++            var module=process.MainModule!;if(module.ModuleMemorySize!=0x18777000)throw new InvalidDataException("Game module size differs.");
++            ulong imageBase=(ulong)module.BaseAddress.ToInt64();var clock=Stopwatch.StartNew();
++            byte[] Raw(ulong a,int n)
++            {
++                if(clock.Elapsed>TimeSpan.FromSeconds(90))throw new TimeoutException("Binding verification exceeded 90 seconds.");
++                if(a>long.MaxValue||n<0||n>131072)throw new InvalidDataException("Invalid read bounds.");
++                var b=new byte[n];if(!ReadProcessMemory(handle,(IntPtr)(long)a,b,(nuint)n,out nuint got)||got!=(nuint)n)
++                    throw new InvalidDataException("Required memory is unreadable; the game may have changed.");
++                return b;
++            }
++            var pages=new Dictionary<ulong,byte[]>();
++            byte[] Read(ulong a,int n)
++            {
++                if(n<0||n>131072)throw new InvalidDataException("Invalid read size.");
++                var b=new byte[n];int offset=0;
++                while(offset<n)
++                {
++                    ulong page=a&~4095UL;int within=(int)(a-page),take=Math.Min(n-offset,4096-within);
++                    if(!pages.TryGetValue(page,out var data))
++                    {
++                        if(pages.Count>=65536)throw new InvalidDataException("Read cache exceeds 256 MB.");
++                        data=Raw(page,4096);pages.Add(page,data);
++                    }
++                    data.AsSpan(within,take).CopyTo(b.AsSpan(offset));a=checked(a+(ulong)take);offset+=take;
++                }
++                return b;
++            }
++            var pool=Raw(imageBase+NamePool38.PoolRva+8,8);var table=Raw(imageBase+0x16cfacd8,12);
++            var inspected=LiveBindingProbe38.InspectForDispatch(Read,imageBase);evidence=inspected.Evidence;
++            stable=pool.AsSpan().SequenceEqual(Raw(imageBase+NamePool38.PoolRva+8,8))&&table.AsSpan().SequenceEqual(Raw(imageBase+0x16cfacd8,12));
++            if(!stable||evidence.Checks.Any(c=>!c.Passed))throw new InvalidDataException("Live bindings failed or changed during verification. Wait for the game to settle and retry.");
++            var threads=FindGameThreads(process);
++            if(threads.Count!=1)throw new InvalidOperationException($"Expected one thread named GameThread; found {threads.Count}. No hook was installed.");
++            threadId=threads[0];
++            string dll=Path.Combine(AppContext.BaseDirectory,"resources","diagnostics","Emilyfn-38-ThreadProbe.dll");
++            using var library=new FileStream(dll,FileMode.Open,FileAccess.Read,FileShare.Read);
++            string expected=File.ReadAllText(dll+".sha256").Trim();
++            if(expected.Length!=64||!string.Equals(Convert.ToHexString(SHA256.HashData(library)),expected,StringComparison.OrdinalIgnoreCase))
++                throw new InvalidDataException("The diagnostic DLL does not match this package. Extract a fresh complete launcher ZIP.");
++            progress?.Report(inspected.Target is null?"Testing entry into GameThread; no initialized GetOwner target is available…":"Testing one GetOwner call on GameThread…");
++            callback=RunCallback(process,threadId.Value,dll,imageBase,inspected.Target,30000);
++            if(callback.State==2||!callback.HookRemoved)InFlight.TryAdd((target.Id,target.StartedUtc),0);
++            alive=!process.HasExited;
++            failure=callback.Failure ?? (callback.Status switch {
++                3=>"GameThread was reached, but the native target/profile no longer matched.",
++                5=>$"The guarded call raised exception 0x{callback.ExceptionCode:X8}.",
++                6=>"The GetOwner result differed from the directly observed owner pointer.",
++                7=>"The callback thread description no longer matched GameThread.",
++                8=>"The request expired before the function call.",
++                _=>null
++            });
++            if(!alive)failure??="The game exited during the probe.";
++        }
++        catch(Exception error) when(error is Win32Exception or InvalidOperationException or IOException or UnauthorizedAccessException or OverflowException or ArgumentException or TimeoutException)
++        {failure=error.Message;}
++        bool observed=callback is {State:3} && callback.CallbackProcessId==target.Id&&callback.CallbackThreadId==threadId&&callback.Status is >=1 and <=6;
++        bool callPassed=observed&&alive&&callback is {Status:4,FunctionCallsAttempted:true,HookRemoved:true};
++        string message=callPassed?"The guarded GetOwner call passed on GameThread.":observed&&callback?.Status==2?
++            "GameThread callback passed. GetOwner was skipped because its default component is not initialized.":"The game-thread/dispatch test did not pass; see dispatch-test.json.";
++        File.WriteAllText(file,JsonSerializer.Serialize(new{FormatVersion=1,Test="38.00 game-thread and guarded GetOwner dispatch",Utc=DateTime.UtcNow,ProcessId=target.Id,GameThreadId=threadId,
++            ExecutableSha256=imageHash,StableBoundaryCounters=stable,GameAliveAfterProbe=alive,GameThreadCallbackObserved=observed,EngineTaskTagVerified=false,
++            FunctionCallsAttempted=callback is null?(bool?)false:callback.FunctionCallsAttempted,ControlledGetOwnerPassed=callPassed,GameplayReady=false,
++            Failure=failure,Message=message,Evidence=evidence,Callback=callback,
++            Note="Thread identity uses a unique Windows GameThread description and matching process/thread IDs. This does not validate Unreal task tags or general gameplay dispatch. No arbitrary function is exposed."},new JsonSerializerOptions{WriteIndented=true}));
++        return new(file,message);
++    }
++    internal static List<int> FindGameThreads(Process process)
++    {
++        process.Refresh();var found=new List<int>();
++        foreach(ProcessThread thread in process.Threads)
++        {
++            using(thread)
++            using(var handle=OpenThread(0x0800,false,(uint)thread.Id))
++            {
++                if(handle.IsInvalid||GetProcessIdOfThread(handle)!=(uint)process.Id)continue;
++                IntPtr name=IntPtr.Zero;
++                try {if(GetThreadDescription(handle,out name)>=0&&Marshal.PtrToStringUni(name)=="GameThread")found.Add(thread.Id);}
++                finally {if(name!=IntPtr.Zero)LocalFree(name);}
++            }
++        }
++        return found;
++    }
++    internal static unsafe CallbackResult RunCallback(Process process,int tid,string dll,ulong image,DispatchTarget38.Target? target,int timeoutMs)
++    {
++        if(!OperatingSystem.IsWindows()||!Environment.Is64BitProcess||tid<=0||process.HasExited)throw new InvalidOperationException("Invalid callback target.");
++        using var thread=OpenThread(0x0800,false,(uint)tid);
++        if(thread.IsInvalid||GetProcessIdOfThread(thread)!=(uint)process.Id)throw new InvalidOperationException("Thread no longer belongs to the selected process.");
++        ulong nonce=BinaryPrimitives.ReadUInt64LittleEndian(RandomNumberGenerator.GetBytes(8));if(nonce==0)nonce=1;
++        string name=$"Local\\Emilyfn-dispatch-{process.Id}-{tid}-{nonce:x16}";
++        using var mapping=MemoryMappedFile.CreateNew(name,256);using var view=mapping.CreateViewAccessor(0,256);
++        view.Write(0,0xef380002u);view.Write(4,1u);view.Write(12,process.Id);view.Write(16,tid);
++        view.Write(24,nonce);view.Write(32,process.StartTime.ToUniversalTime().ToFileTimeUtc());view.Write(40,GetTickCount64()+(ulong)timeoutMs);view.Write(48,image);
++        if(target is not null)
++        {
++            view.Write(56,target.Class);view.Write(64,target.Object);view.Write(72,target.Function);view.Write(80,target.ObjectName);view.Write(84,target.ClassName);
++            view.Write(88,target.FunctionName);view.Write(92,1u);view.Write(96,0x3729aUL);view.Write(104,0x432782aUL);
++        }
++        byte* ptr=null;view.SafeMemoryMappedViewHandle.AcquirePointer(ref ptr);
++        IntPtr library=IntPtr.Zero,hook=IntPtr.Zero;bool removed=true;string? failure=null;CallbackResult result;
++        try
++        {
++            library=NativeLibrary.Load(Path.GetFullPath(dll));var entry=NativeLibrary.GetExport(library,"EmilyfnThreadProbe");
++            uint message=RegisterWindowMessageW("Emilyfn.DispatchProbe.v1");if(message==0)throw new Win32Exception(Marshal.GetLastWin32Error());
++            hook=SetWindowsHookExW(3,entry,library,(uint)tid);if(hook==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error(),"Windows could not install the thread-scoped diagnostic callback.");
++            Interlocked.Exchange(ref *(int*)(ptr+8),1);
++            if(!PostThreadMessageW((uint)tid,message,(nuint)nonce,IntPtr.Zero))throw new Win32Exception(Marshal.GetLastWin32Error(),"The game thread has no accessible message queue.");
++            var clock=Stopwatch.StartNew();
++            while(Volatile.Read(ref *(int*)(ptr+8))!=3 && !process.HasExited && clock.ElapsedMilliseconds<timeoutMs)Thread.Sleep(25);
++            int state=Interlocked.CompareExchange(ref *(int*)(ptr+8),4,1);
++            if(state!=3)failure=process.HasExited?"The game exited before the callback finished.":state==2?
++                "The callback has not returned. Close this game instance before another test.":"No callback arrived before the timeout; GameThread may not be pumping messages.";
++        }
++        catch(Exception error) when(error is Win32Exception or InvalidOperationException or ArgumentException or DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
++        {Interlocked.CompareExchange(ref *(int*)(ptr+8),4,1);failure=error.Message;}
++        finally
++        {
++            if(hook!=IntPtr.Zero)removed=UnhookWindowsHookEx(hook);
++            if(!removed)failure="Windows failed to remove the diagnostic hook. Close this game instance before testing again.";
++            int state=Volatile.Read(ref *(int*)(ptr+8));int calls=view.ReadInt32(112);
++            result=new(state,view.ReadInt32(144),view.ReadInt32(120),view.ReadInt32(116),calls!=0?true:state==2?null:false,
++                view.ReadUInt64(128),view.ReadUInt64(136),view.ReadUInt32(148),removed,failure);
++            // The remote hook mapping has its own handle. A callback already in flight retains it.
++            view.SafeMemoryMappedViewHandle.ReleasePointer();if(library!=IntPtr.Zero&&removed)NativeLibrary.Free(library);
++        }
++        return result;
++    }
++    [DllImport("kernel32.dll",SetLastError=true)]private static extern SafeProcessHandle OpenProcess(uint access,bool inherit,int pid);
++    [DllImport("kernel32.dll",SetLastError=true)]private static extern SafeWaitHandle OpenThread(uint access,bool inherit,uint tid);
++    [DllImport("kernel32.dll")]private static extern uint GetProcessIdOfThread(SafeWaitHandle thread);
++    [DllImport("kernel32.dll")]private static extern int GetThreadDescription(SafeWaitHandle thread,out IntPtr name);
++    [DllImport("kernel32.dll")]private static extern IntPtr LocalFree(IntPtr memory);
++    [DllImport("kernel32.dll")]private static extern ulong GetTickCount64();
++    [DllImport("kernel32.dll",SetLastError=true)]private static extern bool GetProcessTimes(SafeProcessHandle process,out long created,out long exited,out long kernel,out long user);
++    [DllImport("kernel32.dll",SetLastError=true)]private static extern bool ReadProcessMemory(SafeProcessHandle process,IntPtr address,[Out]byte[] buffer,nuint size,out nuint read);
++    [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)]private static extern uint RegisterWindowMessageW(string name);
++    [DllImport("user32.dll",SetLastError=true)]private static extern IntPtr SetWindowsHookExW(int hook,IntPtr callback,IntPtr module,uint tid);
++    [DllImport("user32.dll",SetLastError=true)]private static extern bool UnhookWindowsHookEx(IntPtr hook);
++    [DllImport("user32.dll",SetLastError=true)]private static extern bool PostThreadMessageW(uint tid,uint message,nuint wp,IntPtr lp);
++}
+diff --git a/launcher/Emilyfn.Core/LiveBindingProbe38.cs b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+--- a/launcher/Emilyfn.Core/LiveBindingProbe38.cs
++++ b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+@@ -10,10 +10,12 @@
+ public static class LiveBindingProbe38
+ {
+     public sealed record Check(string Name,bool Passed,string Detail);
+-    public sealed record Evidence(List<Check> Checks,int Names,int Owners,int Properties,int InvalidObjectSlots,int RejectedChains,int Functions,int RejectedBindings);
++    public sealed record Evidence(List<Check> Checks,int Names,int Owners,int Properties,int InvalidObjectSlots,int RejectedChains,int Functions,int RejectedBindings,string DispatchTargetStatus);
+     public sealed record Result(string File,bool Passed,string Message);
+     public static Task<Evidence> InspectCaptureAsync(string dump) => Task.Run(() => CaptureNameExporter38.WithCapture(dump, view => Inspect(view.Read, view.ImageBase)));
+-    public static Evidence Inspect(Func<ulong,int,byte[]> read,ulong imageBase)
++    public static Evidence Inspect(Func<ulong,int,byte[]> read,ulong imageBase) => InspectForDispatch(read,imageBase).Evidence;
++    internal sealed record Inspection(Evidence Evidence,DispatchTarget38.Target? Target);
++    internal static Inspection InspectForDispatch(Func<ulong,int,byte[]> read,ulong imageBase)
+     {
+         uint D(ulong a)=>BinaryPrimitives.ReadUInt32LittleEndian(read(a,4));
+         ulong Q(ulong a)=>BinaryPrimitives.ReadUInt64LittleEndian(read(a,8));
+@@ -54,7 +56,8 @@
+             checks.Add(new("Function layout: "+key,found is not null,found is null?"Function not initialized or its metadata was rejected.":
+                 $"Storage={found.StorageSize}, parameter bytes={found.ParameterBufferSize}, native entry RVA=0x{found.NativeEntryRva:X}."));
+         }
+-        return new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count);
++        var target=DispatchTarget38.Find(read,imageBase,names);
++        return new(new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count,target.Reason),target.Value);
+     }
+     public static Task<Result> RunAsync(CaptureTarget target,string destination,IProgress<string>? progress=null)=>Task.Run(()=>Run(target,destination,progress));
+     private static Result Run(CaptureTarget target,string destination,IProgress<string>? progress)
+diff --git a/launcher/Emilyfn.App/MemoryCaptureWindow.cs b/launcher/Emilyfn.App/MemoryCaptureWindow.cs
+--- a/launcher/Emilyfn.App/MemoryCaptureWindow.cs
++++ b/launcher/Emilyfn.App/MemoryCaptureWindow.cs
+@@ -17,13 +17,14 @@
+     private readonly Button launch = new() { Content = "Capture 38.00 startup", Margin = new Thickness(12, 0, 0, 0) };
+     private readonly ComboBox captureDelay = new() { ItemsSource = new[] { 15, 30, 60, 120 }, SelectedItem = 30, Width = 100, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 6, 0, 12) };
+     private readonly Button live = new() { Content = "Test 38.00 live bindings", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 12, 0, 0) };
++    private readonly Button dispatch = new() { Content = "Test 38.00 game-thread dispatch", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 12, 0, 0) };
+     private bool busy;
+ 
+     public MemoryCaptureWindow(Func<string, Task> exportLogs, string logsDirectory)
+     {
+         this.exportLogs = exportLogs;
+         this.logsDirectory = logsDirectory;
+-        Title = "Emilyfn — Capture game memory"; Width = 820; Height = 640;
++        Title = "Emilyfn — Capture game memory"; Width = 820; Height = 740;
+         WindowStartupLocation = WindowStartupLocation.CenterOwner;
+         var panel = new StackPanel { Margin = new Thickness(24) };
+         panel.Children.Add(new TextBlock { Text = "Select the running game to capture", FontSize = 20 });
+@@ -34,9 +35,12 @@
+         var buttons = new StackPanel { Orientation = Orientation.Horizontal };
+         buttons.Children.Add(capture); buttons.Children.Add(refresh); buttons.Children.Add(launch); panel.Children.Add(buttons); panel.Children.Add(live);
+         panel.Children.Add(new TextBlock { Text = "Live binding test reads the selected 38.00 process and saves a small live-test.json. It does not call game functions or create a memory dump.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
++        panel.Children.Add(dispatch);
++        panel.Children.Add(new TextBlock { Text = "Loads the diagnostic DLL into the selected game to test a GameThread callback. Calls GetOwner once only when the matching default component and bindings validate. Saves dispatch-test.json.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
+         panel.Children.Add(status);
+         panel.Children.Add(new TextBlock { Text = "Startup capture saves memory at the initial Windows loader breakpoint, observes startup, then attempts a later capture if it stays open. Early memory may lack SDK objects. It does not enable gameplay or remove Epic/EAC startup requirements. Keep the complete game installation in place.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
+-        Content = panel;
++        Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
++        dispatch.Click += async (_, _) => await DispatchTest();
+         live.Click += async (_, _) => await LiveTest();
+         launch.Click += async (_, _) => await Launch();
+         refresh.Click += (_, _) => Refresh();
+@@ -50,10 +54,10 @@
+         {
+             var found = GameMemoryCapture.FindTargets(); targets.ItemsSource = found;
+             targets.SelectedIndex = found.Count == 1 ? 0 : -1;
+-            capture.IsEnabled = live.IsEnabled = found.Count > 0;
++            capture.IsEnabled = dispatch.IsEnabled = live.IsEnabled = found.Count > 0;
+             status.Text = found.Count == 0 ? "No accessible Fortnite game found. Start the game first, then refresh." : "Choose the client or host PID you want to capture.";
+         }
+-        catch (Exception error) { status.Text = error.Message; capture.IsEnabled = live.IsEnabled = false; }
++        catch (Exception error) { status.Text = error.Message; capture.IsEnabled = dispatch.IsEnabled = live.IsEnabled = false; }
+     }
+     private async Task Launch()
+     {
+@@ -62,7 +66,7 @@
+         var output = new OpenFolderDialog { Title = "Choose space for startup memory captures" };
+         if (output.ShowDialog(this) != true) return;
+         var folder = System.IO.Path.Combine(output.FolderName, "Emilyfn-startup-" + Guid.NewGuid().ToString("N"));
+-        busy = true; live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = false;
++        busy = true; dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = false;
+         status.Text = "Checking the 38.00 executable…";
+         try
+         {
+@@ -76,14 +80,14 @@
+ 
+         }
+         catch (Exception error) { status.Text = error.Message; }
+-        finally { busy = false; live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = true; }
++        finally { busy = false; dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = true; }
+     }
+     private async Task LiveTest()
+     {
+         if (targets.SelectedItem is not CaptureTarget target) { status.Text = "Select a game process first."; return; }
+         var dialog = new OpenFolderDialog { Title = "Choose where to save live-test.json" };
+         if (dialog.ShowDialog(this) != true) return;
+-        busy = true; live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = false;
++        busy = true; dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = false;
+         try
+         {
+             var result = await LiveBindingProbe38.RunAsync(target, dialog.FolderName, new Progress<string>(s => status.Text = s));
+@@ -91,14 +95,29 @@
+             try { Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { System.IO.Path.GetDirectoryName(result.File)! } }); } catch { }
+         }
+         catch (Exception error) { status.Text = error.Message; }
+-        finally { busy = false; live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = true; }
++        finally { busy = false; dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = true; }
++    }
++    private async Task DispatchTest()
++    {
++        if (targets.SelectedItem is not CaptureTarget target) { status.Text = "Select a game process first."; return; }
++        var dialog = new OpenFolderDialog { Title = "Choose where to save dispatch-test.json" };
++        if (dialog.ShowDialog(this) != true) return;
++        busy = true; dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = false;
++        try
++        {
++            var result = await GameThreadProbe38.RunAsync(target, dialog.FolderName, new Progress<string>(s => status.Text = s));
++            status.Text = result.Message + " Saved to " + result.File;
++            try { Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { System.IO.Path.GetDirectoryName(result.File)! } }); } catch { }
++        }
++        catch (Exception error) { status.Text = error.Message; }
++        finally { busy = false; dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = true; }
+     }
+     private async Task Capture()
+     {
+         if (targets.SelectedItem is not CaptureTarget target) { status.Text = "Select a game process first."; return; }
+         var dialog = new OpenFolderDialog { Title = "Choose a folder with space for a full memory dump" };
+         if (dialog.ShowDialog(this) != true) return;
+-        busy = true; live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = false;
++        busy = true; dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = false;
+         try
+         {
+             var folder = await GameMemoryCapture.CaptureAsync(target, dialog.FolderName, new Progress<string>(s => status.Text = s));
+@@ -110,6 +129,6 @@
+             catch { /* Saved files remain usable if Explorer is unavailable. */ }
+         }
+         catch (Exception error) { status.Text = error.Message; }
+-        finally { busy = false; live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = true; }
++        finally { busy = false; dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = true; }
+     }
+ }
+diff --git a/launcher/Emilyfn.SdkTests/DispatchTargetChecks.cs b/launcher/Emilyfn.SdkTests/DispatchTargetChecks.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.SdkTests/DispatchTargetChecks.cs
+@@ -0,0 +1,43 @@
++using Emilyfn.Core;
++using System.Buffers.Binary;
++static class DispatchTargetChecks
++{
++    public static void Run()
++    {
++        const ulong image=0x50000,table=0x20000000,objects=0x30000000;
++        var memory=new Dictionary<ulong,byte[]>();
++        byte[] Alloc(ulong a,int n){var b=new byte[n];memory.Add(a,b);return b;}
++        void Q(byte[] b,int o,ulong v)=>BinaryPrimitives.WriteUInt64LittleEndian(b.AsSpan(o),v);
++        void D(byte[] b,int o,uint v)=>BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(o),v);
++        void W(byte[] b,int o,ushort v)=>BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(o),v);
++        uint Enc(uint v)=>unchecked(((v-1)^0x6f01622bu)+1);
++        var globals=Alloc(image+0x16cfacd8,12);Q(globals,0,table);D(globals,8,5);
++        var slots=Alloc(table,192);var vt=Alloc(image+0x1000,29*8);Q(vt,28*8,image+0x3729a);
++        for(int i=0;i<5;i++)
++        {
++            ulong a=objects+(ulong)i*0x100;var b=Alloc(a,0x100);Q(b,0,image+0x1000);D(b,0x20,Enc((uint)i+1));
++            Q(b,0x18,i==3?objects+0x200:i==4?objects+0x100:objects);Q(slots,i*32+8,a);
++        }
++        var obj=memory[objects+0x300];D(obj,0x10,0x31);
++        var fn=memory[objects+0x400];Q(fn,8,objects+0x200);D(fn,0xb8,0x54020401);
++        D(fn,0x68,8^0x1937f47b);W(fn,0xbc,8^0x8250);Q(fn,0xe0,image+0x432782a);
++        var names=new Dictionary<uint,string>{{1,"Class"},{2,"Function"},{3,"ActorComponent"},{4,"Default__ActorComponent"},{5,"GetOwner"}};
++        byte[] Read(ulong a,int n)
++        {
++            foreach(var p in memory)if(a>=p.Key&&a-p.Key<=(ulong)p.Value.Length&&(ulong)n<=(ulong)p.Value.Length-(a-p.Key))
++                return p.Value.AsSpan((int)(a-p.Key),n).ToArray();
++            throw new InvalidDataException("Fixture memory unavailable");
++        }
++        DispatchTarget38.Selection Find()=>DispatchTarget38.Find(Read,image,names);
++        if(Find().Value?.Object!=objects+0x300)throw new Exception("Default component target not resolved");
++        void Refuse(){if(Find().Value is not null)throw new Exception("Unverified target was accepted");}
++        Q(slots,3*32+8,0);Refuse();Q(slots,3*32+8,objects+0x300);
++        D(globals,8,4);Refuse();D(globals,8,5);
++        D(obj,0x10,0x40000031);Refuse();D(obj,0x10,0x31);
++        W(fn,0xbc,9^0x8250);Refuse();W(fn,0xbc,8^0x8250);
++        Q(fn,8,objects);Refuse();Q(fn,8,objects+0x200);
++        Q(fn,0xe0,image+0x432782b);Refuse();Q(fn,0xe0,image+0x432782a);
++        D(globals,8,6);Q(slots,5*32+8,objects+0x300);Refuse();
++        Console.WriteLine("Dispatch target checks passed: exact owner, missing/ambiguous instances, flags, parameters and entry mismatch.");
++    }
++}
+diff --git a/launcher/Emilyfn.SdkTests/Program.cs b/launcher/Emilyfn.SdkTests/Program.cs
+--- a/launcher/Emilyfn.SdkTests/Program.cs
++++ b/launcher/Emilyfn.SdkTests/Program.cs
+@@ -35,6 +35,7 @@
+ 
+ ReflectionChecks.Run();
+ FunctionMetadataChecks.Run(root);
++DispatchTargetChecks.Run();
+ 
+ if (args.Length > 1)
+ {
+diff --git a/launcher/Emilyfn.ThreadProbeTests/Emilyfn.ThreadProbeTests.csproj b/launcher/Emilyfn.ThreadProbeTests/Emilyfn.ThreadProbeTests.csproj
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.ThreadProbeTests/Emilyfn.ThreadProbeTests.csproj
+@@ -0,0 +1 @@
++<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup><ItemGroup><ProjectReference Include="../Emilyfn.Core/Emilyfn.Core.csproj" /></ItemGroup></Project>
+diff --git a/launcher/Emilyfn.ThreadProbeTests/Program.cs b/launcher/Emilyfn.ThreadProbeTests/Program.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.ThreadProbeTests/Program.cs
+@@ -0,0 +1,50 @@
++using Emilyfn.Core;
++using System.Diagnostics;
++using System.Text.Json;
++
++if(!OperatingSystem.IsWindows())throw new PlatformNotSupportedException();
++string root=Path.Combine(Path.GetTempPath(),"Emilyfn thread probe "+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(root);
++var children=new List<Process>();int checks=0;
++void Check(bool ok,string reason){if(!ok)throw new Exception(reason);checks++;}
++try
++{
++    string exe=Path.Combine(root,"FortniteClient-Win64-Shipping.exe"),dll=Path.GetFullPath(args[1]);File.Copy(Path.GetFullPath(args[0]),exe);
++    async Task<(Process Process,int Tid)> Start(string argument)
++    {
++        var info=new ProcessStartInfo(exe){UseShellExecute=false};if(argument.Length>0)info.ArgumentList.Add(argument);
++        var process=Process.Start(info)!;children.Add(process);
++        for(int i=0;i<100;i++)
++        {
++            var found=GameThreadProbe38.FindGameThreads(process);
++            if(found.Count==1)return(process,found[0]);
++            await Task.Delay(25);
++        }
++        throw new Exception("Fixture GameThread was not discovered");
++    }
++    var child=await Start("");
++    var result=GameThreadProbe38.RunCallback(child.Process,child.Tid,dll,0,null,5000);
++    Check(result.State==3&&result.Status==2,"Thread-scoped callback did not report missing target");
++    Check(result.CallbackProcessId==child.Process.Id&&result.CallbackThreadId==child.Tid,"Callback ran in the wrong process/thread");
++    Check(result.FunctionCallsAttempted==false&&result.HookRemoved,"No-target callback called a function or leaked a hook");
++    var invalid=new DispatchTarget38.Target(1,2,3,4,5,6);
++    result=GameThreadProbe38.RunCallback(child.Process,child.Tid,dll,0,invalid,5000);
++    Check(result.State==3&&result.Status==3&&result.FunctionCallsAttempted==false&&result.HookRemoved,"Invalid call target did not fail closed");
++    var noPump=await Start("--no-pump");
++    result=GameThreadProbe38.RunCallback(noPump.Process,noPump.Tid,dll,0,null,500);
++    Check(result.State==4&&result.FunctionCallsAttempted==false&&result.HookRemoved&&result.Failure is not null,"Unpumped queue did not time out and cancel");
++    bool rejected=false;
++    try{GameThreadProbe38.RunCallback(child.Process,noPump.Tid,dll,0,null,500);}catch(InvalidOperationException){rejected=true;}
++    Check(rejected,"Another process's thread was accepted");
++    var target=new CaptureTarget(child.Process.Id,child.Process.StartTime.ToUniversalTime(),exe);
++    var gate=await GameThreadProbe38.RunAsync(target,root);
++    using var json=JsonDocument.Parse(File.ReadAllText(gate.File));
++    Check(!json.RootElement.GetProperty("FunctionCallsAttempted").GetBoolean(),"Unverified executable attempted a call");
++    Check(json.RootElement.GetProperty("Failure").GetString()!.Contains("exact 38.00"),"Exact-image gate missing");
++    Check(!child.Process.HasExited,"Probe terminated fixture");
++    Console.WriteLine($"THREAD PROBE: {checks} checks passed; native callback ran in synthetic GameThread, no game functions called.");
++}
++finally
++{
++    foreach(var child in children){if(!child.HasExited){child.Kill();child.WaitForExit();}child.Dispose();}
++    Directory.Delete(root,true);
++}
+diff --git a/launcher/Emilyfn.ThreadProbeTests/child.cpp b/launcher/Emilyfn.ThreadProbeTests/child.cpp
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.ThreadProbeTests/child.cpp
+@@ -0,0 +1,12 @@
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#include <cwchar>
++int wmain(int argc,wchar_t** argv) {
++    const bool noPump=argc>1 && std::wcscmp(argv[1],L"--no-pump")==0;
++    const bool wrongName=argc>1 && std::wcscmp(argv[1],L"--wrong-name")==0;
++    MSG msg{};PeekMessageW(&msg,nullptr,0,0,PM_NOREMOVE);
++    SetThreadDescription(GetCurrentThread(),wrongName?L"FixtureOtherThread":L"GameThread");
++    if(noPump){Sleep(60000);return 0;}
++    while(GetMessageW(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}
++    return 0;
++}
+diff --git a/launcher/native/ThreadProbe/Protocol.h b/launcher/native/ThreadProbe/Protocol.h
+new file mode 100644
+--- /dev/null
++++ b/launcher/native/ThreadProbe/Protocol.h
+@@ -0,0 +1,24 @@
++#pragma once
++#include <windows.h>
++#include <cstdint>
++#include <cstddef>
++namespace EmilyfnProbe {
++inline constexpr std::uint32_t Magic = 0xef380002;
++inline constexpr wchar_t MessageName[] = L"Emilyfn.DispatchProbe.v1";
++struct Shared {
++    std::uint32_t magic, version;
++    volatile LONG state; // 1 armed, 2 executing, 3 complete, 4 cancelled
++    std::uint32_t pid, tid, error;
++    std::uint64_t nonce, created, deadline, image, klass, object, function;
++    std::uint32_t objectName, className, functionName, hasTarget;
++    std::uint64_t dispatchRva, nativeRva;
++    volatile LONG calls;
++    std::uint32_t callbackTid, callbackPid, reserved;
++    std::uint64_t returned, expected;
++    std::uint32_t status, exception;
++};
++static_assert(sizeof(Shared) == 152);
++static_assert(offsetof(Shared, nonce) == 24 && offsetof(Shared, calls) == 112 && offsetof(Shared, status) == 144);
++// status: 1 callback observed, 2 target absent, 3 profile rejected,
++// 4 GetOwner matched, 5 exception, 6 return mismatch, 7 thread identity rejected.
++}
+diff --git a/launcher/native/ThreadProbe/Probe.cpp b/launcher/native/ThreadProbe/Probe.cpp
+new file mode 100644
+--- /dev/null
++++ b/launcher/native/ThreadProbe/Probe.cpp
+@@ -0,0 +1,95 @@
++#define WIN32_LEAN_AND_MEAN
++#define NOMINMAX
++#include "Protocol.h"
++#include <cstring>
++#include <cwchar>
++using namespace EmilyfnProbe;
++
++template<class T> bool Read(std::uint64_t a, T& value) {
++    SIZE_T got = 0;
++    return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(a), &value, sizeof(T), &got) && got == sizeof(T);
++}
++template<std::size_t N> bool Bytes(std::uint64_t a, const char (&bytes)[N]) {
++    char data[N - 1]{}; SIZE_T got = 0;
++    return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(a), data, sizeof(data), &got)
++        && got == sizeof(data) && std::memcmp(data, bytes, sizeof(data)) == 0;
++}
++bool GameThread() {
++    PWSTR name = nullptr;
++    const auto hr = GetThreadDescription(GetCurrentThread(), &name);
++    const bool same = SUCCEEDED(hr) && name && std::wcscmp(name, L"GameThread") == 0;
++    if (name) LocalFree(name);
++    return same;
++}
++bool Validate(const Shared& p, std::uint64_t& expected) {
++    const auto image = reinterpret_cast<std::uint64_t>(GetModuleHandleW(nullptr));
++    if (p.image != image || p.dispatchRva != 0x3729a || p.nativeRva != 0x432782a || p.hasTarget != 1) return false;
++    // Exact observed GetOwner exec wrapper: advance FFrame bytecode and return object+0xA8.
++    if (!Bytes(image + p.nativeRva, "\x48\x8b\x42\x20\x48\x83\xf8\x01\x48\x83\xd8\xff\x48\x89\x42\x20\x48\x8b\x81\xa8\x00\x00\x00\x49\x89\x00\xc3") ||
++        !Bytes(image + p.dispatchRva, "\x55\x41\x57\x41\x56\x41\x55\x41\x54\x56\x57\x53\x48\x81\xec\xc8\x00\x00\x00") ||
++        !Bytes(image + 0x373d5, "\x48\x63\x47\x68\xba\x7b\xf4\x37\x19\x48\x89\xc1\x48\x31\xd1\x48") ||
++        !Bytes(image + 0x3743c, "\x0f\xb7\x87\xbc\x00\x00\x00\x48\x35\x50\x82\x00\x00\x39")) return false;
++    std::uint64_t klass = 0, outer = 0, vt = 0, dispatch = 0, entry = 0;
++    std::uint32_t flags = 0, objectName = 0, className = 0, functionName = 0, functionFlags = 0, storage = 0;
++    std::uint16_t parameters = 0;
++    return p.object && p.klass && p.function &&
++        Read(p.object + 0x18, klass) && klass == p.klass &&
++        Read(p.function + 8, outer) && outer == p.klass &&
++        Read(p.object + 0x20, objectName) && objectName == p.objectName &&
++        Read(p.klass + 0x20, className) && className == p.className &&
++        Read(p.function + 0x20, functionName) && functionName == p.functionName &&
++        Read(p.object + 0x10, flags) && (flags & 0x10) && !(flags & 0x40000000) &&
++        Read(p.object, vt) && Read(vt + 28 * 8, dispatch) && dispatch == image + p.dispatchRva &&
++        Read(p.function + 0xe0, entry) && entry == image + p.nativeRva &&
++        Read(p.function + 0xb8, functionFlags) && functionFlags == 0x54020401 &&
++        Read(p.function + 0x68, storage) && (storage ^ 0x1937f47b) == 8 &&
++        Read(p.function + 0xbc, parameters) && (parameters ^ 0x8250) == 8 &&
++        Read(p.object + 0xa8, expected);
++}
++DWORD Call(Shared* p) {
++    // Only the fixed read-only GetOwner test can reach this point.
++    __try {
++        using Dispatch = void(*)(void*, void*, void*);
++        reinterpret_cast<Dispatch>(p->image + 0x3729a)(reinterpret_cast<void*>(p->object), reinterpret_cast<void*>(p->function), &p->returned);
++        return 0;
++    } __except(EXCEPTION_EXECUTE_HANDLER) { return GetExceptionCode(); }
++}
++extern "C" __declspec(dllexport) LRESULT CALLBACK EmilyfnThreadProbe(int code, WPARAM remove, LPARAM parameter) {
++    if (code == HC_ACTION && remove == PM_REMOVE && parameter) {
++        const auto msg = reinterpret_cast<const MSG*>(parameter);
++        const auto message = RegisterWindowMessageW(MessageName);
++        if (message && msg->message == message && msg->wParam) {
++            wchar_t name[128]{};
++            swprintf_s(name, L"Local\\Emilyfn-dispatch-%lu-%lu-%016llx", GetCurrentProcessId(), GetCurrentThreadId(), static_cast<unsigned long long>(msg->wParam));
++            const auto mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, name);
++            if (mapping) {
++                const auto p = static_cast<Shared*>(MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, 256));
++                if (p) {
++                    FILETIME created{}, exited{}, kernel{}, user{};
++                    const bool identity = GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user) &&
++                        p->created == (static_cast<std::uint64_t>(created.dwHighDateTime) << 32 | created.dwLowDateTime);
++                    if (p->magic == Magic && p->version == 1 && p->nonce == msg->wParam && p->pid == GetCurrentProcessId() &&
++                        p->tid == GetCurrentThreadId() && identity && GetTickCount64() <= p->deadline &&
++                        InterlockedCompareExchange(&p->state, 2, 1) == 1) {
++                        p->callbackPid = GetCurrentProcessId(); p->callbackTid = GetCurrentThreadId(); p->status = 1;
++                        if (!GameThread()) p->status = 7;
++                        else if (!p->hasTarget) p->status = 2;
++                        else if (!Validate(*p, p->expected)) p->status = 3;
++                        else if (GetTickCount64() > p->deadline) p->status = 8;
++                        else {
++                            p->returned = p->expected ^ 0xffffffffffffffffULL;
++                            InterlockedExchange(&p->calls, 1);
++                            p->exception = Call(p);
++                            p->status = p->exception ? 5 : p->returned == p->expected ? 4 : 6;
++                        }
++                        InterlockedExchange(&p->state, 3);
++                    }
++                    UnmapViewOfFile(p);
++                }
++                CloseHandle(mapping);
++            }
++        }
++    }
++    return CallNextHookEx(nullptr, code, remove, parameter);
++}
++BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID) { return TRUE; }
+diff --git a/launcher/build.ps1 b/launcher/build.ps1
+--- a/launcher/build.ps1
++++ b/launcher/build.ps1
+@@ -1,11 +1,14 @@
+ param(
+     [Parameter(Mandatory=$true)][string]$DllDirectory,
+     [Parameter(Mandatory=$true)][string]$BackendDirectory,
++    [Parameter(Mandatory=$true)][string]$DiagnosticDllDirectory,
+     [string]$OutputDirectory = "$PSScriptRoot/../Emilyfn-dist"
+ )
+ $ErrorActionPreference = 'Stop'
+ $dllRoot = (Resolve-Path $DllDirectory).Path
+ $backendRoot = (Resolve-Path $BackendDirectory).Path
++$probe = Join-Path (Resolve-Path $DiagnosticDllDirectory).Path "Emilyfn-38-ThreadProbe.dll"
++if (!(Test-Path $probe)) { throw "The 38.00 diagnostic DLL has not been compiled." }
+ $out = [System.IO.Path]::GetFullPath($OutputDirectory)
+ if (Test-Path $out) { throw 'Use a new output directory so existing files cannot enter the package.' }
+ $expected = @{
+@@ -26,6 +29,9 @@
+ $null = New-Item -ItemType Directory -Path "$out/resources"
+ Copy-Item $dllRoot "$out/resources/dlls" -Recurse
+ Copy-Item $backendRoot "$out/resources/backend" -Recurse
++$null = New-Item -ItemType Directory -Path "$out/resources/diagnostics"
++Copy-Item $probe "$out/resources/diagnostics/Emilyfn-38-ThreadProbe.dll"
++(Get-FileHash $probe -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content "$out/resources/diagnostics/Emilyfn-38-ThreadProbe.dll.sha256" -Encoding ascii
+ foreach ($name in @('compatibility-args.json', 'README.md', '30.40-ANALYSIS.md', 'PROVENANCE.md', 'LICENSE')) { Copy-Item "$PSScriptRoot/$name" $out }
+ $sdk = dotnet --version
+ $assets = Get-Content "$PSScriptRoot/Emilyfn.App/obj/project.assets.json" -Raw | ConvertFrom-Json

@@ -1,0 +1,514 @@
+--- a/launcher/Emilyfn.Core/GameThreadProbe38.cs
++++ b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+@@ -14,7 +14,7 @@
+     public sealed record Result(string File,string Message);
+     internal sealed record CallbackResult(int State,int Status,int CallbackProcessId,int CallbackThreadId,bool? FunctionCallsAttempted,
+         ulong Returned,ulong Expected,uint ExceptionCode,bool HookRemoved,string? Failure,
+-        int CapturedStackFrames,List<string> GameFrameRvas,bool StackCapacityReached,uint StackCaptureException,ThreadContextObservation ThreadContext,UrlLifecycleObservation UrlLifecycle);
++        int CapturedStackFrames,List<string> GameFrameRvas,bool StackCapacityReached,uint StackCaptureException,ThreadContextObservation ThreadContext,UrlLifecycleObservation UrlLifecycle,DriverLifecycleObservation DriverLifecycle);
+     internal sealed record ThreadContextObservation(uint Status,uint? TlsIndex,uint? RawValue)
+     {
+         public string StatusText=>Status switch {0=>"Not observed",1=>"Instruction profile rejected",2=>"TLS block unavailable",3=>"TLS index outside diagnostic bound",4=>"Required memory unreadable",5=>"Raw value observed",_=>"Unknown status"};
+@@ -26,14 +26,26 @@
+         public string StatusText=>Status switch {0=>"Not run",1=>"URL instruction profile rejected",2=>"Dispatch or thread prerequisites rejected",3=>"Still running",4=>"Constructor exception; cleanup not attempted",5=>"Destructor exception; cleanup uncertain",6=>"Unexpected constructor return; cleanup uncertain",7=>"Construction and destruction returned",_=>"Unknown status"};
+         public bool NetworkingCallsAttempted=>false;
+     }
++    internal sealed record DriverLifecycleObservation(bool Requested,uint Status,uint CreateCalls,uint RemoveCalls,uint ExceptionCode,
++        uint? CreatedSlot,uint? BeforeCount,uint? AfterCount,bool ContextAndWorldReferencesCleared)
++    {
++        public string StatusText=>Status switch {0=>"Not run",1=>"Driver instruction profile rejected",2=>"Creation prerequisites rejected",
++            3=>"Still running",4=>"Creation exception; state uncertain",5=>"Removal exception; cleanup uncertain",
++            6=>"Created driver identity or removal prerequisites rejected; cleanup uncertain",7=>"Created and removed from context; checked world references clear",
++            8=>"Removal returned but cleanup checks failed",9=>"Creation reported failure; state uncertain",10=>"Already attempted in this process",_=>"Unknown status"};
++        public bool ListenCalled=>false;
++        public bool ObjectMemoryFreedVerified=>false;
++        public string Scope=>"One experimental creation and named removal. Engine listeners and deferred garbage collection may have side effects. No direct object free, forced garbage collection or listen call. Restart the game after this test.";
++    }
+     private static readonly System.Collections.Concurrent.ConcurrentDictionary<(int,DateTime),byte> InFlight=new();
+     public static Task<Result> RunAsync(CaptureTarget target,string destination,IProgress<string>? progress=null)=>Task.Run(()=>Run(target,destination,progress,false));
+     public static Task<Result> RunUrlLifecycleAsync(CaptureTarget target,string destination,IProgress<string>? progress=null)=>Task.Run(()=>Run(target,destination,progress,true));
+-    private static Result Run(CaptureTarget target,string destination,IProgress<string>? progress,bool urlTest)
++    public static Task<Result> RunDriverLifecycleAsync(CaptureTarget target,string destination,IProgress<string>? progress=null)=>Task.Run(()=>Run(target,destination,progress,false,true));
++    private static Result Run(CaptureTarget target,string destination,IProgress<string>? progress,bool urlTest,bool driverTest=false)
+     {
+         if(!OperatingSystem.IsWindows()||!Environment.Is64BitProcess)throw new PlatformNotSupportedException("The game-thread test requires Windows x64.");
+         string folder=Path.Combine(Path.GetFullPath(destination),"Emilyfn-dispatch-test-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
+-        string file=Path.Combine(folder,urlTest?"url-lifecycle-test.json":"dispatch-test.json");string? failure=null;LiveBindingProbe38.Evidence? evidence=null;CallbackResult? callback=null;
++        string file=Path.Combine(folder,driverTest?"driver-lifecycle-test.json":urlTest?"url-lifecycle-test.json":"dispatch-test.json");string? failure=null;LiveBindingProbe38.Evidence? evidence=null;CallbackResult? callback=null;
+         string? imageHash=null;int? threadId=null;bool stable=false,alive=false;
+         EarlyStartupPatcher38.State? startupPatcher=null;
+         CaptureReflectionExporter38.IdentityDiagnostics? objectIdentity=null;
+@@ -41,7 +53,7 @@
+         BoundedReadCache? cache=null;
+         try
+         {
+-            if(InFlight.ContainsKey((target.Id,target.StartedUtc)))throw new InvalidOperationException("A previous callback may still be running in this game. Close that game instance before testing again.");
++            if(InFlight.ContainsKey((target.Id,target.StartedUtc)))throw new InvalidOperationException("A previous callback is uncertain or a driver lifecycle was already attempted. Close that game instance before testing again.");
+             using var process=Process.GetProcessById(target.Id);
+             using var handle=OpenProcess(0x0400|0x0010,false,target.Id);
+             if(handle.IsInvalid)throw new Win32Exception(Marshal.GetLastWin32Error());
+@@ -71,6 +83,7 @@
+             var inspected=LiveReadRetry38.Run(Boundary,()=>LiveBindingProbe38.InspectForDispatch(Read,imageBase,d=>objectIdentity=d),()=>{cache.Clear();objectIdentity=null;},readAttempts);
+             evidence=inspected.Evidence;stable=true;
+             if(!stable||evidence.Checks.Any(c=>c.RequiredForDispatch&&!c.Passed))throw new InvalidDataException("Live binding checks failed: " + string.Join("; ", evidence.Checks.Where(c=>c.RequiredForDispatch&&!c.Passed).Select(c=>c.Name+": "+c.Detail)));
++            if(driverTest&&inspected.DriverTarget is null)throw new InvalidDataException("Driver lifecycle prerequisites are missing: requires one engine context, no active drivers, and the loaded GameNetDriver/IpNetDriver definition. See Evidence.WorldReadiness.DriverConfiguration.");
+             var threads=FindGameThreads(process);
+             if(threads.Count!=1)throw new InvalidOperationException($"Expected one thread named GameThread; found {threads.Count}. No hook was installed.");
+             threadId=threads[0];
+@@ -80,8 +93,8 @@
+             if(expected.Length!=64||!string.Equals(Convert.ToHexString(SHA256.HashData(library)),expected,StringComparison.OrdinalIgnoreCase))
+                 throw new InvalidDataException("The diagnostic DLL does not match this package. Extract a fresh complete launcher ZIP.");
+             progress?.Report(inspected.Target is null?"Testing entry into GameThread; no initialized GetOwner target is available…":"Testing one GetOwner call on GameThread…");
+-            callback=RunCallback(process,threadId.Value,dll,imageBase,inspected.Target,30000,urlTest);
+-            if(callback.State==2||!callback.HookRemoved||callback.UrlLifecycle.Status is 4 or 5 or 6)InFlight.TryAdd((target.Id,target.StartedUtc),0);
++            callback=RunCallback(process,threadId.Value,dll,imageBase,inspected.Target,30000,urlTest,driverTest,inspected.DriverTarget);
++            if(callback.State==2||!callback.HookRemoved||callback.UrlLifecycle.Status is 4 or 5 or 6||callback.DriverLifecycle.CreateCalls>0)InFlight.TryAdd((target.Id,target.StartedUtc),0);
+             alive=!process.HasExited;
+             failure=callback.Failure ?? (callback.Status switch {
+                 3=>"GameThread was reached, but the native target/profile no longer matched.",
+@@ -92,6 +105,7 @@
+                 _=>null
+             });
+             if(urlTest&&callback.UrlLifecycle.Status!=7)failure??="URL lifecycle: "+callback.UrlLifecycle.StatusText;
++            if(driverTest&&callback.DriverLifecycle.Status!=7)failure??="Driver lifecycle: "+callback.DriverLifecycle.StatusText;
+             if(!alive)failure??="The game exited during the probe.";
+         }
+         catch(Exception error) when(error is InvalidDataException or Win32Exception or InvalidOperationException or IOException or UnauthorizedAccessException or OverflowException or ArgumentException or TimeoutException)
+@@ -102,9 +116,11 @@
+             "GameThread callback passed. GetOwner was skipped because its default component is not initialized. The callback stack is included in dispatch-test.json.":"The game-thread/dispatch test did not pass; see dispatch-test.json.";
+         bool urlPassed=urlTest&&callPassed&&callback?.UrlLifecycle is {Status:7,ConstructCalls:1,DestroyCalls:1,Validity:1};
+         if(urlTest)message=urlPassed?"The temporary URL was constructed and destroyed successfully. Networking was not started.":"The URL lifecycle test did not pass; see url-lifecycle-test.json.";
+-        File.WriteAllText(file,JsonSerializer.Serialize(new{FormatVersion=2,Test=urlTest?"38.00 temporary default URL lifecycle":"38.00 game-thread and guarded GetOwner dispatch",Utc=DateTime.UtcNow,ProcessId=target.Id,GameThreadId=threadId,
++        bool driverPassed=driverTest&&callPassed&&callback?.DriverLifecycle is {Status:7,CreateCalls:1,RemoveCalls:1,ContextAndWorldReferencesCleared:true,AfterCount:0};
++        if(driverTest)message=driverPassed?"The driver was created and removed; checked context/world references are clear. Restart the game after this test. Server listening was not tested.":"The driver lifecycle did not pass; see driver-lifecycle-test.json. Restart the game if creation was attempted.";
++        File.WriteAllText(file,JsonSerializer.Serialize(new{FormatVersion=3,Test=driverTest?"38.00 temporary GameNetDriver creation and named removal":urlTest?"38.00 temporary default URL lifecycle":"38.00 game-thread and guarded GetOwner dispatch",Utc=DateTime.UtcNow,ProcessId=target.Id,GameThreadId=threadId,
+             ExecutableSha256=imageHash,StableBoundaryCounters=stable,GameAliveAfterProbe=callback is null?(bool?)null:alive,GameThreadCallbackObserved=observed,EngineTaskTagVerified=false,
+-            FunctionCallsAttempted=callback is null?(bool?)false:callback.FunctionCallsAttempted,ControlledGetOwnerPassed=callPassed,UrlLifecyclePassed=urlPassed,GameplayReady=false,
++            FunctionCallsAttempted=callback is null?(bool?)false:callback.FunctionCallsAttempted,ControlledGetOwnerPassed=callPassed,UrlLifecyclePassed=urlPassed,DriverLifecyclePassed=driverPassed,GameplayReady=false,
+             Failure=failure,Message=message,StartupPatcher=startupPatcher,BindingReadAttempts=readAttempts,ReadCache=cache?.Snapshot(),ObjectIdentity=objectIdentity,Evidence=evidence,Callback=callback,
+             Note="Thread identity uses a unique Windows GameThread description and matching process/thread IDs. GameFrameRvas records the callback-delivery stack, not a GetOwner execution trace. It may omit callers across native callback boundaries. This does not validate Unreal task tags or general gameplay dispatch. No arbitrary function is exposed."},new JsonSerializerOptions{WriteIndented=true}));
+         return new(file,message);
+@@ -125,17 +141,25 @@
+         }
+         return found;
+     }
+-    internal static unsafe CallbackResult RunCallback(Process process,int tid,string dll,ulong image,DispatchTarget38.Target? target,int timeoutMs,bool urlTest=false)
++    internal static unsafe CallbackResult RunCallback(Process process,int tid,string dll,ulong image,DispatchTarget38.Target? target,int timeoutMs,bool urlTest=false,bool driverTest=false,DriverLifecycleTarget38.Target? driverTarget=null)
+     {
+         if(!OperatingSystem.IsWindows()||!Environment.Is64BitProcess||tid<=0||process.HasExited)throw new InvalidOperationException("Invalid callback target.");
+         using var thread=OpenThread(0x0800,false,(uint)tid);
+         if(thread.IsInvalid||GetProcessIdOfThread(thread)!=(uint)process.Id)throw new InvalidOperationException("Thread no longer belongs to the selected process.");
+         ulong nonce=BinaryPrimitives.ReadUInt64LittleEndian(RandomNumberGenerator.GetBytes(8));if(nonce==0)nonce=1;
+-        string name=$"Local\\Emilyfn-dispatch-v4-{process.Id}-{tid}-{nonce:x16}";
++        string name=$"Local\\Emilyfn-dispatch-v5-{process.Id}-{tid}-{nonce:x16}";
+         using var mapping=MemoryMappedFile.CreateNew(name,1024);using var view=mapping.CreateViewAccessor(0,1024);
+-        view.Write(0,0xef380003u);view.Write(4,4u);view.Write(12,process.Id);view.Write(16,tid);
++        view.Write(0,0xef380003u);view.Write(4,5u);view.Write(12,process.Id);view.Write(16,tid);
+         view.Write(24,nonce);view.Write(32,process.StartTime.ToUniversalTime().ToFileTimeUtc());view.Write(40,GetTickCount64()+(ulong)timeoutMs);view.Write(48,image);
+-        view.Write(568,urlTest?1u:0u);
++        view.Write(568,urlTest?1u:0u);view.Write(672,driverTest?1u:0u);
++        view.Write(696,uint.MaxValue);view.Write(700,uint.MaxValue);
++        if(driverTest&&driverTarget is not null)
++        {
++            view.Write(600,driverTarget.Engine);view.Write(608,driverTarget.EngineClass);view.Write(616,driverTarget.World);
++            view.Write(624,driverTarget.WorldClass);view.Write(632,driverTarget.DriverClass);view.Write(640,driverTarget.DriverDefault);
++            view.Write(648,driverTarget.EngineClassName);view.Write(652,driverTarget.WorldClassName);view.Write(656,driverTarget.DriverClassName);
++            view.Write(660,driverTarget.DefinitionName);view.Write(664,driverTarget.ClassPathName);
++        }
+         view.Write(124,checked((uint)process.MainModule!.ModuleMemorySize));
+         if(target is not null)
+         {
+@@ -147,7 +171,7 @@
+         try
+         {
+             library=NativeLibrary.Load(Path.GetFullPath(dll));var entry=NativeLibrary.GetExport(library,"EmilyfnThreadProbe");
+-            uint message=RegisterWindowMessageW("Emilyfn.DispatchProbe.v4");if(message==0)throw new Win32Exception(Marshal.GetLastWin32Error());
++            uint message=RegisterWindowMessageW("Emilyfn.DispatchProbe.v5");if(message==0)throw new Win32Exception(Marshal.GetLastWin32Error());
+             hook=SetWindowsHookExW(3,entry,library,(uint)tid);if(hook==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error(),"Windows could not install the thread-scoped diagnostic callback.");
+             Interlocked.Exchange(ref *(int*)(ptr+8),1);
+             if(!PostThreadMessageW((uint)tid,message,(nuint)nonce,IntPtr.Zero))throw new Win32Exception(Marshal.GetLastWin32Error(),"The game thread has no accessible message queue.");
+@@ -188,7 +212,13 @@
+                 new UrlLifecycleObservation(urlTest,state==3?view.ReadUInt32(572):urlTest&&state==2?3u:0u,
+                     view.ReadUInt32(584),view.ReadUInt32(588),state==3?view.ReadUInt32(592):0,
+                     state==3&&view.ReadUInt32(572)==7?view.ReadUInt32(576):null,
+-                    state==3&&view.ReadUInt32(572)==7?view.ReadUInt32(580):null));
++                    state==3&&view.ReadUInt32(572)==7?view.ReadUInt32(580):null),
++                new DriverLifecycleObservation(driverTest,state==3?view.ReadUInt32(676):driverTest&&state==2?3u:0u,
++                    view.ReadUInt32(680),view.ReadUInt32(684),state==3?view.ReadUInt32(688):0,
++                    state==3&&view.ReadUInt32(684)>0?view.ReadUInt32(692):null,
++                    state==3&&view.ReadUInt32(696)!=uint.MaxValue?view.ReadUInt32(696):null,
++                    state==3&&view.ReadUInt32(700)!=uint.MaxValue?view.ReadUInt32(700):null,
++                    state==3&&view.ReadUInt32(704)==1));
+             // The remote hook mapping has its own handle. A callback already in flight retains it.
+             view.SafeMemoryMappedViewHandle.ReleasePointer();if(library!=IntPtr.Zero&&removed)NativeLibrary.Free(library);
+         }
+--- a/launcher/Emilyfn.Core/LiveBindingProbe38.cs
++++ b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+@@ -14,7 +14,7 @@
+     public sealed record Result(string File,bool Passed,string Message);
+     public static Task<Evidence> InspectCaptureAsync(string dump) => Task.Run(() => CaptureNameExporter38.WithCapture(dump, view => Inspect(view.Read, view.ImageBase)));
+     public static Evidence Inspect(Func<ulong,int,byte[]> read,ulong imageBase,Action<CaptureReflectionExporter38.IdentityDiagnostics>? identityReport=null) => InspectForDispatch(read,imageBase,identityReport).Evidence;
+-    internal sealed record Inspection(Evidence Evidence,DispatchTarget38.Target? Target);
++    internal sealed record Inspection(Evidence Evidence,DispatchTarget38.Target? Target,DriverLifecycleTarget38.Target? DriverTarget);
+     internal static Inspection InspectForDispatch(Func<ulong,int,byte[]> read,ulong imageBase,Action<CaptureReflectionExporter38.IdentityDiagnostics>? identityReport=null)
+     {
+         uint D(ulong a)=>BinaryPrimitives.ReadUInt32LittleEndian(read(a,4));
+@@ -66,7 +66,8 @@
+             checks[index]=checks[index] with {RequiredForDispatch=false,
+                 Detail=checks[index].Detail+" Unresolved native entries remain excluded; the exact GetOwner target passed independent validation."};
+         }
+-        return new(new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count,target.Reason,registry.Slots,registry.EmptySlots,registry.Rejections.Count,EarlyStartupPatcher38.Inspect(read,imageBase),CaptureFunctionMetadata38.Summarize(bindings),WorldReadiness38.Inspect(read,observed,bindings,imageBase,names),NetDriverBindings38.Inspect(read,imageBase,observed,names)),target.Value);
++        var evidence=new Evidence(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count,target.Reason,registry.Slots,registry.EmptySlots,registry.Rejections.Count,EarlyStartupPatcher38.Inspect(read,imageBase),CaptureFunctionMetadata38.Summarize(bindings),WorldReadiness38.Inspect(read,observed,bindings,imageBase,names),NetDriverBindings38.Inspect(read,imageBase,observed,names));
++        return new(evidence,target.Value,DriverLifecycleTarget38.Find(read,observed,names,evidence.WorldReadiness,evidence.NetDriverBindings));
+     }
+     internal static bool CanScopeUnboundMetadata(CaptureFunctionMetadata38.Observation metadata,bool exactTargetValidated) =>
+         exactTargetValidated && metadata.Functions.Count>0 && metadata.Rejections.Count>0 &&
+--- a/launcher/Emilyfn.ThreadProbeTests/Program.cs
++++ b/launcher/Emilyfn.ThreadProbeTests/Program.cs
+@@ -38,6 +38,11 @@
+     Check(result.State==3&&result.Status==3&&result.FunctionCallsAttempted==false&&result.HookRemoved,"Invalid call target did not fail closed");
+     result=GameThreadProbe38.RunCallback(child.Process,child.Tid,dll,image,invalid,5000,true);
+     Check(result.UrlLifecycle.Status==2&&result.UrlLifecycle.ConstructCalls==0&&result.UrlLifecycle.DestroyCalls==0,"URL lifecycle bypassed dispatch/profile guards");
++    result=GameThreadProbe38.RunCallback(child.Process,child.Tid,dll,image,invalid,5000,false,true);
++    Check(result.DriverLifecycle.Requested&&result.DriverLifecycle.Status==2&&result.DriverLifecycle.CreateCalls==0&&result.DriverLifecycle.RemoveCalls==0,
++        "Driver lifecycle bypassed dispatch/profile guards");
++    Check(!result.DriverLifecycle.ContextAndWorldReferencesCleared&&!result.DriverLifecycle.ListenCalled,
++        "Rejected lifecycle fabricated cleanup or listen success");
+     var noPump=await Start("--no-pump");
+     result=GameThreadProbe38.RunCallback(noPump.Process,noPump.Tid,dll,0,null,500);
+     Check(result.State==4&&result.FunctionCallsAttempted==false&&result.HookRemoved&&result.Failure is not null,"Unpumped queue did not time out and cancel");
+--- a/launcher/Emilyfn.App/MemoryCaptureWindow.cs
++++ b/launcher/Emilyfn.App/MemoryCaptureWindow.cs
+@@ -21,6 +21,7 @@
+     private readonly Button live = new() { Content = "Test 38.00 live bindings", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 12, 0, 0) };
+     private readonly Button dispatch = new() { Content = "Test 38.00 game-thread dispatch", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 12, 0, 0) };
+     private readonly Button urlLifecycle = new() { Content = "Test 38.00 URL lifecycle", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 12, 0, 0) };
++    private readonly Button driverLifecycle = new() { Content = "Test 38.00 driver lifecycle", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 12, 0, 0) };
+     private bool busy;
+ 
+     public MemoryCaptureWindow(Func<string, Task> exportLogs, string logsDirectory)
+@@ -52,6 +53,8 @@
+         panel.Children.Add(new TextBlock { Text = "Loads the diagnostic DLL to test a GameThread callback. Calls GetOwner once only when the matching default component and bindings validate. Saves a small dispatch-test.json with the callback stack and startup-patcher state.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
+         panel.Children.Add(urlLifecycle);
+         panel.Children.Add(new TextBlock { Text = "Experimental: constructs and destroys one temporary URL after dispatch checks pass. Saves url-lifecycle-test.json. Does not start networking.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
++        panel.Children.Add(driverLifecycle);
++        panel.Children.Add(new TextBlock { Text = "Experimental: creates one temporary game network driver and requests engine cleanup. Requires an empty driver list. Does not call listen. Saves driver-lifecycle-test.json. Restart the game after this test.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
+         panel.Children.Add(status);
+         panel.Children.Add(new TextBlock { Text = "Full memory captures", FontSize = 18, Margin = new Thickness(0, 20, 0, 0) });
+         panel.Children.Add(new TextBlock { Text = "These captures may take several GB and contain session credentials. Keep them private. Nothing is uploaded automatically. Keep the complete game installation in place.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
+@@ -68,6 +71,7 @@
+         refresh.Click += (_, _) => Refresh();
+         capture.Click += async (_, _) => await Capture();
+         urlLifecycle.Click += async (_, _) => await DispatchTest(true);
++        driverLifecycle.Click += async (_, _) => await DispatchTest(false,true);
+         Closing += (_, e) => { if (busy) { e.Cancel = true; status.Text = "Please wait for the current operation to finish before closing this window."; } };
+         Refresh();
+     }
+@@ -75,7 +79,7 @@
+     {
+         busy = value;
+         diagnosticLaunch.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = !value;
+-        urlLifecycle.IsEnabled = dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = !value && targets.Items.Count > 0;
++        driverLifecycle.IsEnabled = urlLifecycle.IsEnabled = dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = !value && targets.Items.Count > 0;
+     }
+     private async Task LaunchDiagnostic()
+     {
+@@ -102,10 +106,10 @@
+         {
+             var found = GameMemoryCapture.FindTargets(); targets.ItemsSource = found;
+             targets.SelectedIndex = found.Count == 1 ? 0 : -1;
+-            capture.IsEnabled = urlLifecycle.IsEnabled = dispatch.IsEnabled = live.IsEnabled = found.Count > 0;
++            capture.IsEnabled = driverLifecycle.IsEnabled = urlLifecycle.IsEnabled = dispatch.IsEnabled = live.IsEnabled = found.Count > 0;
+             status.Text = found.Count == 0 ? "No accessible Fortnite game found. Start the game first, then refresh." : "Choose the client or host PID you want to capture.";
+         }
+-        catch (Exception error) { status.Text = error.Message; capture.IsEnabled = urlLifecycle.IsEnabled = dispatch.IsEnabled = live.IsEnabled = false; }
++        catch (Exception error) { status.Text = error.Message; capture.IsEnabled = driverLifecycle.IsEnabled = urlLifecycle.IsEnabled = dispatch.IsEnabled = live.IsEnabled = false; }
+     }
+     private async Task Launch()
+     {
+@@ -145,16 +149,16 @@
+         catch (Exception error) { status.Text = error.Message; }
+         finally { SetBusy(false); }
+     }
+-    private async Task DispatchTest(bool urlTest=false)
++    private async Task DispatchTest(bool urlTest=false,bool driverTest=false)
+     {
+         if (targets.SelectedItem is not CaptureTarget target) { status.Text = "Select a game process first."; return; }
+-        var dialog = new OpenFolderDialog { Title = urlTest?"Choose where to save url-lifecycle-test.json":"Choose where to save dispatch-test.json" };
++        var dialog = new OpenFolderDialog { Title = driverTest?"Choose where to save driver-lifecycle-test.json":urlTest?"Choose where to save url-lifecycle-test.json":"Choose where to save dispatch-test.json" };
+         if (dialog.ShowDialog(this) != true) return;
+         SetBusy(true);
+         try
+         {
+             var progress = new Progress<string>(s => status.Text = s);
+-            var result = urlTest?await GameThreadProbe38.RunUrlLifecycleAsync(target, dialog.FolderName, progress):await GameThreadProbe38.RunAsync(target, dialog.FolderName, progress);
++            var result = driverTest?await GameThreadProbe38.RunDriverLifecycleAsync(target, dialog.FolderName, progress):urlTest?await GameThreadProbe38.RunUrlLifecycleAsync(target, dialog.FolderName, progress):await GameThreadProbe38.RunAsync(target, dialog.FolderName, progress);
+             status.Text = result.Message + " Saved to " + result.File;
+             try { Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { System.IO.Path.GetDirectoryName(result.File)! } }); } catch { }
+         }
+--- a/launcher/native/ThreadProbe/Probe.cpp
++++ b/launcher/native/ThreadProbe/Probe.cpp
+@@ -125,13 +125,15 @@
+     },[&]() {p->urlDestroyCalls=1;return DestroyUrl(p->image,storage);});
+     p->urlException=outcome.exception;p->urlStatus=outcome.status;
+ }
++// Uses the fixed creation/removal paths only after independent live checks.
++#include "DriverProbe38.h"
+ extern "C" __declspec(dllexport) LRESULT CALLBACK EmilyfnThreadProbe(int code, WPARAM remove, LPARAM parameter) {
+     if (code == HC_ACTION && remove == PM_REMOVE && parameter) {
+         const auto msg = reinterpret_cast<const MSG*>(parameter);
+         const auto message = RegisterWindowMessageW(MessageName);
+         if (message && msg->message == message && msg->wParam) {
+             wchar_t name[128]{};
+-            swprintf_s(name, L"Local\\Emilyfn-dispatch-v4-%lu-%lu-%016llx", GetCurrentProcessId(), GetCurrentThreadId(), static_cast<unsigned long long>(msg->wParam));
++            swprintf_s(name, L"Local\\Emilyfn-dispatch-v5-%lu-%lu-%016llx", GetCurrentProcessId(), GetCurrentThreadId(), static_cast<unsigned long long>(msg->wParam));
+             const auto mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, name);
+             if (mapping) {
+                 const auto p = static_cast<Shared*>(MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, MappingBytes));
+@@ -157,7 +159,8 @@
+                                 p->status = p->exception ? 5 : p->returned == p->expected ? 4 : 6;
+                             }
+                         }
+-                        if(p->urlRequested==1) TestUrl(p);
++                        if(p->urlRequested==1 && p->driverRequested==0) TestUrl(p);
++                        if(p->driverRequested==1 && p->urlRequested==0) DriverProbe38::Test(p);
+                         InterlockedExchange(&p->state, 3);
+                     }
+                     UnmapViewOfFile(p);
+--- a/launcher/native/ThreadProbe/Protocol.h
++++ b/launcher/native/ThreadProbe/Protocol.h
+@@ -4,8 +4,8 @@
+ #include <cstddef>
+ namespace EmilyfnProbe {
+ inline constexpr std::uint32_t Magic = 0xef380003;
+-inline constexpr std::uint32_t ProtocolVersion = 4, MaxFrames = 48, MappingBytes = 1024;
+-inline constexpr wchar_t MessageName[] = L"Emilyfn.DispatchProbe.v4";
++inline constexpr std::uint32_t ProtocolVersion = 5, MaxFrames = 48, MappingBytes = 1024;
++inline constexpr wchar_t MessageName[] = L"Emilyfn.DispatchProbe.v5";
+ struct Shared {
+     std::uint32_t magic, version;
+     volatile LONG state; // 1 armed, 2 executing, 3 complete, 4 cancelled
+@@ -22,8 +22,11 @@
+     std::uint32_t stackException, stackReserved;
+     std::uint32_t threadContextStatus, tlsIndex, rawThreadContext, threadContextReserved;
+     std::uint32_t urlRequested,urlStatus,urlValidity,urlPort,urlConstructCalls,urlDestroyCalls,urlException,urlReserved;
++    std::uint64_t driverEngine,driverEngineClass,driverWorld,driverWorldClass,driverClass,driverDefault;
++    std::uint32_t driverEngineClassName,driverWorldClassName,driverClassName,driverDefinitionName,driverClassPathName,driverInputReserved;
++    std::uint32_t driverRequested,driverStatus,driverCreateCalls,driverRemoveCalls,driverException,driverCreatedSlot,driverBeforeCount,driverAfterCount,driverCleanupVerified,driverReserved;
+ };
+-static_assert(sizeof(Shared) == 600);
++static_assert(sizeof(Shared) == 712);
+ static_assert(offsetof(Shared, nonce) == 24 && offsetof(Shared, calls) == 112 && offsetof(Shared, status) == 144);
+ static_assert(offsetof(Shared, gameFrameCount) == 152 && offsetof(Shared, gameFrameRvas) == 160 && offsetof(Shared, stackException) == 544);
+ // status: 1 callback observed, 2 target absent, 3 profile rejected,
+@@ -33,3 +36,5 @@
+ static_assert(offsetof(EmilyfnProbe::Shared, threadContextStatus) == 552);
+ 
+ static_assert(offsetof(EmilyfnProbe::Shared, urlRequested) == 568);
++
++static_assert(offsetof(EmilyfnProbe::Shared, driverEngine) == 600 && offsetof(EmilyfnProbe::Shared, driverRequested) == 672);
+--- /dev/null
++++ b/launcher/native/ThreadProbe/DriverLifecycle38.h
+@@ -0,0 +1,17 @@
++#pragma once
++#include <cstdint>
++namespace EmilyfnDriver38 {
++struct Outcome {std::uint32_t status=2,createCalls=0,removeCalls=0,exception=0;};
++// An uncertain creation is never followed by guessed cleanup or a second creation.
++// Removal completion must be observed, not inferred from a returned call.
++template<class Create,class Identify,class Remove,class Verify>
++Outcome Run(Create create,Identify identify,Remove remove,Verify verify) {
++    Outcome o{};bool created=false;o.createCalls=1;o.exception=create(created);
++    if(o.exception){o.status=4;return o;}
++    if(!created){o.status=9;return o;}
++    if(!identify()){o.status=6;return o;}
++    o.removeCalls=1;o.exception=remove();
++    if(o.exception){o.status=5;return o;}
++    o.status=verify()?7u:8u;return o;
++}
++}
+--- /dev/null
++++ b/launcher/native/ThreadProbe/DriverLifecycleTests.cpp
+@@ -0,0 +1,12 @@
++#include "DriverLifecycle38.h"
++#include <cassert>
++int main(){
++ for(int mode=0;mode<6;++mode){
++  int sequence=0;
++  const auto o=EmilyfnDriver38::Run([&](bool& created){assert(sequence++==0);created=mode!=1;return mode==2?1u:0u;},
++   [&](){assert(sequence++==1);return mode!=3;},[&](){assert(sequence++==2);return mode==4?2u:0u;},
++   [&](){assert(sequence++==3);return mode!=5;});
++  const unsigned expected[]={7,9,4,6,5,8};assert(o.status==expected[mode]);assert(o.createCalls==1);
++  assert(o.removeCalls==((mode==0||mode>=4)?1u:0u));
++ }
++}
+--- /dev/null
++++ b/launcher/native/ThreadProbe/DriverProfile38.h
+@@ -0,0 +1,11 @@
++#pragma once
++// Exact supplied CL47722112 image; whole creation/removal bodies, fixed cleanup entry anchors.
++template<class Match> bool DriverProfile38(Match match,std::uint64_t image) {
++    return match(image+0x1fafe5e,"\x41\x57\x41\x56\x56\x57\x53\x48\x81\xec\x80\x01\x00\x00\x0f\x29\xb4\x24\x70\x01\x00\x00\x44\x89\xcb\x44\x89\xc7\x49\x89\xd6\x49\x89\xcf\x48\x8b\x05\x79\x85\xa5\x14\x48\x31\xe0\x48\x89\x84\x24\x68\x01\x00\x00\x44\x89\x44\x24\x4c\x44\x89\x4c\x24\x48\x48\x8d\x8a\x08\x02\x00\x00\x44\x89\xc2\xe8\xbf\xf3\x87\x02\x48\x85\xc0\x0f\x84\xea\x00\x00\x00\x80\x3d\x79\x4c\xec\x14\x05\x0f\x82\x01\x01\x00\x00\x48\x89\xc6\x48\x8d\x15\xa1\xbf\xe0\x0f\x48\x8d\x4c\x24\x50\x41\xb8\x5a\x00\x00\x00\xe8\xd5\xaa\x26\x0f\xb0\x6e\x31\xc9\x0f\xb6\xc0\x6b\xc0\x61\x04\x44\x30\x44\x0c\x50\x48\xff\xc1\x48\x83\xf9\x5a\x75\xeb\x48\x8d\xbc\x24\xe2\x00\x00\x00\x48\x8d\x5c\x24\x50\x41\xb8\x5a\x00\x00\x00\x48\x89\xf9\x48\x89\xda\xe8\x9e\xaa\x26\x0f\x8b\x46\x20\x48\x8d\x4c\x24\x30\x89\x01\x0f\x57\xf6\x0f\x29\x33\x48\x8d\x74\x24\x50\x48\x89\xf2\xe8\x57\x8e\x07\xfe\x83\x7e\x08\x00\x48\x8d\x35\x40\xb7\x7e\x14\x49\x89\xf6\x74\x05\x4c\x8b\x74\x24\x50\x48\x8d\x5c\x24\x30\x0f\x29\x33\x48\x8d\x4c\x24\x4c\x48\x89\xda\xe8\x2d\x8e\x07\xfe\x83\x7b\x08\x00\x49\x89\xf1\x74\x05\x4c\x8b\x4c\x24\x30\x4c\x89\x74\x24\x20\x48\x8d\x15\xc1\x4b\xec\x14\x48\x89\xf1\x49\x89\xf8\xe8\xc0\x15\x05\xfe\x48\x8b\x4c\x24\x30\x48\x85\xc9\x74\x05\xe8\xcf\x50\xd7\x06\x48\x8b\x4c\x24\x50\x48\x85\xc9\x74\x2b\xe8\xc0\x50\xd7\x06\xeb\x24\x4c\x89\xf9\x4c\x89\xf2\x41\x89\xd8\x41\x89\xf9\xe8\xdf\xf3\x87\x02\x48\x89\xc1\xb0\x01\x48\x85\xc9\x75\x0b\x80\x3d\x74\x4b\xec\x14\x05\x73\x33\x31\xc0\x48\x8b\x8c\x24\x68\x01\x00\x00\x48\x31\xe1\x48\x3b\x0d\x2a\x84\xa5\x14\x75\x17\x0f\x28\xb4\x24\x70\x01\x00\x00\x48\x81\xc4\x80\x01\x00\x00\x5b\x5f\x5e\x41\x5e\x41\x5f\xc3\xe8\xfc\x4c\x62\x07\xcc\x48\x8d\x15\xca\xbe\xe0\x0f\x48\x8d\x4c\x24\x50\x41\xb8\x86\x00\x00\x00\xe8\xa4\xa9\x26\x0f\xb0\x72\x31\xc9\x0f\xb6\xc0\x6b\xc0\x61\x04\x44\x30\x44\x0c\x50\x48\xff\xc1\x48\x81\xf9\x86\x00\x00\x00\x75\xe8\x48\x8d\xb4\x24\xe2\x00\x00\x00\x48\x8d\x7c\x24\x50\x41\xb8\x86\x00\x00\x00\x48\x89\xf1\x48\x89\xfa\xe8\x6a\xa9\x26\x0f\x0f\x57\xf6\x0f\x29\x37\x48\x8d\x4c\x24\x48\x48\x8d\x7c\x24\x50\x48\x89\xfa\xe8\x28\x8d\x07\xfe\x83\x7f\x08\x00\x48\x8d\x3d\x11\xb6\x7e\x14\x49\x89\xfe\x74\x05\x4c\x8b\x74\x24\x50\x48\x8d\x5c\x24\x30\x0f\x29\x33\x48\x8d\x4c\x24\x4c\x48\x89\xda\xe8\xfe\x8c\x07\xfe\x83\x7b\x08\x00\x49\x89\xf9\x74\x05\x4c\x8b\x4c\x24\x30\x4c\x89\x74\x24\x20\x48\x8d\x15\x92\x4a\xec\x14\x48\x89\xf9\x49\x89\xf0\xe9\xcc\xfe\xff\xff") &&
++        match(image+0x482f38e,"\x41\x57\x41\x56\x41\x55\x41\x54\x56\x57\x55\x53\x48\x81\xec\xd8\x02\x00\x00\x0f\x29\xb4\x24\xc0\x02\x00\x00\x48\x8b\x05\x50\x90\x1d\x12\x48\x31\xe0\x48\x89\x84\x24\xb8\x02\x00\x00\x44\x89\x84\x24\xb8\x00\x00\x00\x48\x63\x81\x58\x0f\x00\x00\x31\xed\x48\x85\xc0\x0f\x84\x4a\x03\x00\x00\x44\x89\xc7\x49\x89\xcf\x48\x8b\xb1\x50\x0f\x00\x00\x8d\x5f\xff\x81\xf3\x2b\x62\x01\x6f\xff\xc3\xb9\xd5\x9d\xfe\x90\x0f\x44\xd9\x41\x83\xf8\x01\x41\x89\xdb\x44\x0f\x42\xdd\x48\xc1\xe0\x04\x48\xf7\xd8\x45\x31\xf6\x45\x31\xc0\x46\x8b\x14\x36\x45\x85\xd2\x74\x13\x41\xff\xca\x41\x81\xf2\x2b\x62\x01\x6f\x41\xff\xc2\x44\x0f\x44\xd1\xeb\x03\x45\x31\xd2\x45\x39\xda\x74\x12\x49\x83\xc0\xf0\x49\x83\xc6\x10\x4c\x39\xc0\x75\xcf\xe9\xdc\x02\x00\x00\x31\xed\x4c\x29\xc6\x0f\x84\xd1\x02\x00\x00\x4c\x89\x4c\x24\x48\x48\x89\x54\x24\x40\x48\x8d\x4e\x04\x0f\x57\xc0\x4c\x8d\xa4\x24\xf0\x00\x00\x00\x41\x0f\x29\x04\x24\x4c\x89\xe2\xe8\x12\x99\x7f\xfb\x4c\x8d\x84\x24\xc4\x00\x00\x00\x49\xc7\x40\xfc\x00\x00\x00\x00\x4c\x8d\x8c\x24\xc8\x00\x00\x00\x41\x89\x29\x49\x8b\x04\x24\x4c\x8d\xac\x24\xd0\x01\x00\x00\x49\x89\x45\x00\x41\x8b\x44\x24\x08\x83\xe8\x01\x0f\x42\xc5\x41\x89\x45\x08\x48\x8d\x94\x24\xc0\x00\x00\x00\x4c\x89\xe9\xe8\xc0\xb1\xa5\x04\x8b\x05\x60\x45\x31\x12\x65\x48\x8b\x0c\x25\x58\x00\x00\x00\x48\x8b\x04\xc1\x48\x8b\x80\xe0\x0d\x00\x00\x48\x85\xc0\x4c\x8d\x25\x7e\x68\x4b\x12\x4c\x0f\x45\xe0\x4d\x89\x65\x00\x41\xc6\x45\x08\x01\x4d\x8d\xb4\x24\xc0\x00\x00\x00\x41\x8b\xac\x24\xc8\x00\x00\x00\x85\xed\x0f\x85\x18\x0d\x00\x00\x4c\x89\xf1\xff\x15\x28\xe7\x01\x12\x4c\x8d\x84\x24\xe0\x00\x00\x00\x49\xc7\x00\x00\x00\x00\x00\x31\xc0\x41\x89\x40\x08\x4c\x89\x6c\x24\x28\x89\x44\x24\x20\x48\x8d\x94\x24\xc0\x00\x00\x00\xb9\x02\x00\x00\x00\x45\x31\xc9\xe8\x69\xe6\x8b\xfb\x80\xbc\x24\xd8\x01\x00\x00\x01\x75\x26\x4c\x8b\xb4\x24\xd0\x01\x00\x00\x41\x83\xbe\xcc\x00\x00\x00\x00\x0f\x8f\xd7\x0c\x00\x00\x49\x81\xc6\xc0\x00\x00\x00\x4c\x89\xf1\xff\x15\x6d\xed\x01\x12\x44\x8b\x8c\x24\xe8\x00\x00\x00\x8b\x94\x24\xe0\x00\x00\x00\x44\x8b\x84\x24\xe4\x00\x00\x00\x48\x8d\x8c\x24\xa8\x00\x00\x00\xe8\xb1\xc3\x80\xfd\x48\x8b\x8c\x24\xf0\x00\x00\x00\x48\x85\xc9\x74\x05\xe8\xb3\x5a\x4f\x04\x48\xc7\x84\x24\x98\x00\x00\x00\x00\x00\x00\x00\xc7\x84\x24\xa0\x00\x00\x00\x00\x00\x00\x00\x83\xbc\x24\xb0\x00\x00\x00\x00\x74\x0a\x48\x8b\x8c\x24\xa8\x00\x00\x00\xeb\x07\x48\x8d\x0d\x9f\xc0\xf6\x11\x48\x89\x8c\x24\x88\x00\x00\x00\x48\x85\xc9\x74\x08\xff\x15\x3a\x08\x02\x12\xeb\x02\x31\xc0\x4c\x8d\xb4\x24\x88\x00\x00\x00\x41\x89\x46\x08\xe8\xdd\x6c\x97\xfc\x48\xc7\x44\x24\x28\x00\x00\x00\x00\xc7\x44\x24\x20\x00\x20\x00\x00\x4c\x8d\x8c\x24\x98\x00\x00\x00\x48\x89\xc1\x31\xd2\x4d\x89\xf0\xe8\x14\xab\x24\xfd\x48\x85\xc0\x74\x33\x49\x89\xc6\x48\x8b\x88\x10\x01\x00\x00\x48\x85\xc9\x75\x13\x49\x8b\x06\x4c\x89\xf1\xff\x90\x00\x04\x00\x00\x49\x8b\x8e\x10\x01\x00\x00\x48\x8b\x01\xff\x90\xd0\x02\x00\x00\x84\xc0\x0f\x85\xbe\x01\x00\x00\x48\xc7\x44\x24\x78\x00\x00\x00\x00\xc7\x84\x24\x80\x00\x00\x00\x00\x00\x00\x00\x48\x8d\x4e\x08\x0f\x57\xc0\x4c\x8d\xb4\x24\xd0\x01\x00\x00\x41\x0f\x29\x06\x4c\x89\xf2\xe8\xf6\x96\x7f\xfb\x41\x83\x7e\x08\x00\x74\x0a\x48\x8b\x8c\x24\xd0\x01\x00\x00\xeb\x07\x48\x8d\x0d\xd2\xbf\xf6\x11\x48\x89\x4c\x24\x68\x48\x85\xc9\x74\x08\xff\x15\x70\x07\x02\x12\xeb\x02\x31\xc0\x4c\x8d\x74\x24\x68\x41\x89\x46\x08\xe8\x16\x6c\x97\xfc\x48\xc7\x44\x24\x28\x00\x00\x00\x00\xc7\x44\x24\x20\x00\x00\x00\x00\x4c\x8d\x4c\x24\x78\x48\x89\xc1\x31\xd2\x4d\x89\xf0\xe8\x50\xaa\x24\xfd\x49\x89\xc6\x48\x8b\x8c\x24\xd0\x01\x00\x00\x48\x85\xc9\x74\x05\xe8\x5a\x59\x4f\x04\x4d\x85\xf6\x0f\x85\x14\x01\x00\x00\x31\xed\x48\x8b\x8c\x24\xa8\x00\x00\x00\x48\x85\xc9\x74\x05\xe8\x3d\x59\x4f\x04\x48\x85\xed\x0f\x85\xbe\x00\x00\x00\x80\x3d\x05\x54\x64\x12\x05\x0f\x82\xb1\x00\x00\x00\x48\x8d\x15\xb0\xc6\x58\x0d\x48\x8d\x8c\x24\xf0\x00\x00\x00\x41\xb8\x80\x00\x00\x00\xe8\x61\xb2\x9e\x0c\xb0\x5a\x31\xc9\x0f\xb6\xc0\x6b\xc0\x61\x04\x44\x30\x84\x0c\xf0\x00\x00\x00\x48\xff\xc1\x48\x81\xf9\x80\x00\x00\x00\x75\xe5\x48\x8d\xb4\x24\xd0\x01\x00\x00\x48\x8d\xbc\x24\xf0\x00\x00\x00\x41\xb8\x80\x00\x00\x00\x48\x89\xf1\x48\x89\xfa\xe8\x21\xb2\x9e\x0c\x0f\x57\xc0\x0f\x29\x07\x48\x8d\x8c\x24\xb8\x00\x00\x00\x48\x8d\xbc\x24\xf0\x00\x00\x00\x48\x89\xfa\xe8\xd9\x95\x7f\xfb\x83\x7f\x08\x00\x48\x8d\x0d\xc2\xbe\xf6\x11\x49\x89\xc9\x74\x08\x4c\x8b\x8c\x24\xf0\x00\x00\x00\x48\x8d\x15\x68\x53\x64\x12\x49\x89\xf0\xe8\x6a\x1d\x7d\xfb\x48\x8b\x8c\x24\xf0\x00\x00\x00\x48\x85\xc9\x74\x05\xe8\x76\x58\x4f\x04\x48\x8b\x8c\x24\xb8\x02\x00\x00\x48\x31\xe1\x48\x3b\x0d\x08\x8c\x1d\x12\x75\x1f\x48\x89\xe8\x0f\x28\xb4\x24\xc0\x02\x00\x00\x48\x81\xc4\xd8\x02\x00\x00\x5b\x5d\x5f\x5e\x41\x5c\x41\x5d\x41\x5e\x41\x5f\xc3\xe8\xd2\x54\xda\x04\xcc\x48\x8b\x2d\x1a\x96\x4b\x12\x48\x8d\x15\x9b\xe1\xdd\x11\x48\x89\xe9\xe8\xe5\xa8\xcc\xfb\x4c\x8d\xac\x24\xd0\x01\x00\x00\x4d\x89\x75\x00\x45\x31\xf6\x4d\x89\x75\x40\x4d\x89\x75\x68\x41\xc7\x45\x70\x00\x00\x00\x00\x4d\x89\x75\x78\x4d\x89\x75\x10\x4d\x89\x75\x16\x49\x89\x6d\x08\x0f\x57\xc0\x41\x0f\x29\x45\x20\x4d\x89\x75\x30\x4c\x89\xe9\xe8\x84\xe1\xa4\xfb\x49\x89\xc4\x4d\x39\x75\x40\x74\x19\x48\x8d\x84\x24\x20\x02\x00\x00\x48\x8b\x48\x18\x48\x85\xc9\x48\x0f\x44\xc8\x48\x8b\x01\xff\x50\x10\x4c\x8b\x4c\x24\x48\x45\x85\xc9\x75\x05\x45\x8b\x4c\x24\x20\x89\xbc\x24\xd8\x00\x00\x00\x44\x89\x8c\x24\xd4\x00\x00\x00\x44\x89\x8c\x24\xc0\x00\x00\x00\x49\x63\x87\x68\x0f\x00\x00\x48\x85\xc0\x4c\x89\x4c\x24\x48\x4c\x89\x64\x24\x58\x74\x59\x4d\x8b\xa7\x60\x0f\x00\x00\x41\x8d\x49\xff\x81\xf1\x2b\x62\x01\x6f\xff\xc1\xba\xd5\x9d\xfe\x90\x0f\x44\xca\x48\xc1\xe0\x05\x45\x8b\x44\x24\x04\x45\x85\xc0\x74\x1b\x45\x85\xc9\x74\x16\x41\xff\xc8\x41\x81\xf0\x2b\x62\x01\x6f\x41\xff\xc0\x44\x0f\x44\xc2\x44\x39\xc1\x74\x0c\x49\x83\xc4\x20\x48\x83\xc0\xe0\x75\xd1\xeb\x09\x4d\x85\xe4\x0f\x85\x30\x02\x00\x00\x0f\x57\xc0\x4c\x8d\xac\x24\xf0\x00\x00\x00\x41\x0f\x29\x45\x00\x48\x8d\x8c\x24\xc0\x00\x00\x00\x4c\x89\xea\xe8\x37\x94\x7f\xfb\x48\xc7\x84\x24\xe0\x00\x00\x00\x00\x00\x00\x00\x49\x63\x6d\x08\x4d\x8b\x65\x00\x89\xac\x24\xe8\x00\x00\x00\x48\x85\xed\x75\x1e\x31\xc0\x89\x84\x24\xec\x00\x00\x00\x48\xc7\x84\x24\xd0\x01\x00\x00\x00\x00\x00\x00\x89\x84\x24\xd8\x01\x00\x00\xeb\x66\x4c\x8d\xb4\x24\xec\x00\x00\x00\x4c\x89\x74\x24\x30\x89\x6c\x24\x28\x48\x8d\x84\x24\xe0\x00\x00\x00\x48\x89\x44\x24\x20\xb9\x02\x00\x00\x00\xba\x02\x00\x00\x00\x41\x89\xe8\x45\x31\xc9\xe8\x1b\x4a\x50\x04\x49\x8b\x4e\xf4\x48\x01\xed\x4c\x89\xe2\x49\x89\xe8\xe8\xde\xaf\x9e\x0c\x4d\x63\x66\xfc\x48\xc7\x84\x24\xd0\x01\x00\x00\x00\x00\x00\x00\x49\x8b\x6e\xf4\x44\x89\xa4\x24\xd8\x01\x00\x00\x4d\x85\xe4\x75\x0f\xc7\x84\x24\xdc\x01\x00\x00\x00\x00\x00\x00\x31\xc9\xeb\x4a\x4c\x8d\xb4\x24\xdc\x01\x00\x00\x4c\x89\x74\x24\x30\x44\x89\x64\x24\x28\x48\x8d\x84\x24\xd0\x01\x00\x00\x48\x89\x44\x24\x20\xb9\x02\x00\x00\x00\xba\x02\x00\x00\x00\x45\x89\xe0\x45\x31\xc9\xe8\xa5\x49\x50\x04\x49\x8b\x4e\xf4\x4d\x01\xe4\x48\x89\xea\x4d\x89\xe0\xe8\x68\xaf\x9e\x0c\x49\x8b\x4e\xf4\x4d\x8b\xa7\x60\x0f\x00\x00\x4d\x63\xb7\x68\x0f\x00\x00\x40\xb5\x01\x4d\x85\xf6\x74\x6a\x49\xc1\xe6\x05\x4b\x8d\x04\x34\x48\x89\x44\x24\x60\x8b\xac\x24\xd8\x01\x00\x00\x85\xed\x4c\x8d\x2d\xfb\xbb\xf6\x11\x48\x89\x4c\x24\x50\x4c\x0f\x45\xe9\x31\xc0\x83\xed\x01\x0f\x42\xe8\x45\x8b\x4c\x24\x10\x41\x83\xf9\x02\x7c\x16\x41\xff\xc9\x4d\x8b\x44\x24\x08\x4c\x89\xe9\x89\xea\xe8\x91\x12\xfb\xfb\x84\xc0\x75\x14\x49\x83\xc4\x20\x49\x83\xc6\xe0\x75\xd5\x4c\x8b\x64\x24\x60\x40\xb5\x01\xeb\x02\x31\xed\x48\x8b\x4c\x24\x50\x48\x85\xc9\x74\x05\xe8\x86\x55\x4f\x04\x48\x8b\x8c\x24\xe0\x00\x00\x00\x48\x85\xc9\x74\x05\xe8\x74\x55\x4f\x04\x48\x8b\x8c\x24\xf0\x00\x00\x00\x48\x85\xc9\x74\x05\xe8\x62\x55\x4f\x04\x4d\x85\xe4\x0f\x95\xc0\x40\xf6\xd5\x40\x84\xc5\x75\x57\x49\x63\x87\x68\x0f\x00\x00\x48\x85\xc0\x74\x47\x4d\x8b\xa7\x60\x0f\x00\x00\x48\xc1\xe0\x05\xb9\xd5\x9d\xfe\x90\x85\xff\x41\x0f\x94\xc0\x41\x8b\x14\x24\x85\xd2\x41\x0f\x94\xc1\x45\x08\xc1\x75\x11\xff\xca\x81\xf2\x2b\x62\x01\x6f\xff\xc2\x0f\x44\xd1\x39\xd3\x74\x0c\x49\x83\xc4\x20\x48\x83\xc0\xe0\x75\xd0\xeb\x05\x4d\x85\xe4\x75\x04\x31\xdb\xeb\x05\x41\x8a\x5c\x24\x18\x44\x8b\x25\x45\x05\x50\x12\x45\x85\xe4\x41\x0f\x9f\xc6\x41\x20\xde\x48\x8b\x44\x24\x40\x4c\x8b\xb8\x00\x02\x00\x00\x4d\x85\xff\x0f\x84\x84\x01\x00\x00\x49\x8b\x07\x4c\x89\xf9\x89\xfa\xff\x90\x18\x04\x00\x00\x3c\x02\x0f\x84\xc5\x04\x00\x00\x0f\xb6\xc0\x83\xf8\x01\x0f\x85\x62\x01\x00\x00\x31\xed\x80\x3d\x7f\x4f\x64\x12\x05\x0f\x82\x56\x01\x00\x00\x45\x84\xf6\x0f\x84\x4d\x01\x00\x00\x48\x8d\x15\xe5\xbe\x58\x0d\x48\x8d\x8c\x24\xf0\x00\x00\x00\x41\xb8\xc4\x00\x00\x00\xe8\xd2\xad\x9e\x0c\xb0\x82\x31\xc9\x0f\xb6\xc0\x6b\xc0\x61\x04\x44\x30\x84\x0c\xf0\x00\x00\x00\x48\xff\xc1\x48\x81\xf9\xc4\x00\x00\x00\x75\xe5\x4c\x8d\xa4\x24\xd0\x01\x00\x00\x4c\x8d\xac\x24\xf0\x00\x00\x00\x41\xb8\xc4\x00\x00\x00\x4c\x89\xe1\x4c\x89\xea\xe8\x92\xad\x9e\x0c\x0f\x57\xf6\x41\x0f\x29\x75\x00\x48\x8d\x8c\x24\xd8\x00\x00\x00\x4c\x8d\xac\x24\xf0\x00\x00\x00\x4c\x89\xea\xe8\x48\x91\x7f\xfb\x41\x83\x7d\x08\x00\x4c\x8d\x2d\x30\xba\xf6\x11\x4d\x89\xee\x74\x08\x4c\x8b\xb4\x24\xf0\x00\x00\x00\x48\x8d\xac\x24\xe0\x00\x00\x00\x0f\x29\x75\x00\x48\x8d\x8c\x24\xd4\x00\x00\x00\x48\x89\xea\xe8\x13\x91\x7f\xfb\x83\x7d\x08\x00\x4c\x89\xed\x74\x08\x48\x8b\xac\x24\xe0\x00\x00\x00\x41\x8b\x47\x20\x48\x8d\x8c\x24\xdc\x00\x00\x00\x89\x01\x4c\x8d\xbc\x24\xc0\x00\x00\x00\x41\x0f\x29\x37\x4c\x89\xfa\xe8\xe0\x90\x7f\xfb\x41\x83\x7f\x08\x00\x4d\x89\xe9\x74\x08\x4c\x8b\x8c\x24\xc0\x00\x00\x00\x4c\x89\x74\x24\x28\x48\x89\x6c\x24\x20\x48\x8d\x15\x6b\x4e\x64\x12\x4c\x89\xe9\x4d\x89\xe0\xe8\x6a\x18\x7d\xfb\x48\x8b\x8c\x24\xc0\x00\x00\x00\x48\x85\xc9\x74\x05\xe8\x76\x53\x4f\x04\x48\x8b\x8c\x24\xe0\x00\x00\x00\x48\x85\xc9\x74\x05\xe8\x64\x53\x4f\x04\x48\x8b\x8c\x24\xf0\x00\x00\x00\x48\x85\xc9\x74\x05\xe8\x52\x53\x4f\x04\x31\xed\xeb\x03\x44\x89\xf5\xe8\x8e\x80\x00\x06\x3c\x01\x0f\x84\x39\x01\x00\x00\x0f\xb6\xc0\x83\xf8\x02\x4c\x8b\x74\x24\x40\x0f\x85\x48\x02\x00\x00\x80\x3d\xfe\x4d\x64\x12\x05\x0f\x92\xc0\x89\xd9\xf6\xd1\x08\xc1\x40\x08\xe9\xf6\xc1\x01\x0f\x85\x2e\x02\x00\x00\x48\x8d\x15\xe0\xbe\x58\x0d\x48\x8d\x8c\x24\xf0\x00\x00\x00\x41\xb8\xda\x00\x00\x00\xe8\x4b\xac\x9e\x0c\xb0\xa8\x31\xc9\x0f\xb6\xc0\x6b\xc0\x61\x04\x44\x30\x84\x0c\xf0\x00\x00\x00\x48\xff\xc1\x48\x81\xf9\xda\x00\x00\x00\x75\xe5\x4c\x8d\xbc\x24\xd0\x01\x00\x00\x4c\x8d\xa4\x24\xf0\x00\x00\x00\x41\xb8\xda\x00\x00\x00\x4c\x89\xf9\x4c\x89\xe2\xe8\x0b\xac\x9e\x0c\x0f\x57\xf6\x41\x0f\x29\x34\x24\x48\x8d\x8c\x24\xd8\x00\x00\x00\x4c\x8d\xa4\x24\xf0\x00\x00\x00\x4c\x89\xe2\xe8\xc1\x8f\x7f\xfb\x41\x83\x7c\x24\x08\x00\x4c\x8d\x25\xa8\xb8\xf6\x11\x4d\x89\xe6\x74\x08\x4c\x8b\xb4\x24\xf0\x00\x00\x00\x4c\x8d\xac\x24\xe0\x00\x00\x00\x41\x0f\x29\x75\x00\x48\x8d\x8c\x24\xd4\x00\x00\x00\x4c\x89\xea\xe8\x8a\x8f\x7f\xfb\x41\x83\x7d\x08\x00\x4d\x89\xe1\x74\x08\x4c\x8b\x8c\x24\xe0\x00\x00\x00\x4c\x89\x74\x24\x20\x48\x8d\x15\x1a\x4d\x64\x12\x4c\x89\xe1\x4d\x89\xf8\xe8\x19\x17\x7d\xfb\x48\x8b\x8c\x24\xe0\x00\x00\x00\x48\x85\xc9\x74\x05\xe8\x25\x52\x4f\x04\x48\x8b\x8c\x24\xf0\x00\x00\x00\x48\x85\xc9\x4c\x8b\x74\x24\x40\x0f\x84\x2c\x01\x00\x00\xe8\x0a\x52\x4f\x04\xe9\x22\x01\x00\x00\x80\x3d\xd6\x4c\x64\x12\x05\x4c\x8b\x74\x24\x40\x0f\x82\x6f\x01\x00\x00\x40\x84\xed\x0f\x84\x66\x01\x00\x00\x48\x8d\x15\x93\xbe\x58\x0d\x48\x8d\x8c\x24\xf0\x00\x00\x00\x41\xb8\xe0\x00\x00\x00\xe8\x24\xab\x9e\x0c\xb0\xad\x31\xc9\x0f\xb6\xc0\x6b\xc0\x61\x04\x44\x30\x84\x0c\xf0\x00\x00\x00\x48\xff\xc1\x48\x81\xf9\xe0\x00\x00\x00\x75\xe5\x4c\x8d\xbc\x24\xd0\x01\x00\x00\x4c\x8d\xa4\x24\xf0\x00\x00\x00\x41\xb8\xe0\x00\x00\x00\x4c\x89\xf9\x4c\x89\xe2\xe8\xe4\xaa\x9e\x0c\x0f\x57\xf6\x41\x0f\x29\x34\x24\x48\x8d\x8c\x24\xd8\x00\x00\x00\x4c\x8d\xa4\x24\xf0\x00\x00\x00\x4c\x89\xe2\xe8\x9a\x8e\x7f\xfb\x41\x83\x7c\x24\x08\x00\x4c\x8d\x25\x81\xb7\xf6\x11\x4c\x89\xe3\x74\x08\x48\x8b\x9c\x24\xf0\x00\x00\x00\x4c\x8d\xac\x24\xe0\x00\x00\x00\x41\x0f\x29\x75\x00\x48\x8d\x8c\x24\xd4\x00\x00\x00\x4c\x89\xea\xe8\x63\x8e\x7f\xfb\x41\x83\x7d\x08\x00\x4d\x89\xe1\x74\x08\x4c\x8b\x8c\x24\xe0\x00\x00\x00\x48\x89\x5c\x24\x20\x48\x8d\x15\xf3\x4b\x64\x12\x4c\x89\xe1\x4d\x89\xf8\xe8\xf2\x15\x7d\xfb\x48\x8b\x8c\x24\xe0\x00\x00\x00\x48\x85\xc9\x74\x05\xe8\xfe\x50\x4f\x04\x48\x8b\x8c\x24\xf0\x00\x00\x00\x48\x85\xc9\x4c\x8b\x74\x24\x40\x74\x68\xe8\xe7\x50\x4f\x04\xeb\x61\x89\xeb\x84\xdb\x74\x5b\x8b\x05\x85\x0f\x3e\x12\x8b\x0d\x9b\x3a\x31\x12\x65\x48\x8b\x14\x25\x58\x00\x00\x00\x48\x8b\x0c\xca\x3b\x81\x10\x01\x00\x00\x0f\x8f\x34\x02\x00\x00\x48\x8d\x15\x01\xf9\x18\x11\x4c\x8d\xbc\x24\xbc\x00\x00\x00\x4c\x89\xf9\xe8\x4b\x5c\x62\x04\x41\x8b\x17\x48\x8d\x0d\x25\x0b\x3e\x12\xe8\xe8\x41\xb0\xfb\x84\xc0\x74\x0c\xc6\x05\x2d\x1e\x22\x12\x00\x40\xb5\x01\xeb\x02\x31\xed\x48\x8b\x44\x24\x48\x48\x8b\x5c\x24\x58\x89\x83\x10\x02\x00\x00\x48\x89\xd9\x89\xfa\xe8\x40\xb6\xe1\xff\x48\x89\xd9\x89\xea\xe8\x94\x2d\xe1\xff\x41\x8b\x86\x10\x02\x00\x00\x41\x3b\x86\x14\x02\x00\x00\x75\x17\x49\x8d\x96\x08\x02\x00\x00\x4d\x8d\x86\x14\x02\x00\x00\x66\xb9\x10\x08\xe8\xce\x9b\x51\x04\x8d\x48\x01\x41\x89\x8e\x10\x02\x00\x00\x49\x8b\x8e\x08\x02\x00\x00\x48\x98\x48\xc1\xe0\x04\x48\x8b\x6c\x24\x58\x48\x89\x2c\x01\x48\x89\x74\x01\x08\x49\x8b\x96\xb8\x02\x00\x00\x48\x8d\x0d\xe8\x97\x67\x12\x49\x89\xe8\xe8\x0e\xcf\x38\xfc\xe9\xa8\xf6\xff\xff\x80\x3d\xc8\x4a\x64\x12\x05\x89\xdd\x0f\x82\x9d\xfc\xff\xff\x89\xdd\x45\x85\xe4\x0f\x8f\x92\xfc\xff\xff\x89\xdd\x84\xdb\x0f\x84\x88\xfc\xff\xff\x48\x8d\x15\xe4\xba\x58\x0d\x48\x8d\x8c\x24\xf0\x00\x00\x00\x41\xb8\xbe\x00\x00\x00\xe8\x0d\xa9\x9e\x0c\xb0\x88\x31\xc9\x0f\xb6\xc0\x6b\xc0\x61\x04\x44\x30\x84\x0c\xf0\x00\x00\x00\x48\xff\xc1\x48\x81\xf9\xbe\x00\x00\x00\x75\xe5\x4c\x8d\xa4\x24\xd0\x01\x00\x00\x4c\x8d\xac\x24\xf0\x00\x00\x00\x41\xb8\xbe\x00\x00\x00\x4c\x89\xe1\x4c\x89\xea\xe8\xcd\xa8\x9e\x0c\x0f\x57\xf6\x41\x0f\x29\x75\x00\x48\x8d\x8c\x24\xd8\x00\x00\x00\x4c\x8d\xac\x24\xf0\x00\x00\x00\x4c\x89\xea\xe8\x83\x8c\x7f\xfb\x41\x83\x7d\x08\x00\x4c\x8d\x2d\x6b\xb5\xf6\x11\x4d\x89\xee\x74\x08\x4c\x8b\xb4\x24\xf0\x00\x00\x00\x48\x8d\xac\x24\xe0\x00\x00\x00\x0f\x29\x75\x00\x48\x8d\x8c\x24\xd4\x00\x00\x00\x48\x89\xea\xe8\x4e\x8c\x7f\xfb\x83\x7d\x08\x00\x4c\x89\xed\x74\x08\x48\x8b\xac\x24\xe0\x00\x00\x00\x41\x8b\x47\x20\x48\x8d\x8c\x24\xdc\x00\x00\x00\x89\x01\x4c\x8d\xbc\x24\xc0\x00\x00\x00\x41\x0f\x29\x37\x4c\x89\xfa\xe8\x1b\x8c\x7f\xfb\x41\x83\x7f\x08\x00\x4d\x89\xe9\x74\x08\x4c\x8b\x8c\x24\xc0\x00\x00\x00\x4c\x89\x74\x24\x28\x48\x89\x6c\x24\x20\x48\x8d\x15\xa6\x49\x64\x12\x4c\x89\xe9\x4d\x89\xe0\xe8\xa5\x13\x7d\xfb\x48\x8b\x8c\x24\xc0\x00\x00\x00\x48\x85\xc9\x74\x05\xe8\xb1\x4e\x4f\x04\x48\x8b\x8c\x24\xe0\x00\x00\x00\x48\x85\xc9\x74\x05\xe8\x9f\x4e\x4f\x04\x48\x8b\x8c\x24\xf0\x00\x00\x00\x48\x85\xc9\x74\x05\xe8\x8d\x4e\x4f\x04\x89\xdd\xe9\x3b\xfb\xff\xff\x48\x8d\x0d\x2b\x0d\x3e\x12\xe8\x26\x42\xca\x04\x83\x3d\x1f\x0d\x3e\x12\xff\x0f\x85\xb3\xfd\xff\xff\x48\x8d\x0d\xf2\x08\x3e\x12\xe8\xef\xb6\x4e\x05\xc6\x05\xfe\x0c\x3e\x12\x01\x48\x8d\x0d\xaa\xbc\x76\x05\xe8\xe6\x39\xca\x04\x48\x8d\x0d\xf3\x0c\x3e\x12\xe8\x82\x41\xca\x04\xe9\x83\xfd\xff\xff\xff\x15\x43\xdc\x01\x12\x39\xc5\x0f\x85\xda\xf2\xff\xff\x41\xff\x84\x24\xcc\x00\x00\x00\xe9\xd6\xf2\xff\xff\x41\x8b\x86\xc8\x00\x00\x00\xff\x15\x21\xdc\x01\x12\x41\xff\x8e\xcc\x00\x00\x00\xe9\x20\xf3\xff\xff") &&
++        match(image+0x1f551f0,"\x41\x57\x41\x56\x41\x54\x56\x57\x55\x53\x48\x81\xec\xa0\x00\x00\x00\x48\x8b\x05\xf8\x31\xab\x14\x48\x31\xe0\x48\x89\x84\x24\x98\x00\x00\x00\x8b\x81\x10\x02\x00\x00\x85\xc0\x0f\x8e\xe6\x01\x00\x00\x48\x89\xce\x48\x8d\x99\x08\x02\x00\x00\x44\x8d\x7a\xff\x41\x81\xf7\x2b\x62\x01\x6f\x41\xff\xc7\xbd\xd5\x9d\xfe\x90\x44\x0f\x44\xfd\x45\x31\xe4\x83\xfa\x01\x45\x0f\x42\xfc\x45\x31\xf6\x48\x8b\x0b\x4a\x8b\x3c\x21\x48\x85\xff\x74\x20\x8b\x8f\x10\x02\x00\x00\x85\xc9\x74\x0f\xff\xc9\x81\xf1\x2b\x62\x01\x6f\xff\xc1\x0f\x44\xcd\xeb\x02\x31\xc9\x44\x39\xf9\x74\x14\x49\xff\xc6\x48\x63\xc8\x49\x83\xc4\x10\x49\x39\xce\x7c\xc5\xe9\x78\x01\x00\x00\x80\xbf\x10\x03\x00\x00\x01\x75\x10\x48\x89\xf9\xe8\xb4\x1f\x48\x0a\x8b\x86\x10\x02\x00\x00\xeb\xd3\x80\x3d\x85\xf8\xf1\x14\x05\x0f\x82\xbe\x00\x00\x00\x0f\x10\x05\xb0\x6c\xe6\x0f\x0f\x29\x44\x24\x40\x0f\x10\x05\x94\x6c\xe6\x0f\x0f\x29\x44\x24\x30\x0f\x10\x05\x78\x6c\xe6\x0f\x0f\x29\x44\x24\x20\x48\xb8\xa1\x48\xff\x50\xb4\x58\x9c\x60\x48\x89\x44\x24\x4e\xb0\x88\x31\xc9\x0f\xb6\xc0\x6b\xc0\x61\x04\x44\x30\x44\x0c\x20\x48\xff\xc1\x48\x83\xf9\x36\x75\xeb\x4c\x8d\x7c\x24\x20\x49\x8b\x47\x2e\x48\x89\x84\x24\x8e\x00\x00\x00\x41\x0f\x28\x07\x41\x0f\x28\x4f\x10\x41\x0f\x28\x57\x20\x0f\x29\x94\x24\x80\x00\x00\x00\x0f\x29\x4c\x24\x70\x0f\x29\x44\x24\x60\x48\x89\xf9\x4c\x89\xfa\xe8\x91\x4f\x3f\xff\x41\x83\x7f\x08\x00\x48\x8d\x0d\x31\x63\x84\x14\x49\x89\xc9\x74\x05\x4c\x8b\x4c\x24\x20\x48\x8d\x15\xda\xf7\xf1\x14\x4c\x8d\x44\x24\x60\xe8\xda\xc1\x0a\xfe\x48\x8b\x4c\x24\x20\x48\x85\xc9\x74\x05\xe8\xe9\xfc\xdc\x06\x48\x89\xd9\x44\x89\xf2\xe8\x6e\x0f\xac\x08\x8a\x05\xed\x2f\xd9\x14\x3c\x01\x0f\x84\x0e\x01\x00\x00\x48\x8d\x9e\x58\x02\x00\x00\xa8\x01\x0f\x85\x12\x01\x00\x00\xbd\xab\x38\x38\x75\x33\x6f\x14\x48\x8d\x0d\xa6\x5b\xda\x14\x89\xea\xe8\xa3\xf7\x0b\xfe\x4c\x8d\x44\x24\x60\x41\x89\x28\x41\x89\x40\x04\x48\x8d\x54\x24\x20\x48\x89\xd9\x45\x31\xc9\xe8\xcb\xa9\xe4\xfe\x48\x8b\x07\x48\x89\xf9\x31\xd2\xff\x90\x10\x04\x00\x00\x48\x8b\x07\x48\x89\xf9\xff\x90\x20\x03\x00\x00\x48\x8b\x07\x48\x89\xf9\xff\x90\x28\x03\x00\x00\x48\x8b\x8e\xb8\x02\x00\x00\x48\x85\xc9\x74\x08\x48\x89\xfa\xe8\x0b\xa9\x61\x0a\x48\x8b\x05\x52\x71\xf5\x14\x48\x63\x88\xe0\x0f\x00\x00\x48\x85\xc9\x74\x4d\x48\x8b\x80\xd8\x0f\x00\x00\x48\x8d\x0c\xc8\x4c\x8b\x00\x49\x63\x90\x10\x02\x00\x00\x48\x85\xd2\x74\x2a\x4d\x8b\x80\x08\x02\x00\x00\x48\xc1\xe2\x04\x45\x31\xc9\x4f\x8b\x14\x08\x4d\x85\xd2\x74\x0a\x41\x80\xba\x91\x08\x00\x00\x00\x75\x19\x49\x83\xc1\x10\x4c\x39\xca\x75\xe4\x48\x83\xc0\x08\x48\x39\xc8\x75\xbe\xc6\x05\x92\xc9\xaf\x14\x01\x48\x8b\x8c\x24\x98\x00\x00\x00\x48\x31\xe1\x48\x3b\x0d\x80\x2f\xab\x14\x75\x12\x48\x81\xc4\xa0\x00\x00\x00\x5b\x5d\x5f\x5e\x41\x5c\x41\x5e\x41\x5f\xc3\xe8\x57\xf8\x67\x07\xcc\x48\x89\xf9\xe8\x48\xae\xd8\x07\x8a\x05\xc9\x2e\xd9\x14\xe9\xdf\xfe\xff\xff\x48\x89\xf9\xe8\x35\xae\xd8\x07\xe9\xe1\xfe\xff\xff") &&
++        match(image+0xc56fd12,"\x48\x39\x51\x40\x74\x4f\x48\x39\x91\x50\x01\x00\x00\x75\x0b\x48\xc7\x81\x50\x01\x00\x00\x00\x00\x00\x00\x4c\x63\x81\xf8\x01\x00\x00\x4d\x85\xc0\x74\x2e\x48\x8b\x81\xf0\x01\x00\x00\x49\x6b\xc8\x78\x45\x31\xc0\x4a\x39\x54\x00\x10\x74\x24\x4a\x39\x54\x00\x18\x75\x09\x4a\xc7\x44\x00\x18\x00\x00\x00\x00\x49\x83\xc0\x78\x4c\x39\xc1\x75\xe0\xc3\x48\xc7\x41\x40\x00\x00\x00\x00\xeb\xa7\x4a\xc7\x44\x00\x10\x00\x00\x00\x00\xeb\xd1") &&
++        match(image+0x4641ffa,"\x41\x57\x41\x56\x41\x55\x41\x54\x56\x57\x55\x53\x48\x81\xec\xb8") &&
++        match(image+0x4937bf0,"\x41\x57\x41\x56\x41\x55\x41\x54\x56\x57\x55\x53\x48\x81\xec\x78\x01\x00\x00\x48\x89\xce\x48\x8b\x05\xf3\x07\x0d\x12\x48\x31\xe0") &&
++        match(image+0xfc3134,"\x41\x56\x56\x57\x53\x48\x83\xec\x28\x48\x89\xd6\x48\x89\xcf\x48");
++}
+--- /dev/null
++++ b/launcher/native/ThreadProbe/DriverProbe38.h
+@@ -0,0 +1,114 @@
++#pragma once
++#include "DriverLifecycle38.h"
++#include "DriverProfile38.h"
++namespace DriverProbe38 {
++struct Array {std::uint64_t pointer=0;std::int32_t count=0,capacity=0;};
++inline bool Bounded(const Array& a,int maximum) {
++ return a.count>=0&&a.count<=maximum&&a.capacity>=a.count&&a.capacity<=4096&&
++  (!a.count||(a.pointer&&a.pointer<=EmilyfnRegistry38::MaxUser-65536&&a.pointer%8==0));
++}
++inline bool Member(std::uint64_t image,std::uint64_t object) {
++ return EmilyfnRegistry38::Member([](std::uint64_t a,void* b,std::size_t n){SIZE_T got=0;
++  return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(a),b,n,&got)&&got==n;},image,object);
++}
++inline bool Identity(std::uint64_t image,std::uint64_t object,std::uint64_t klass,bool cdo) {
++ std::uint64_t c=0;std::uint32_t flags=0;
++ return Member(image,object)&&Member(image,klass)&&Read(object+0x18,c)&&c==klass&&Read(object+0x10,flags)&&
++  !(flags&0x40000000u)&&((flags&0x10)!=0)==cdo;
++}
++inline bool ClassName(std::uint64_t image,std::uint64_t klass,std::uint32_t expected) {
++ std::uint32_t name=0;return Member(image,klass)&&Read(klass+0x20,name)&&name==expected;
++}
++inline bool DriverTable(std::uint64_t image,std::uint64_t object) {
++ std::uint64_t vt=0,fn=0;
++ if(!Read(object,vt)||vt!=image+0x11e085c0) return false;
++ return Read(vt+130*8,fn)&&fn==image+0xfc3134&&Read(vt+100*8,fn)&&fn==image+0x4641ffa&&
++  Read(vt+101*8,fn)&&fn==image+0x4937bf0;
++}
++struct Snapshot {std::uint64_t context=0,definition=0;Array levels{};};
++inline bool WorldClear(const Shared* p,const Snapshot& s) {
++ std::uint64_t value=0;Array a{};
++ if(!Read(p->driverWorld+0x40,value)||value||!Read(p->driverWorld+0x150,value)||value||
++  !Read(p->driverWorld+0x1f0,a)||!Bounded(a,128)||a.pointer!=s.levels.pointer||a.count!=s.levels.count) return false;
++ for(int i=0;i<a.count;++i) {
++  const auto e=a.pointer+static_cast<std::uint64_t>(i)*0x78;
++  if(!Read(e+0x10,value)||value||!Read(e+0x18,value)||value)return false;
++ }
++ return true;
++}
++inline bool SameContext(const Shared* p,const Snapshot& s) {
++ Array a{};std::uint64_t c=0,w=0,engine=0;
++ return Read(p->image+0x16eac560,engine)&&engine==p->driverEngine&&
++  Read(p->driverEngine+0xfd8,a)&&Bounded(a,1)&&a.count==1&&Read(a.pointer,c)&&c==s.context&&
++  Read(c+0x2b8,w)&&w==p->driverWorld&&Identity(p->image,p->driverWorld,p->driverWorldClass,false);
++}
++inline bool Prepare(const Shared* p,Snapshot& s) {
++ const auto image=p->image;
++ if(!p->driverDefinitionName||!p->driverClassPathName||
++  !Identity(image,p->driverEngine,p->driverEngineClass,false)||
++  !Identity(image,p->driverWorld,p->driverWorldClass,false)||
++  !Identity(image,p->driverDefault,p->driverClass,true)||!DriverTable(image,p->driverDefault)||
++  !ClassName(image,p->driverEngineClass,p->driverEngineClassName)||
++  !ClassName(image,p->driverWorldClass,p->driverWorldClassName)||
++  !ClassName(image,p->driverClass,p->driverClassName))return false;
++ Array contexts{},active{},defs{};
++ if(!Read(p->driverEngine+0xfd8,contexts)||!Bounded(contexts,1)||contexts.count!=1||
++  !Read(contexts.pointer,s.context)||!s.context||s.context>EmilyfnRegistry38::MaxUser-0x300||
++  !SameContext(p,s)||!Read(s.context+0x208,active)||!Bounded(active,256)||active.count!=0||
++  !Read(p->driverEngine+0xf50,defs)||!Bounded(defs,256))return false;
++ int matches=0;
++ for(int i=0;i<defs.count;++i) {
++  const auto a=defs.pointer+static_cast<std::uint64_t>(i)*16;std::uint32_t name=0,path=0,fallback=0;
++  if(!Read(a,name)||!Read(a+4,path)||!Read(a+8,fallback))return false;
++  if(name==p->driverDefinitionName) {
++   if(path!=p->driverClassPathName||fallback!=path)return false;
++   s.definition=a;++matches;
++  }
++ }
++ if(matches!=1||!Read(p->driverWorld+0x1f0,s.levels)||!Bounded(s.levels,128))return false;
++ return WorldClear(p,s);
++}
++inline DWORD Create(const Shared* p,const Snapshot& s,bool& created) {
++ __try {using Fn=bool(*)(void*,void*,std::uint32_t,std::uint32_t);
++  created=reinterpret_cast<Fn>(p->image+0x1fafe5e)(reinterpret_cast<void*>(p->driverEngine),
++   reinterpret_cast<void*>(s.context),p->driverDefinitionName,p->driverDefinitionName);return 0;
++ }__except(EXCEPTION_EXECUTE_HANDLER){return GetExceptionCode();}
++}
++inline DWORD Remove(const Shared* p,const Snapshot& s) {
++ __try {using Fn=void(*)(void*,std::uint32_t);
++  reinterpret_cast<Fn>(p->image+0x1f551f0)(reinterpret_cast<void*>(s.context),p->driverDefinitionName);return 0;
++ }__except(EXCEPTION_EXECUTE_HANDLER){return GetExceptionCode();}
++}
++inline bool Identify(Shared* p,const Snapshot& s) {
++ Array a{};std::uint64_t driver=0,definition=0,world=0;std::uint32_t name=0,index=0;std::uint8_t active=0,pending=0;
++ if(!SameContext(p,s)||!Read(s.context+0x208,a)||!Bounded(a,1)||a.count!=1||
++  !Read(a.pointer,driver)||!Read(a.pointer+8,definition)||definition!=s.definition||
++  !Identity(p->image,driver,p->driverClass,false)||!DriverTable(p->image,driver)||
++  !Read(driver+0x210,name)||name!=p->driverDefinitionName||!Read(driver+0x14,index)||
++  !Read(driver+0x1b0,world)||(world&&world!=p->driverWorld)||
++  !Read(driver+0x310,active)||active!=0||!Read(driver+0x311,pending)||(pending&1))return false;
++ p->driverCreatedSlot=index^0x753838ab;p->driverAfterCount=1;return true;
++}
++inline void Test(Shared* p) {
++ p->driverStatus=2;p->driverBeforeCount=0xffffffffu;p->driverAfterCount=0xffffffffu;
++ CaptureThreadContext(p);
++ if(p->status!=4||p->threadContextStatus!=5||p->rawThreadContext!=2||GetTickCount64()>p->deadline)return;
++ p->driverStatus=1;
++ if(!DriverProfile38([](std::uint64_t a,const auto& b){return Bytes(a,b);},p->image))return;
++ Snapshot s{};p->driverStatus=2;if(!Prepare(p,s))return;
++ p->driverBeforeCount=0;
++ // One attempted transaction for this loaded diagnostic module; uncertain states are not retried.
++ static volatile LONG attempted=0;p->driverStatus=10;
++ if(InterlockedCompareExchange(&attempted,1,0)!=0)return;
++ if(GetTickCount64()>p->deadline){p->driverStatus=2;return;}
++ p->driverStatus=3;
++ const auto o=EmilyfnDriver38::Run([&](bool& created){p->driverCreateCalls=1;return Create(p,s,created);},
++  [&](){return Identify(p,s);},[&](){p->driverRemoveCalls=1;return Remove(p,s);},[&](){
++   Array a{};
++   if(!SameContext(p,s)||!Read(s.context+0x208,a)||!Bounded(a,256))return false;
++   p->driverAfterCount=static_cast<std::uint32_t>(a.count);
++   const bool clear=a.count==0&&WorldClear(p,s);p->driverCleanupVerified=clear?1u:0u;return clear;
++  });
++ p->driverException=o.exception;p->driverStatus=o.status;
++}
++}
+--- /dev/null
++++ b/launcher/Emilyfn.Core/DriverLifecycleTarget38.cs
+@@ -0,0 +1,36 @@
++using System.Buffers.Binary;
++namespace Emilyfn.Core;
++internal static class DriverLifecycleTarget38
++{
++    internal sealed record Target(ulong Engine,ulong EngineClass,ulong World,ulong WorldClass,ulong DriverClass,ulong DriverDefault,
++        uint EngineClassName,uint WorldClassName,uint DriverClassName,uint DefinitionName,uint ClassPathName);
++    internal static Target? Find(Func<ulong,int,byte[]> read,CaptureReflectionExporter38.Observation reflection,
++        IReadOnlyDictionary<uint,string> names,WorldReadiness38.Report world,NetDriverBindings38.Report bindings)
++    {
++        try
++        {
++            var config=world.DriverConfiguration;
++            if(config is not {InstructionProfileMatched:true,Failure:null}||config.Contexts.Count!=1||
++                config.Contexts[0] is not {Count:0,Failure:null}||world.EngineContexts is not {Failure:null,Count:1} contexts||
++                contexts.Contexts.Single() is not {ExactWorldClass:true,WorldSlot:not null} context)return null;
++            var definition=config.Definitions.Where(d=>d.Name.Text=="GameNetDriver"&&
++                d.ClassPath.Text=="/Script/OnlineSubsystemUtils.IpNetDriver"&&d.FallbackClassPath.Text==d.ClassPath.Text&&
++                d.LoadedClassMatches==1&&d.LoadedFallbackMatches==1).ToList();
++            if(definition.Count!=1)return null;
++            ulong Object(uint? slot)=>reflection.Registry!.Entries.Single(e=>e.Index==slot).Address;
++            ulong Class(string name)=>reflection.Candidates.Single(c=>c.Kind=="Class"&&c.Name==name).Address;
++            uint Name(ulong obj)=>BinaryPrimitives.ReadUInt32LittleEndian(read(checked(obj+0x20),4));
++            uint Encode(uint index)=>index==0?0:unchecked(((index-1)^0x6f01622bu)+1);
++            var driver=bindings.Drivers.Single(d=>d.ClassName=="/Script/OnlineSubsystemUtils.IpNetDriver");
++            if(driver.Failure is not null||driver.DefaultSlot is null||!driver.KnownTable||driver.Methods.Any(m=>!m.EntryBytesMatch))return null;
++            ulong engineClass=Class("/Script/FortniteGame.FortEngine"),worldClass=Class("/Script/Engine.World"),driverClass=Class(driver.ClassName);
++            // Independently require decoded class short names; arbitrary class pointers are not forwarded.
++            if(names.GetValueOrDefault(NamePool38.DecodeIndex(Name(engineClass)))!="FortEngine"||
++                names.GetValueOrDefault(NamePool38.DecodeIndex(Name(worldClass)))!="World"||
++                names.GetValueOrDefault(NamePool38.DecodeIndex(Name(driverClass)))!="IpNetDriver")return null;
++            return new(Object(contexts.EngineSlot),engineClass,Object(context.WorldSlot),worldClass,driverClass,Object(driver.DefaultSlot),
++                Name(engineClass),Name(worldClass),Name(driverClass),Encode(definition[0].Name.Index),Encode(definition[0].ClassPath.Index));
++        }
++        catch(Exception e) when(e is InvalidDataException or InvalidOperationException or OverflowException){return null;}
++    }
++}

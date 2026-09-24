@@ -1,0 +1,95 @@
+diff --git a/launcher/Emilyfn.Core/CaptureNameExporter38.cs b/launcher/Emilyfn.Core/CaptureNameExporter38.cs
+--- a/launcher/Emilyfn.Core/CaptureNameExporter38.cs
++++ b/launcher/Emilyfn.Core/CaptureNameExporter38.cs
+@@ -82,6 +82,7 @@
+             if(!Read(checked(imageBase+anchor.Rva),anchor.Bytes.Length).AsSpan().SequenceEqual(anchor.Bytes))
+                 throw new InvalidDataException("The dump does not match the validated 38.00 name-decoding instructions.");
+         if(Read(checked(imageBase+0x16c1c5a8),1)[0]!=1) throw new InvalidDataException("Name pool is not initialized. Capture the running game later.");
++        NamePool38.VerifyAllocationProfile(Read,imageBase);
+         ulong pool=checked(imageBase+NamePool38.PoolRva);
+         byte[] ph=Read(pool+8,8);uint current=U32(ph), position=U32(ph,4);
+         if(current>=2048 || position>131072 || position%2!=0) throw new InvalidDataException("Invalid or oversized name pool.");
+diff --git a/launcher/Emilyfn.Core/LiveBindingProbe38.cs b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+--- a/launcher/Emilyfn.Core/LiveBindingProbe38.cs
++++ b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+@@ -23,6 +23,7 @@
+             if(!read(checked(imageBase+anchor.Rva),anchor.Bytes.Length).AsSpan().SequenceEqual(anchor.Bytes))
+                 throw new InvalidDataException("Live image instruction profile mismatch.");
+         if(read(imageBase+0x16c1c5a8,1)[0]!=1)throw new InvalidDataException("Name pool is not initialized.");
++        NamePool38.VerifyAllocationProfile(read,imageBase);
+         ulong pool=imageBase+NamePool38.PoolRva;uint block=D(pool+8),cursor=D(pool+12);
+         if(block>=2048 || cursor>131072 || cursor%2!=0)throw new InvalidDataException("Invalid name-pool bounds.");
+         var blocks=new List<byte[]>();
+diff --git a/launcher/Emilyfn.Core/NamePool38.cs b/launcher/Emilyfn.Core/NamePool38.cs
+--- a/launcher/Emilyfn.Core/NamePool38.cs
++++ b/launcher/Emilyfn.Core/NamePool38.cs
+@@ -6,6 +6,14 @@
+ public static class NamePool38
+ {
+     public const ulong PoolRva = 0x16c1c5c0;
++    internal static void VerifyAllocationProfile(Func<ulong,int,byte[]> read,ulong image)
++    {
++        // AllocateNewBlock checks for ten bytes, writes an encoded zero-length
++        // header and clears the next eight bytes before advancing the block.
++        var bytes=Convert.FromHexString("8b410c8d480a81f90000020077228b4e08488b4cce100fb6140181cac09b00006689140148c744010200000000");
++        if(!read(checked(image+0xd1a76),bytes.Length).AsSpan().SequenceEqual(bytes))
++            throw new InvalidDataException("Name-block allocation profile does not match CL47722112.");
++    }
+     public sealed record Entry(uint Index, string Name, bool Numbered);
+     public static uint DecodeIndex(uint stored)
+     {
+@@ -58,6 +66,14 @@
+                 if (length == 0)
+                 {
+                     if (offset + 10 > data.Length) throw new InvalidDataException($"Numbered name crosses block boundary: block={block}, offset=0x{offset:X}, available={data.Length-offset}, required=10, blockBytes={data.Length}, currentBlock={block==blocks.Count-1}.");
++                    if (BinaryPrimitives.ReadUInt64LittleEndian(data.AsSpan(offset + 2)) == 0)
++                    {
++                        if (block == blocks.Count - 1)
++                            throw new InvalidDataException($"Unexpected end marker in current name block: block={block}, offset=0x{offset:X}.");
++                        // This is the allocator's end marker, not a numbered None.
++                        // The remaining bytes in a closed block are uninitialized.
++                        break;
++                    }
+                     numbered.Add(index, (BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(offset + 2)),
+                         DecodeIndex(BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(offset + 6)))));
+                     offset += 10;
+diff --git a/launcher/Emilyfn.SdkTests/NamePoolChecks.cs b/launcher/Emilyfn.SdkTests/NamePoolChecks.cs
+--- a/launcher/Emilyfn.SdkTests/NamePoolChecks.cs
++++ b/launcher/Emilyfn.SdkTests/NamePoolChecks.cs
+@@ -27,11 +27,28 @@
+         Reject(()=>NamePool38.DecodeBlocks(new[]{invalid}));
+         invalid=(byte[])block.Clone();Array.Fill<byte>(invalid,0xff,28,4);
+         Reject(()=>NamePool38.DecodeBlocks(new[]{invalid}));
++        // Closed blocks may contain arbitrary bytes after the allocator marker.
++        var closed=new byte[131072];Array.Fill(closed,(byte)0xa6);
++        Convert.FromHexString("de9a5c39743b").CopyTo(closed,0);
++        BinaryPrimitives.WriteUInt16LittleEndian(closed.AsSpan(6),0x9be7);
++        Array.Clear(closed,8,8);
++        BinaryPrimitives.WriteUInt16LittleEndian(closed.AsSpan(0x1ffd8),0xd0cc);
++        var next=Convert.FromHexString("409a9bba3605879c");
++        var terminated=NamePool38.DecodeBlocks(new[]{closed,next});
++        Check(terminated.Count==2&&terminated[1].Index==65536&&terminated[1].Name=="Object", "Closed block marker did not stop before poisoned tail");
++        Check(terminated.All(n=>!n.Numbered),"End marker became a numbered None");
++        Reject(()=>NamePool38.DecodeBlocks(new[]{closed[..16]}));
++        var broken=(byte[])closed.Clone();broken[8]=1;
++        Reject(()=>NamePool38.DecodeBlocks(new[]{broken,next}));
++        Array.Clear(broken,16,broken.Length-16);
++        Check(NamePool38.DecodeBlocks(new[]{broken,next}).Count(n=>n.Numbered)==1,"A nonzero numbered entry became an end marker");
++        Reject(()=>NamePool38.DecodeBlocks(new[]{Convert.FromHexString("de9a5c39743b409a")}));
+         const ulong image=0x4b0000,nameAddress=0x23000000000;
+         byte[] poolBytes=new byte[32];BinaryPrimitives.WriteUInt32LittleEndian(poolBytes.AsSpan(12),32);
+         BinaryPrimitives.WriteUInt64LittleEndian(poolBytes.AsSpan(16),nameAddress);
+         var memory=new List<(ulong Address,byte[] Bytes)> {
+             (image+0x16c1c5a8,new byte[]{1}), (image+0x16c1c5c0,poolBytes), (nameAddress,block),
++            (image+0xd1a76,Convert.FromHexString("8b410c8d480a81f90000020077228b4e08488b4cce100fb6140181cac09b00006689140148c744010200000000")),
+             (image+0x28dae,Convert.FromHexString("8b0185c07413ffc8352b62016fffc0bfd59dfe900f45f8eb0231ff")),
+             (image+0x3a00362,Convert.FromHexString("4889d00fb711f6c201750fc1ea0681fa6f020000751631d2eb56c1ea0681fa6f020000756b31c9e9a70000000fb7d281f26f02000083fa014189d04183d0004531c969d261deffff81c244e893fe448d524a46325409024688140849ffc14d39c875df0fb711c1ea064881f26f020000c60410000fb709c1e9064881f16f0200000fbe1408668914484883c1ff72f2c381f26f020000448d04124183f8014183d0004531c969d261deffff81c244e893fe448d524a46325409024688140849ffc14d39c875df0fb709c1e9064881f16f02000066c704480000c3"))
+         };
+@@ -64,6 +81,6 @@
+         byte[] wrong=bytes.ToArray();wrong[^1]^=1;File.WriteAllBytes(file,wrong);
+         refused=false;try{await CaptureNameExporter38.ExportAsync(file,root);}catch(InvalidDataException){refused=true;}
+         Check(refused,"Wrong instruction anchors accepted");
+-        Console.WriteLine("38.00 names: captured vectors, numbered alignment, invalid references, dump parsing, truncation and readiness checks passed.");
++        Console.WriteLine("38.00 names: captured vectors, numbered alignment, closed-block end markers, poisoned tails, invalid references, dump parsing, truncation and readiness checks passed.");
+     }
+ }

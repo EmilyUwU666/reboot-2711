@@ -1,0 +1,276 @@
+diff --git a/launcher/Emilyfn.Core/LiveBindingProbe38.cs b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+@@ -0,0 +1,142 @@
++using Microsoft.Win32.SafeHandles;
++using System.Buffers.Binary;
++using System.ComponentModel;
++using System.Diagnostics;
++using System.Runtime.InteropServices;
++using System.Security.Cryptography;
++using System.Text.Json;
++namespace Emilyfn.Core;
++
++public static class LiveBindingProbe38
++{
++    public sealed record Check(string Name,bool Passed,string Detail);
++    public sealed record Evidence(List<Check> Checks,int Names,int Owners,int Properties,int InvalidObjectSlots,int RejectedChains);
++    public sealed record Result(string File,bool Passed,string Message);
++    public static Task<Evidence> InspectCaptureAsync(string dump) => Task.Run(() => CaptureNameExporter38.WithCapture(dump, view => Inspect(view.Read, view.ImageBase)));
++    public static Evidence Inspect(Func<ulong,int,byte[]> read,ulong imageBase)
++    {
++        uint D(ulong a)=>BinaryPrimitives.ReadUInt32LittleEndian(read(a,4));
++        ulong Q(ulong a)=>BinaryPrimitives.ReadUInt64LittleEndian(read(a,8));
++        ushort W(ulong a)=>BinaryPrimitives.ReadUInt16LittleEndian(read(a,2));
++        foreach(var anchor in Anchors)
++            if(!read(checked(imageBase+anchor.Rva),anchor.Bytes.Length).AsSpan().SequenceEqual(anchor.Bytes))
++                throw new InvalidDataException("Live image instruction profile mismatch.");
++        if(read(imageBase+0x16c1c5a8,1)[0]!=1)throw new InvalidDataException("Name pool is not initialized.");
++        ulong pool=imageBase+NamePool38.PoolRva;uint block=D(pool+8),cursor=D(pool+12);
++        if(block>=2048 || cursor>131072 || cursor%2!=0)throw new InvalidDataException("Invalid name-pool bounds.");
++        var blocks=new List<byte[]>();
++        for(uint i=0;i<=block;i++)blocks.Add(read(Q(pool+16+i*8),(int)(i==block?cursor:131072)));
++        var names=NamePool38.DecodeBlocks(blocks).ToDictionary(n=>n.Index,n=>n.Name);
++        var observed=CaptureReflectionExporter38.Inspect(read,imageBase,names);
++        string Name(ulong obj)=>names.TryGetValue(NamePool38.DecodeIndex(D(obj+32)),out var name)?name:throw new InvalidDataException("Object name unavailable.");
++        ulong table=Q(imageBase+0x16cfacd8);uint count=D(imageBase+0x16cface0);
++        if(count is 0 or >1000000)throw new InvalidDataException("Invalid object table count.");
++        ulong defaultObject=0;var sampleFunctions=new Dictionary<string,ulong>();
++        for(uint i=0;i<count;i++)
++        {
++            try
++            {
++                ulong obj=Q(checked(table+i*32UL+8));string name=Name(obj),kind=Name(Q(obj+24));
++                if(name=="Default__Object" && kind=="Object")defaultObject=obj;
++                if(kind=="Function" && new[]{"Activate","ExecuteUbergraph","GetOwner","ComponentHasTag"}.Contains(name))
++                    sampleFunctions.TryAdd(name,obj);
++            }
++            catch(InvalidDataException){}
++        }
++        var checks=new List<Check>{new("Instruction profile",true,"Exact CL47722112 decoding and dispatch anchors matched."),
++            new("Core class lookup",true,"Core identities and Class self-reference passed."),
++            new("Property chains",observed.Rejections.Count==0,$"{observed.Properties.Count} properties; {observed.Rejections.Count} rejected chains.")};
++        bool dispatch=defaultObject!=0 && Q(checked(Q(defaultObject)+28*8))==imageBase+0x3729a;
++        checks.Add(new("Dispatch slot",dispatch,"Default__Object vtable slot 28 must resolve to image RVA 0x3729A; no function is invoked."));
++        var badExtents=0;
++        foreach(var owner in observed.Owners)
++        {
++            uint size=D(owner.Address+0x68)^0x1937f47b;
++            foreach(var field in observed.Properties.Where(p=>p.Owner==owner.Name))
++                if((ulong)field.Offset+(ulong)field.ElementSize*field.ArrayDim>size)badExtents++;
++        }
++        checks.Add(new("Owner storage bounds",badExtents==0,$"{badExtents} properties extend beyond the decoded owner storage size."));
++        foreach(string key in new[]{"Activate","ExecuteUbergraph","GetOwner","ComponentHasTag"})
++        {
++            bool found=sampleFunctions.TryGetValue(key,out ulong a);bool valid=false;string detail="Function not initialized in this process.";
++            if(found)
++            {
++                uint storage=D(a+0x68)^0x1937f47b;int parameters=W(a+0xbc)^0x8250;ulong native=Q(a+0xe0);
++                valid=parameters<=storage && storage<=0x1000000 && native>=imageBase && native-imageBase<0x11000000;
++                detail=$"Storage={storage}, parameter bytes={parameters}, native entry inside game code={native>=imageBase && native-imageBase<0x11000000}.";
++            }
++            checks.Add(new("Function layout: "+key,valid,detail));
++        }
++        return new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count);
++    }
++    public static Task<Result> RunAsync(CaptureTarget target,string destination,IProgress<string>? progress=null)=>Task.Run(()=>Run(target,destination,progress));
++    private static Result Run(CaptureTarget target,string destination,IProgress<string>? progress)
++    {
++        if(!OperatingSystem.IsWindows()||!Environment.Is64BitProcess)throw new PlatformNotSupportedException("Live tests require Windows x64.");
++        string folder=Path.Combine(Path.GetFullPath(destination),"Emilyfn-live-test-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
++        string file=Path.Combine(folder,"live-test.json");Evidence? evidence=null;string? failure=null;string? hash=null;bool stable=false;
++        var clock=Stopwatch.StartNew();
++        try
++        {
++            using var process=Process.GetProcessById(target.Id);
++            using var handle=OpenProcess(0x0400|0x0010,false,target.Id);
++            if(handle.IsInvalid)throw new Win32Exception(Marshal.GetLastWin32Error(),"Windows could not open this game for read-only testing.");
++            if(process.HasExited||process.StartTime.ToUniversalTime()!=target.StartedUtc||
++                !string.Equals(process.ProcessName,"FortniteClient-Win64-Shipping",StringComparison.OrdinalIgnoreCase)||
++                !string.Equals(process.MainModule?.FileName,target.Executable,StringComparison.OrdinalIgnoreCase)||
++                !GetProcessTimes(handle,out long created,out _,out _,out _)||DateTime.FromFileTimeUtc(created)!=target.StartedUtc)
++                throw new InvalidOperationException("Selected game changed or exited. Refresh the process list.");
++            progress?.Report("Checking the live 38.00 image…");
++            using var exe=new FileStream(target.Executable,FileMode.Open,FileAccess.Read,FileShare.Read);
++            hash=Convert.ToHexString(SHA256.HashData(exe)).ToLowerInvariant();
++            if(hash!=DiagnosticGameLaunch.ImageSha256)throw new InvalidOperationException("This test requires the exact 38.00 CL47722112 executable.");
++            var module=process.MainModule!;
++            if(module.ModuleMemorySize!=0x18777000)throw new InvalidDataException("Game module size mismatch.");
++            ulong imageBase=(ulong)module.BaseAddress.ToInt64();
++            byte[] Raw(ulong address,int length)
++            {
++                if(clock.Elapsed>TimeSpan.FromSeconds(90))throw new TimeoutException("Live test exceeded 90 seconds.");
++                if(address>long.MaxValue||length<0||length>131072)throw new InvalidDataException("Invalid live read bounds.");
++                var bytes=new byte[length];
++                if(!ReadProcessMemory(handle,(IntPtr)(long)address,bytes,(nuint)length,out nuint got)||got!=(nuint)length)
++                    throw new InvalidDataException("Required game memory is unreadable; the process may have changed.");
++                return bytes;
++            }
++            // Page cache bounds repeated reads; the process is never suspended or written.
++            var pages=new Dictionary<ulong,byte[]>();
++            byte[] Read(ulong address,int length)
++            {
++                if(length<0||length>131072)throw new InvalidDataException("Invalid read size.");
++                var data=new byte[length];int offset=0;
++                while(offset<length)
++                {
++                    ulong page=address&~4095UL;int within=(int)(address-page),take=Math.Min(length-offset,4096-within);
++                    if(!pages.TryGetValue(page,out var bytes))
++                    {
++                        if(pages.Count>=65536)throw new InvalidDataException("Live read cache exceeds 256 MB.");
++                        bytes=Raw(page,4096);pages.Add(page,bytes);
++                    }
++                    bytes.AsSpan(within,take).CopyTo(data.AsSpan(offset));offset+=take;address=checked(address+(ulong)take);
++                }
++                return data;
++            }
++            var beforePool=Raw(imageBase+NamePool38.PoolRva+8,8);var beforeTable=Raw(imageBase+0x16cfacd8,12);
++            progress?.Report("Testing live objects, properties and dispatch addresses…");
++            evidence=Inspect(Read,imageBase);
++            stable=!process.HasExited && beforePool.AsSpan().SequenceEqual(Raw(imageBase+NamePool38.PoolRva+8,8)) &&
++                beforeTable.AsSpan().SequenceEqual(Raw(imageBase+0x16cfacd8,12));
++            if(!stable)failure="Name pool or object table changed during the test. Retry after the game settles.";
++        }
++        catch(Exception error) when(error is Win32Exception or InvalidOperationException or IOException or OverflowException or TimeoutException or ArgumentException or UnauthorizedAccessException)
++        {failure=error.Message;}
++        bool passed=failure is null && stable && evidence is not null && evidence.Checks.All(c=>c.Passed);
++        File.WriteAllText(file,JsonSerializer.Serialize(new{FormatVersion=1,Test="38.00 read-only live binding probe",Utc=DateTime.UtcNow,ProcessId=target.Id,
++            ExecutableSha256=hash,Passed=passed,StableBoundaryCounters=stable,FunctionCallsAttempted=false,GameplayReady=false,
++            Note="Reads are not an atomic snapshot; unchanged counters do not guarantee every object stayed unchanged.",Failure=failure,Evidence=evidence},new JsonSerializerOptions{WriteIndented=true}));
++        return new(file,passed,passed?"Read-only binding checks passed. Game function calls were not tested.":"Checks failed or were inconclusive; see live-test.json.");
++    }
++    [DllImport("kernel32.dll",SetLastError=true)]private static extern SafeProcessHandle OpenProcess(uint access,bool inherit,int pid);
++    [DllImport("kernel32.dll",SetLastError=true)]private static extern bool GetProcessTimes(SafeProcessHandle process,out long created,out long exited,out long kernel,out long user);
++    [DllImport("kernel32.dll",SetLastError=true)]private static extern bool ReadProcessMemory(SafeProcessHandle process,IntPtr address,[Out]byte[] buffer,nuint size,out nuint read);
++    private static readonly (ulong Rva,byte[] Bytes)[] Anchors={(0x28daeUL,Convert.FromHexString("8b0185c07413ffc8352b62016fffc0bfd59dfe900f45f8eb0231ff")),(0x3729aUL,Convert.FromHexString("5541574156415541545657534881ecc8000000488dac2480000000488b0544119d164831e8488945408b41100fbae01e0f82a00300004c89c64989d64889cbf682b900000004")),(0x8d7afb3UL,Convert.FromHexString("498b86e0000000")),(0xe018e9UL,Convert.FromHexString("41bcab383875448b7e144531e7"))};
++}
+diff --git a/launcher/Emilyfn.App/MemoryCaptureWindow.cs b/launcher/Emilyfn.App/MemoryCaptureWindow.cs
+--- a/launcher/Emilyfn.App/MemoryCaptureWindow.cs
++++ b/launcher/Emilyfn.App/MemoryCaptureWindow.cs
+@@ -16,13 +16,14 @@
+     private readonly string logsDirectory;
+     private readonly Button launch = new() { Content = "Capture 38.00 startup", Margin = new Thickness(12, 0, 0, 0) };
+     private readonly ComboBox captureDelay = new() { ItemsSource = new[] { 15, 30, 60, 120 }, SelectedItem = 30, Width = 100, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 6, 0, 12) };
++    private readonly Button live = new() { Content = "Test 38.00 live bindings", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 12, 0, 0) };
+     private bool busy;
+ 
+     public MemoryCaptureWindow(Func<string, Task> exportLogs, string logsDirectory)
+     {
+         this.exportLogs = exportLogs;
+         this.logsDirectory = logsDirectory;
+-        Title = "Emilyfn — Capture game memory"; Width = 820; Height = 520;
++        Title = "Emilyfn — Capture game memory"; Width = 820; Height = 640;
+         WindowStartupLocation = WindowStartupLocation.CenterOwner;
+         var panel = new StackPanel { Margin = new Thickness(24) };
+         panel.Children.Add(new TextBlock { Text = "Select the running game to capture", FontSize = 20 });
+@@ -31,9 +32,12 @@
+         panel.Children.Add(new TextBlock { Text = "Startup: seconds to wait before the later snapshot" });
+         panel.Children.Add(captureDelay);
+         var buttons = new StackPanel { Orientation = Orientation.Horizontal };
+-        buttons.Children.Add(capture); buttons.Children.Add(refresh); buttons.Children.Add(launch); panel.Children.Add(buttons); panel.Children.Add(status);
++        buttons.Children.Add(capture); buttons.Children.Add(refresh); buttons.Children.Add(launch); panel.Children.Add(buttons); panel.Children.Add(live);
++        panel.Children.Add(new TextBlock { Text = "Live binding test reads the selected 38.00 process and saves a small live-test.json. It does not call game functions or create a memory dump.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
++        panel.Children.Add(status);
+         panel.Children.Add(new TextBlock { Text = "Startup capture saves memory at the initial Windows loader breakpoint, observes startup, then attempts a later capture if it stays open. Early memory may lack SDK objects. It does not enable gameplay or remove Epic/EAC startup requirements. Keep the complete game installation in place.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
+         Content = panel;
++        live.Click += async (_, _) => await LiveTest();
+         launch.Click += async (_, _) => await Launch();
+         refresh.Click += (_, _) => Refresh();
+         capture.Click += async (_, _) => await Capture();
+@@ -46,10 +50,10 @@
+         {
+             var found = GameMemoryCapture.FindTargets(); targets.ItemsSource = found;
+             targets.SelectedIndex = found.Count == 1 ? 0 : -1;
+-            capture.IsEnabled = found.Count > 0;
++            capture.IsEnabled = live.IsEnabled = found.Count > 0;
+             status.Text = found.Count == 0 ? "No accessible Fortnite game found. Start the game first, then refresh." : "Choose the client or host PID you want to capture.";
+         }
+-        catch (Exception error) { status.Text = error.Message; capture.IsEnabled = false; }
++        catch (Exception error) { status.Text = error.Message; capture.IsEnabled = live.IsEnabled = false; }
+     }
+     private async Task Launch()
+     {
+@@ -58,7 +62,7 @@
+         var output = new OpenFolderDialog { Title = "Choose space for startup memory captures" };
+         if (output.ShowDialog(this) != true) return;
+         var folder = System.IO.Path.Combine(output.FolderName, "Emilyfn-startup-" + Guid.NewGuid().ToString("N"));
+-        busy = true; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = false;
++        busy = true; live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = false;
+         status.Text = "Checking the 38.00 executable…";
+         try
+         {
+@@ -72,14 +76,29 @@
+ 
+         }
+         catch (Exception error) { status.Text = error.Message; }
+-        finally { busy = false; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = true; }
++        finally { busy = false; live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = true; }
++    }
++    private async Task LiveTest()
++    {
++        if (targets.SelectedItem is not CaptureTarget target) { status.Text = "Select a game process first."; return; }
++        var dialog = new OpenFolderDialog { Title = "Choose where to save live-test.json" };
++        if (dialog.ShowDialog(this) != true) return;
++        busy = true; live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = false;
++        try
++        {
++            var result = await LiveBindingProbe38.RunAsync(target, dialog.FolderName, new Progress<string>(s => status.Text = s));
++            status.Text = result.Message + " Saved to " + result.File;
++            try { Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { System.IO.Path.GetDirectoryName(result.File)! } }); } catch { }
++        }
++        catch (Exception error) { status.Text = error.Message; }
++        finally { busy = false; live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = true; }
+     }
+     private async Task Capture()
+     {
+         if (targets.SelectedItem is not CaptureTarget target) { status.Text = "Select a game process first."; return; }
+         var dialog = new OpenFolderDialog { Title = "Choose a folder with space for a full memory dump" };
+         if (dialog.ShowDialog(this) != true) return;
+-        busy = true; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = false;
++        busy = true; live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = false;
+         try
+         {
+             var folder = await GameMemoryCapture.CaptureAsync(target, dialog.FolderName, new Progress<string>(s => status.Text = s));
+@@ -91,6 +110,6 @@
+             catch { /* Saved files remain usable if Explorer is unavailable. */ }
+         }
+         catch (Exception error) { status.Text = error.Message; }
+-        finally { busy = false; capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = true; }
++        finally { busy = false; live.IsEnabled = capture.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = true; }
+     }
+ }
+diff --git a/launcher/Emilyfn.SdkTests/Program.cs b/launcher/Emilyfn.SdkTests/Program.cs
+--- a/launcher/Emilyfn.SdkTests/Program.cs
++++ b/launcher/Emilyfn.SdkTests/Program.cs
+@@ -34,3 +34,10 @@
+ }
+ 
+ ReflectionChecks.Run();
++
++if (args.Length > 1)
++{
++    var evidence = await LiveBindingProbe38.InspectCaptureAsync(args[1]);
++    Console.WriteLine(JsonSerializer.Serialize(evidence, new JsonSerializerOptions { WriteIndented = true }));
++    if (evidence.Checks.Any(c => !c.Passed)) throw new Exception("Capture binding checks failed");
++}
+diff --git a/launcher/Emilyfn.CaptureTests/Program.cs b/launcher/Emilyfn.CaptureTests/Program.cs
+--- a/launcher/Emilyfn.CaptureTests/Program.cs
++++ b/launcher/Emilyfn.CaptureTests/Program.cs
+@@ -28,6 +28,16 @@
+     try { await GameMemoryCapture.CaptureAsync(target! with { StartedUtc = DateTime.MinValue }, root); }
+     catch (InvalidOperationException) { rejected = true; }
+     Check(rejected, "Stale identity rejected");
++    foreach (var probeTarget in new[] { target!, target! with { StartedUtc = DateTime.MinValue } })
++    {
++        var probe = await LiveBindingProbe38.RunAsync(probeTarget, root);
++        using var report = JsonDocument.Parse(File.ReadAllText(probe.File));
++        Check(!probe.Passed && !report.RootElement.GetProperty("Passed").GetBoolean(), "Unverified or stale live target rejected");
++        Check(!report.RootElement.GetProperty("FunctionCallsAttempted").GetBoolean(), "Probe never calls game functions");
++        Check(!report.RootElement.GetProperty("GameplayReady").GetBoolean(), "Probe does not claim gameplay");
++        Check(!string.IsNullOrWhiteSpace(report.RootElement.GetProperty("Failure").GetString()), "Failure reason saved");
++        Check(!child.HasExited, "Probe leaves target running");
++    }
+     var folder = await GameMemoryCapture.CaptureAsync(target!, root);
+     using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(folder, "capture.json")));
+     Check(manifest.RootElement.GetProperty("Id").GetInt32() == child.Id, "Manifest identifies selected process");

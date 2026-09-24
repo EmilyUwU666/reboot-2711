@@ -1,0 +1,234 @@
+diff --git a/launcher/Emilyfn.Core/BoundedReadCache.cs b/launcher/Emilyfn.Core/BoundedReadCache.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.Core/BoundedReadCache.cs
+@@ -0,0 +1,67 @@
++namespace Emilyfn.Core;
++
++/// <summary>Bounded LRU cache for read-only live inspection. Not an atomic snapshot.</summary>
++public sealed class BoundedReadCache
++{
++    public const int PageSize = 4096;
++    public record Statistics(int CapacityPages, int ResidentPages, int PeakPages,
++        long Hits, long Misses, long Evictions, int Clears);
++    private readonly Func<ulong, int, byte[]> read;
++    private readonly int capacity;
++    private readonly Dictionary<ulong, LinkedListNode<(ulong Address, byte[] Bytes)>> pages = new();
++    private readonly LinkedList<(ulong Address, byte[] Bytes)> lru = new();
++    private long hits, misses, evictions;
++    private int peak, clears;
++
++    public BoundedReadCache(Func<ulong, int, byte[]> read, int capacityPages = 65536)
++    {
++        ArgumentNullException.ThrowIfNull(read);
++        if (capacityPages < 1 || capacityPages > 65536) throw new ArgumentOutOfRangeException(nameof(capacityPages));
++        this.read = read;
++        capacity = capacityPages;
++    }
++
++    public Statistics Snapshot() => new(capacity, pages.Count, peak, hits, misses, evictions, clears);
++
++    public void Clear()
++    {
++        pages.Clear(); lru.Clear(); clears++;
++    }
++
++    public byte[] Read(ulong address, int length)
++    {
++        if (length < 0 || length > 131072 || address > long.MaxValue ||
++            (ulong)length > (ulong)long.MaxValue - address)
++            throw new InvalidDataException("Invalid cached read bounds.");
++        var result = new byte[length];
++        int offset = 0;
++        while (offset < length)
++        {
++            ulong page = address & ~4095UL;
++            int within = (int)(address - page), take = Math.Min(length - offset, PageSize - within);
++            if (pages.TryGetValue(page, out var node))
++            {
++                hits++;
++                lru.Remove(node); lru.AddLast(node);
++            }
++            else
++            {
++                misses++;
++                // Evict before reading so even a failed read cannot exceed the payload budget.
++                if (pages.Count == capacity)
++                {
++                    var oldest = lru.First!;
++                    pages.Remove(oldest.Value.Address); lru.RemoveFirst(); evictions++;
++                }
++                var bytes = read(page, PageSize);
++                if (bytes is null || bytes.Length != PageSize)
++                    throw new InvalidDataException("Required memory page was not read completely.");
++                node = lru.AddLast((page, bytes)); pages.Add(page, node);
++                peak = Math.Max(peak, pages.Count);
++            }
++            node.Value.Bytes.AsSpan(within, take).CopyTo(result.AsSpan(offset));
++            address += (ulong)take; offset += take;
++        }
++        return result;
++    }
++}
+diff --git a/launcher/Emilyfn.Core/GameThreadProbe38.cs b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+--- a/launcher/Emilyfn.Core/GameThreadProbe38.cs
++++ b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+@@ -26,6 +26,7 @@
+         EarlyStartupPatcher38.State? startupPatcher=null;
+         CaptureReflectionExporter38.IdentityDiagnostics? objectIdentity=null;
+         var readAttempts=new List<LiveReadRetry38.Attempt>();
++        BoundedReadCache? cache=null;
+         try
+         {
+             if(InFlight.ContainsKey((target.Id,target.StartedUtc)))throw new InvalidOperationException("A previous callback may still be running in this game. Close that game instance before testing again.");
+@@ -51,26 +52,11 @@
+                     throw new InvalidDataException("Required memory is unreadable; the game may have changed.");
+                 return b;
+             }
+-            var pages=new Dictionary<ulong,byte[]>();
+-            byte[] Read(ulong a,int n)
+-            {
+-                if(n<0||n>131072)throw new InvalidDataException("Invalid read size.");
+-                var b=new byte[n];int offset=0;
+-                while(offset<n)
+-                {
+-                    ulong page=a&~4095UL;int within=(int)(a-page),take=Math.Min(n-offset,4096-within);
+-                    if(!pages.TryGetValue(page,out var data))
+-                    {
+-                        if(pages.Count>=65536)throw new InvalidDataException("Read cache exceeds 256 MB.");
+-                        data=Raw(page,4096);pages.Add(page,data);
+-                    }
+-                    data.AsSpan(within,take).CopyTo(b.AsSpan(offset));a=checked(a+(ulong)take);offset+=take;
+-                }
+-                return b;
+-            }
++            cache=new BoundedReadCache(Raw);
++            byte[] Read(ulong address,int length)=>cache.Read(address,length);
+             startupPatcher=EarlyStartupPatcher38.Inspect(Raw,imageBase);
+             byte[] Boundary()=>Raw(imageBase+NamePool38.PoolRva+8,8).Concat(RuntimeObjectRegistry38.ReadBoundary(Raw,imageBase)).ToArray();
+-            var inspected=LiveReadRetry38.Run(Boundary,()=>LiveBindingProbe38.InspectForDispatch(Read,imageBase,d=>objectIdentity=d),()=>{pages.Clear();objectIdentity=null;},readAttempts);
++            var inspected=LiveReadRetry38.Run(Boundary,()=>LiveBindingProbe38.InspectForDispatch(Read,imageBase,d=>objectIdentity=d),()=>{cache.Clear();objectIdentity=null;},readAttempts);
+             evidence=inspected.Evidence;stable=true;
+             if(!stable||evidence.Checks.Any(c=>!c.Passed))throw new InvalidDataException("Live bindings failed or changed during verification. Wait for the game to settle and retry.");
+             var threads=FindGameThreads(process);
+@@ -104,7 +90,7 @@
+         File.WriteAllText(file,JsonSerializer.Serialize(new{FormatVersion=2,Test="38.00 game-thread and guarded GetOwner dispatch",Utc=DateTime.UtcNow,ProcessId=target.Id,GameThreadId=threadId,
+             ExecutableSha256=imageHash,StableBoundaryCounters=stable,GameAliveAfterProbe=callback is null?(bool?)null:alive,GameThreadCallbackObserved=observed,EngineTaskTagVerified=false,
+             FunctionCallsAttempted=callback is null?(bool?)false:callback.FunctionCallsAttempted,ControlledGetOwnerPassed=callPassed,GameplayReady=false,
+-            Failure=failure,Message=message,StartupPatcher=startupPatcher,BindingReadAttempts=readAttempts,ObjectIdentity=objectIdentity,Evidence=evidence,Callback=callback,
++            Failure=failure,Message=message,StartupPatcher=startupPatcher,BindingReadAttempts=readAttempts,ReadCache=cache?.Snapshot(),ObjectIdentity=objectIdentity,Evidence=evidence,Callback=callback,
+             Note="Thread identity uses a unique Windows GameThread description and matching process/thread IDs. GameFrameRvas records the callback-delivery stack, not a GetOwner execution trace. It may omit callers across native callback boundaries. This does not validate Unreal task tags or general gameplay dispatch. No arbitrary function is exposed."},new JsonSerializerOptions{WriteIndented=true}));
+         return new(file,message);
+     }
+diff --git a/launcher/Emilyfn.Core/LiveBindingProbe38.cs b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+--- a/launcher/Emilyfn.Core/LiveBindingProbe38.cs
++++ b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+@@ -70,6 +70,7 @@
+         EarlyStartupPatcher38.State? startupPatcher=null;
+         CaptureReflectionExporter38.IdentityDiagnostics? objectIdentity=null;
+         var readAttempts=new List<LiveReadRetry38.Attempt>();
++        BoundedReadCache? cache=null;
+         try
+         {
+             using var process=Process.GetProcessById(target.Id);
+@@ -97,27 +98,12 @@
+                 return bytes;
+             }
+             // Page cache bounds repeated reads; the process is never suspended or written.
+-            var pages=new Dictionary<ulong,byte[]>();
+-            byte[] Read(ulong address,int length)
+-            {
+-                if(length<0||length>131072)throw new InvalidDataException("Invalid read size.");
+-                var data=new byte[length];int offset=0;
+-                while(offset<length)
+-                {
+-                    ulong page=address&~4095UL;int within=(int)(address-page),take=Math.Min(length-offset,4096-within);
+-                    if(!pages.TryGetValue(page,out var bytes))
+-                    {
+-                        if(pages.Count>=65536)throw new InvalidDataException("Live read cache exceeds 256 MB.");
+-                        bytes=Raw(page,4096);pages.Add(page,bytes);
+-                    }
+-                    bytes.AsSpan(within,take).CopyTo(data.AsSpan(offset));offset+=take;address=checked(address+(ulong)take);
+-                }
+-                return data;
+-            }
++            cache=new BoundedReadCache(Raw);
++            byte[] Read(ulong address,int length)=>cache.Read(address,length);
+             progress?.Report("Testing live objects, properties and dispatch addresses…");
+             startupPatcher=EarlyStartupPatcher38.Inspect(Raw,imageBase);
+             byte[] Boundary()=>Raw(imageBase+NamePool38.PoolRva+8,8).Concat(RuntimeObjectRegistry38.ReadBoundary(Raw,imageBase)).ToArray();
+-            evidence=LiveReadRetry38.Run(Boundary,()=>Inspect(Read,imageBase,d=>objectIdentity=d),()=>{pages.Clear();objectIdentity=null;},readAttempts);
++            evidence=LiveReadRetry38.Run(Boundary,()=>Inspect(Read,imageBase,d=>objectIdentity=d),()=>{cache.Clear();objectIdentity=null;},readAttempts);
+             stable=!process.HasExited;
+             if(!stable)failure="Name pool or runtime object registry changed during the test. Retry after the game settles.";
+         }
+@@ -126,7 +112,7 @@
+         bool passed=failure is null && stable && evidence is not null && evidence.Checks.All(c=>c.Passed);
+         File.WriteAllText(file,JsonSerializer.Serialize(new{FormatVersion=1,Test="38.00 read-only live binding probe",Utc=DateTime.UtcNow,ProcessId=target.Id,
+             ExecutableSha256=hash,Passed=passed,StableBoundaryCounters=stable,FunctionCallsAttempted=false,GameplayReady=false,
+-            Note="Reads are not an atomic snapshot; unchanged counters do not guarantee every object stayed unchanged.",Failure=failure,StartupPatcher=startupPatcher,BindingReadAttempts=readAttempts,ObjectIdentity=objectIdentity,Evidence=evidence},new JsonSerializerOptions{WriteIndented=true}));
++            Note="Reads are not an atomic snapshot; unchanged counters do not guarantee every object stayed unchanged.",Failure=failure,StartupPatcher=startupPatcher,BindingReadAttempts=readAttempts,ReadCache=cache?.Snapshot(),ObjectIdentity=objectIdentity,Evidence=evidence},new JsonSerializerOptions{WriteIndented=true}));
+         return new(file,passed,passed?"Read-only binding checks passed. Game function calls were not tested.":"Checks failed or were inconclusive; see live-test.json.");
+     }
+     [DllImport("kernel32.dll",SetLastError=true)]private static extern SafeProcessHandle OpenProcess(uint access,bool inherit,int pid);
+diff --git a/launcher/Emilyfn.SdkTests/BoundedReadCacheChecks.cs b/launcher/Emilyfn.SdkTests/BoundedReadCacheChecks.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.SdkTests/BoundedReadCacheChecks.cs
+@@ -0,0 +1,47 @@
++using Emilyfn.Core;
++
++static class BoundedReadCacheChecks
++{
++    public static void Run()
++    {
++        void Check(bool ok, string message) { if (!ok) throw new Exception(message); }
++        int calls = 0; byte generation = 1;
++        var cache = new BoundedReadCache((address, length) =>
++        {
++            calls++;
++            Check(address % 4096 == 0 && length == 4096, "Unaligned raw read");
++            return Enumerable.Repeat(generation, length).ToArray();
++        }, 2);
++        Check(cache.Read(4095, 2).SequenceEqual(new byte[] {1, 1}) && calls == 2, "Cross-page read");
++        cache.Read(0, 1); // Page zero is most recently used.
++        generation = 2;
++        cache.Read(8192, 1); // Evicts page one.
++        Check(cache.Read(0, 1)[0] == 1 && calls == 3, "LRU hit should retain page zero");
++        Check(cache.Read(4096, 1)[0] == 2 && calls == 4, "Evicted page must be read again");
++        for (ulong i = 3; i < 1000; i++) cache.Read(i * 4096, 1);
++        var stats = cache.Snapshot();
++        Check(stats.ResidentPages == 2 && stats.PeakPages == 2 && stats.Evictions > 990, "Cache must stay bounded and keep scanning");
++        cache.Clear(); generation = 3;
++        Check(cache.Snapshot().ResidentPages == 0 && cache.Read(4096, 1)[0] == 3, "Retry must discard cached pages");
++        int attempts = 0;
++        var shortRead = new BoundedReadCache((_, n) => ++attempts == 1 ? new byte[n - 1] : new byte[n], 1);
++        bool rejected = false;
++        try { shortRead.Read(0, 1); } catch (InvalidDataException) { rejected = true; }
++        Check(rejected && shortRead.Snapshot().ResidentPages == 0, "Partial page cached");
++        shortRead.Read(0, 1); Check(attempts == 2, "Partial page not retried");
++        attempts = 0;
++        var failed = new BoundedReadCache((_, n) => ++attempts == 1 ? throw new TimeoutException() : new byte[n], 1);
++        rejected = false;
++        try { failed.Read(0, 1); } catch (TimeoutException) { rejected = true; }
++        Check(rejected && failed.Snapshot().ResidentPages == 0, "Infrastructure failure swallowed or cached");
++        failed.Read(0, 1); Check(attempts == 2, "Failed page not retried");
++        foreach (var (address, size) in new (ulong, int)[] {(0, -1), (0, 131073), (ulong.MaxValue, 1), ((ulong)long.MaxValue, 2)})
++        {
++            rejected = false;
++            try { cache.Read(address, size); } catch (InvalidDataException) { rejected = true; }
++            Check(rejected, "Invalid bounds accepted");
++        }
++        Check(cache.Read(0, 0).Length == 0, "Empty read");
++        Console.WriteLine("Bounded read cache checks passed: LRU eviction, continued scans, retry clearing, cross-page reads, failures and bounds.");
++    }
++}
+diff --git a/launcher/Emilyfn.SdkTests/Program.cs b/launcher/Emilyfn.SdkTests/Program.cs
+--- a/launcher/Emilyfn.SdkTests/Program.cs
++++ b/launcher/Emilyfn.SdkTests/Program.cs
+@@ -49,3 +49,5 @@
+     if (!evidence.StartupPatcher.ProfileMatched || evidence.StartupPatcher.Failure is not null)
+         throw new Exception("Capture startup-patcher profile failed");
+ }
++
++BoundedReadCacheChecks.Run();

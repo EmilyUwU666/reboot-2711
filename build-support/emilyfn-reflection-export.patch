@@ -1,0 +1,309 @@
+--- a/launcher/Emilyfn.Core/CaptureNameExporter38.cs
++++ b/launcher/Emilyfn.Core/CaptureNameExporter38.cs
+@@ -8,7 +8,8 @@
+     public sealed record Result(string Folder, int PlainNames, int NumberedNames);
+     private sealed record Range(ulong Start, ulong Size, long FileOffset);
+     public static Task<Result> ExportAsync(string dump, string destination) => Task.Run(() => Export(dump, destination));
+-    private static Result Export(string dump, string destination)
++    internal sealed record CaptureView(Func<ulong,int,byte[]> Read, ulong ImageBase, List<NamePool38.Entry> Names, long SourceBytes, uint ModuleCount, int MemoryRanges, int NameBlocks);
++    internal static T WithCapture<T>(string dump, Func<CaptureView, T> export)
+     {
+         using var input = new FileStream(dump, FileMode.Open, FileAccess.Read, FileShare.Read);
+         byte[] At(long offset, int size)
+@@ -92,6 +93,11 @@
+             blocks.Add(Read(address,(int)(i==current?position:131072)));
+         }
+         var names=NamePool38.DecodeBlocks(blocks);
++        return export(new(Read, imageBase, names, input.Length, moduleCount, map.Count, blocks.Count));
++    }
++    private static Result Export(string dump, string destination) => WithCapture<Result>(dump, view =>
++    {
++        var names = view.Names;
+         string folder=Path.Combine(Path.GetFullPath(destination),"Emilyfn-38-name-metadata-"+Guid.NewGuid().ToString("N"));
+         Directory.CreateDirectory(folder);
+         try
+@@ -108,8 +114,8 @@
+             }
+             int numbered=names.Count(n=>n.Numbered);
+             File.WriteAllText(Path.Combine(folder,"report.json"),JsonSerializer.Serialize(new {
+-                Profile="38.00 CL47722112 name-decoding anchors",SourceDumpBytes=input.Length,ModuleCount=moduleCount,
+-                MemoryRanges=map.Count,NameBlocks=blocks.Count,PlainNames=names.Count-numbered,NumberedNames=numbered,
++                Profile="38.00 CL47722112 name-decoding anchors",SourceDumpBytes=view.SourceBytes,ModuleCount=view.ModuleCount,
++                MemoryRanges=view.MemoryRanges,NameBlocks=view.NameBlocks,PlainNames=names.Count-numbered,NumberedNames=numbered,
+                 UObjectRegistryVerified=false,FunctionDispatchVerified=false,SdkReady=false,
+                 Limitation="Name metadata only. Class/property layouts and function dispatch are not verified."
+             },new JsonSerializerOptions{WriteIndented=true}));
+@@ -117,6 +123,6 @@
+             return new(folder,names.Count-numbered,numbered);
+         }
+         catch { Directory.Delete(folder,true); throw; }
+-    }
++    });
+     private static readonly (ulong Rva, byte[] Bytes)[] Anchors = { (0x28daeUL, Convert.FromHexString("8b0185c07413ffc8352b62016fffc0bfd59dfe900f45f8eb0231ff")), (0x3a00362UL, Convert.FromHexString("4889d00fb711f6c201750fc1ea0681fa6f020000751631d2eb56c1ea0681fa6f020000756b31c9e9a70000000fb7d281f26f02000083fa014189d04183d0004531c969d261deffff81c244e893fe448d524a46325409024688140849ffc14d39c875df0fb711c1ea064881f26f020000c60410000fb709c1e9064881f16f0200000fbe1408668914484883c1ff72f2c381f26f020000448d04124183f8014183d0004531c969d261deffff81c244e893fe448d524a46325409024688140849ffc14d39c875df0fb709c1e9064881f16f02000066c704480000c3")) };
+ }
+--- /dev/null
++++ b/launcher/Emilyfn.Core/CaptureReflectionExporter38.cs
+@@ -0,0 +1,116 @@
++using System.Buffers.Binary;
++using System.Text;
++using System.Text.Json;
++namespace Emilyfn.Core;
++
++// Observed capture metadata only. Does not execute code, inject or enable gameplay.
++public static class CaptureReflectionExporter38
++{
++    public sealed record Result(string Folder,int Owners,int Properties,int RejectedChains);
++    public sealed record Owner(ulong Address,string Name,string Kind);
++    public sealed record Property(string Owner,string Name,string Type,uint Offset,uint ElementSize,uint ArrayDim);
++    public sealed record Rejection(string Owner,string Reason);
++    public sealed record Observation(List<Owner> Owners,List<Property> Properties,List<Rejection> Rejections,int ReadableObjects,int InvalidSlots);
++    private static readonly HashSet<string> Kinds = new(){"Class","ScriptStruct","Function","DelegateFunction","SparseDelegateFunction"};
++    public static ulong DecodeLink(ulong stored) => (stored & 1)!=0 ? (stored & ~1UL)^0x47dcc0173f15ec38UL : stored;
++    // Public for offline fixture validation; callers must validate the exact image profile first.
++    public static Observation Inspect(Func<ulong,int,byte[]> read,ulong imageBase,IReadOnlyDictionary<uint,string> names)
++    {
++        uint D(ulong a)=>BinaryPrimitives.ReadUInt32LittleEndian(read(a,4));
++        ulong Q(ulong a)=>BinaryPrimitives.ReadUInt64LittleEndian(read(a,8));
++        string Name(uint stored)=>names.TryGetValue(NamePool38.DecodeIndex(stored),out var n)?n:throw new InvalidDataException("Name index unavailable.");
++        bool Image(ulong a)=>a>=imageBase && a-imageBase<0x18777000;
++        var objects=new List<Owner>();var pointers=new HashSet<ulong>();int invalid=0;
++        ulong table=Q(checked(imageBase+0x16cfacd8));uint count=D(checked(imageBase+0x16cface0));
++        if(table==0 || count is 0 or >1000000) throw new InvalidDataException("Object table is unavailable or outside supported bounds.");
++        for(uint slot=0;slot<count;slot++)
++        {
++            try
++            {
++                ulong a=Q(checked(table+slot*32UL+8)),vt=Q(a);
++                if(!Image(vt))throw new InvalidDataException("Object vtable outside game image.");
++                ulong entry=Q(vt);
++                if(entry<imageBase || entry-imageBase>=0x11000000)throw new InvalidDataException("Invalid virtual function.");
++                ulong klass=Q(checked(a+0x18));string kind=Name(D(checked(klass+0x20))),name=Name(D(checked(a+0x20)));
++                if(!pointers.Add(a))throw new InvalidDataException("Duplicate object.");
++                objects.Add(new(a,name,kind));
++            }
++            catch(InvalidDataException){invalid++;}
++            catch(OverflowException){invalid++;}
++        }
++        foreach(string required in new[]{"Object","Class","Actor","Function"})
++            if(!objects.Any(o=>o.Kind=="Class" && o.Name==required))throw new InvalidDataException("Required core class missing: "+required);
++        var meta=objects.Single(o=>o.Kind=="Class" && o.Name=="Class");
++        if(Q(meta.Address+0x18)!=meta.Address)throw new InvalidDataException("Class self-reference check failed.");
++        string Qualified(ulong a)
++        {
++            var path=new List<string>();var seen=new HashSet<ulong>();
++            while(a!=0)
++            {
++                if(!seen.Add(a)||seen.Count>64)throw new InvalidDataException("Cyclic/excessive outer chain.");
++                path.Add(Name(D(checked(a+0x20))));a=Q(checked(a+8));
++            }
++            path.Reverse();return string.Join('.',path);
++        }
++        var owners=new List<Owner>();var properties=new List<Property>();var errors=new List<Rejection>();
++        var qualifiedOwners=new HashSet<string>();
++        foreach(var obj in objects.Where(o=>Kinds.Contains(o.Kind)&&!o.Name.StartsWith("Default__",StringComparison.Ordinal)))
++        {
++            try
++            {
++                string owner=Qualified(obj.Address);ulong p=DecodeLink(Q(checked(obj.Address+0x48)));
++                var chain=new List<Property>();var seen=new HashSet<ulong>();
++                while(p!=0)
++                {
++                    if(!seen.Add(p)||seen.Count>4096)throw new InvalidDataException("Cyclic/excessive property chain.");
++                    if((Q(checked(p+0x20))&~1UL)!=obj.Address)throw new InvalidDataException("Property owner mismatch.");
++                    string name=Name(D(checked(p+0x1c)));ulong fieldClass=Q(checked(p+8));
++                    if(!Image(fieldClass))throw new InvalidDataException("Field class outside image.");
++                    string type=Name(D(checked(fieldClass+0x30)));
++                    if(!type.EndsWith("Property",StringComparison.Ordinal))throw new InvalidDataException("Unexpected field type.");
++                    uint offset=D(checked(p+0x3c))^0xf045716b, size=D(checked(p+0x28))^0xaf687e4b,dim=D(checked(p+0x60));
++                    if(offset>0x1000000||size is 0 or >0x1000000||dim is 0 or >=1000000||(ulong)size*dim>0x1000000)
++                        throw new InvalidDataException("Implausible property extent.");
++                    chain.Add(new(owner,name,type,offset,size,dim));p=DecodeLink(Q(checked(p+16)));
++                }
++                if(chain.Count>0)
++                {
++                    if(!qualifiedOwners.Add(owner))throw new InvalidDataException("Duplicate qualified owner name.");
++                    owners.Add(new(obj.Address,owner,obj.Kind));properties.AddRange(chain);
++                }
++            }
++            catch(InvalidDataException error){errors.Add(new(obj.Name,error.Message));}
++            catch(OverflowException){errors.Add(new(obj.Name,"Address overflow."));}
++        }
++        if(owners.Count==0)throw new InvalidDataException("No initialized property chains were found. A later initialized capture is required.");
++        return new(owners,properties,errors,objects.Count,invalid);
++    }
++    public static Task<Result> ExportAsync(string dump,string destination)=>Task.Run(()=>CaptureNameExporter38.WithCapture(dump,view=>
++    {
++        var observed=Inspect(view.Read,view.ImageBase,view.Names.ToDictionary(n=>n.Index,n=>n.Name));
++        var owners=observed.Owners.OrderBy(o=>o.Name,StringComparer.Ordinal).ToList();
++        var ids=owners.Select((o,i)=>(o.Name,i)).ToDictionary(x=>x.Name,x=>x.i);
++        var fields=observed.Properties.OrderBy(p=>ids[p.Owner]).ThenBy(p=>p.Offset).ThenBy(p=>p.Name,StringComparer.Ordinal).ToList();
++        string folder=Path.Combine(Path.GetFullPath(destination),"Emilyfn-38-reflection-"+Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(folder);
++        try
++        {
++            string Cpp(string text)=>"\""+string.Concat(Encoding.UTF8.GetBytes(text).Select(b=>"\\"+Convert.ToString(b,8).PadLeft(3,'0')))+"\"";
++            using(var output=new StreamWriter(Path.Combine(folder,"reflection.hpp"),false,new UTF8Encoding(false)))
++            {
++                output.WriteLine("#pragma once\n#include <array>\n#include <cstdint>\nnamespace emilyfn_capture38 {\n// Observed metadata only, not callable SDK bindings.\ninline constexpr bool sdk_ready=false;\ninline constexpr bool complete_reflection=false;\nstruct Owner { const char* name; const char* kind; };\nstruct Property { std::uint32_t owner; const char* name; const char* type; std::uint32_t offset, element_size, array_dim; };\ninline constexpr std::array<Owner, "+owners.Count+"> owners = {{");
++                foreach(var owner in owners)output.WriteLine("{"+Cpp(owner.Name)+","+Cpp(owner.Kind)+"},");
++                output.WriteLine("}};\ninline constexpr std::array<Property, "+fields.Count+"> properties = {{");
++                foreach(var p in fields)output.WriteLine("{"+ids[p.Owner]+"u,"+Cpp(p.Name)+","+Cpp(p.Type)+","+p.Offset+"u,"+p.ElementSize+"u,"+p.ArrayDim+"u},");
++                output.WriteLine("}};\n}");
++            }
++            var report=new { Profile="38.00 CL47722112",view.SourceBytes,SdkReady=false,CompleteReflection=false,FunctionDispatchVerified=false,
++                ReflectedOwners=owners.Count,Properties=fields.Count,observed.ReadableObjects,observed.InvalidSlots,RejectedChains=observed.Rejections,
++                Limitations="Only populated chains are exported. Missing sizes, flags, nested type references, bool masks and callable bindings are not inferred." };
++            File.WriteAllText(Path.Combine(folder,"reflection.json"),JsonSerializer.Serialize(new{Report=report,Owners=owners.Select(o=>new{o.Name,o.Kind}),Properties=fields},new JsonSerializerOptions{WriteIndented=true}));
++            File.WriteAllText(Path.Combine(folder,"README.txt"),"Observed capture metadata only. This is not a full gameplay SDK. See reflection.json for incomplete coverage and rejected chains. Keep runtime metadata private.\n");
++            return new Result(folder,owners.Count,fields.Count,observed.Rejections.Count);
++        }
++        catch{Directory.Delete(folder,true);throw;}
++    }));
++}
+--- a/launcher/Emilyfn.App/SdkExportWindow.cs
++++ b/launcher/Emilyfn.App/SdkExportWindow.cs
+@@ -12,35 +12,48 @@
+     private readonly Button export = new() { Content = "Choose decoded dump and export headers" };
+     private readonly TextBlock status = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) };
+     private readonly Button inspect = new() { Content = "Export 38.00 names from a memory capture", Margin = new Thickness(0, 12, 0, 0) };
++    private readonly Button reflection = new() { Content = "Export 38.00 property metadata from a capture", Margin = new Thickness(0, 12, 0, 0) };
+     private bool busy;
+     public SdkExportWindow()
+     {
+-        Title = "Emilyfn — SDK metadata headers"; Width = 720; Height = 480; WindowStartupLocation = WindowStartupLocation.CenterOwner;
++        Title = "Emilyfn — SDK metadata headers"; Width = 720; Height = 540; WindowStartupLocation = WindowStartupLocation.CenterOwner;
+         var panel = new StackPanel { Margin = new Thickness(24) };
+         panel.Children.Add(new TextBlock { Text = "Generate SDK metadata headers", FontSize = 20 });
+-        panel.Children.Add(new TextBlock { Text = "Import ClassesInfo.json, StructsInfo.json and FunctionsInfo.json from one Dumpspace snapshot. Exports C++17 class, property and function metadata. The separate 38.00 capture export produces decoded names only. Complete live SDK generation remains unavailable.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 12) });
++        panel.Children.Add(new TextBlock { Text = "Import ClassesInfo.json, StructsInfo.json and FunctionsInfo.json from one Dumpspace snapshot. Exports C++17 class, property and function metadata. 38.00 capture exports provide names or observed property metadata. Full SDK layouts and callable functions remain unavailable.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 12) });
+         panel.Children.Add(new TextBlock { Text = "Source dump build and CL (as reported by its author)" });
+-        panel.Children.Add(build); panel.Children.Add(export); panel.Children.Add(inspect); panel.Children.Add(status); Content = panel;
+-        inspect.Click += async (_, _) => await InspectCapture();
++        panel.Children.Add(build); panel.Children.Add(export); panel.Children.Add(inspect); panel.Children.Add(reflection); panel.Children.Add(status); Content = panel;
++        inspect.Click += async (_, _) => await InspectCapture(false);
++        reflection.Click += async (_, _) => await InspectCapture(true);
+         export.Click += async (_, _) => await Export();
+         Closing += (_, e) => { if (busy) e.Cancel = true; };
+     }
+-    private async Task InspectCapture()
++    private async Task InspectCapture(bool properties)
+     {
+         var source = new OpenFileDialog { Title = "Select the 38.00 full memory capture", Filter = "Windows minidump|*.dmp", CheckFileExists = true };
+         if (source.ShowDialog(this) != true) return;
+-        var output = new OpenFolderDialog { Title = "Choose name metadata output folder" };
++        var output = new OpenFolderDialog { Title = "Choose capture metadata output folder" };
+         if (output.ShowDialog(this) != true) return;
+-        busy = true; export.IsEnabled = inspect.IsEnabled = build.IsEnabled = false;
++        busy = true; export.IsEnabled = inspect.IsEnabled = reflection.IsEnabled = build.IsEnabled = false;
+         status.Text = "Checking captured memory and decoding names…";
+         try
+         {
++            string folder;
++            if (properties)
++            {
++                var result = await CaptureReflectionExporter38.ExportAsync(source.FileName, output.FolderName);
++                folder = result.Folder;
++                status.Text = $"Saved {result.Properties:N0} properties across {result.Owners:N0} owners. Rejected chains: {result.RejectedChains}. Coverage is incomplete; this is not a callable gameplay SDK. Output: {folder}";
++            }
++            else
++            {
+             var result = await CaptureNameExporter38.ExportAsync(source.FileName, output.FolderName);
++            folder = result.Folder;
+             status.Text = $"Saved {result.PlainNames:N0} plain names and {result.NumberedNames:N0} numbered names to {result.Folder}. These are name metadata only; UObject layouts and a full SDK are not verified.";
+-            try { Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { result.Folder } }); } catch { }
++            }
++            try { Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { folder } }); } catch { }
+         }
+         catch (Exception error) { status.Text = error.Message; }
+-        finally { busy = false; export.IsEnabled = inspect.IsEnabled = build.IsEnabled = true; }
++        finally { busy = false; export.IsEnabled = inspect.IsEnabled = reflection.IsEnabled = build.IsEnabled = true; }
+     }
+     private async Task Export()
+     {
+@@ -49,7 +62,7 @@
+         if (source.ShowDialog(this) != true) return;
+         var output = new OpenFolderDialog { Title = "Choose SDK output folder" };
+         if (output.ShowDialog(this) != true) return;
+-        busy = true; export.IsEnabled = inspect.IsEnabled = build.IsEnabled = false; status.Text = "Generating headers…";
++        busy = true; export.IsEnabled = inspect.IsEnabled = reflection.IsEnabled = build.IsEnabled = false; status.Text = "Generating headers…";
+         try
+         {
+             var result = await SdkHeaderExporter.ExportAsync(source.FolderName, output.FolderName, build.Text.Trim());
+@@ -57,6 +70,6 @@
+             try { Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { result.Folder } }); } catch { }
+         }
+         catch (Exception error) { status.Text = error.Message; }
+-        finally { busy = false; export.IsEnabled = inspect.IsEnabled = build.IsEnabled = true; }
++        finally { busy = false; export.IsEnabled = inspect.IsEnabled = reflection.IsEnabled = build.IsEnabled = true; }
+     }
+ }
+--- a/launcher/Emilyfn.SdkTests/Program.cs
++++ b/launcher/Emilyfn.SdkTests/Program.cs
+@@ -26,3 +26,11 @@
+     var live = await CaptureNameExporter38.ExportAsync(args[1], root);
+     Console.WriteLine($"Capture name export: {live.PlainNames} plain, {live.NumberedNames} numbered; {live.Folder}");
+ }
++
++if (args.Length > 1)
++{
++    var reflection = await CaptureReflectionExporter38.ExportAsync(args[1], root);
++    Console.WriteLine($"Capture reflection export: {reflection.Owners} owners, {reflection.Properties} properties, {reflection.RejectedChains} rejected; {reflection.Folder}");
++}
++
++ReflectionChecks.Run();
+--- /dev/null
++++ b/launcher/Emilyfn.SdkTests/ReflectionChecks.cs
+@@ -0,0 +1,53 @@
++using Emilyfn.Core;
++using System.Buffers.Binary;
++static class ReflectionChecks
++{
++    public static void Run()
++    {
++        const ulong image=0x50000,table=0x20000000,objects=0x30000000,field=0x40000000;
++        var segments=new Dictionary<ulong,byte[]>();
++        byte[] Alloc(ulong address,int length){var b=new byte[length];segments.Add(address,b);return b;}
++        void Q(byte[] b,int o,ulong v)=>BinaryPrimitives.WriteUInt64LittleEndian(b.AsSpan(o),v);
++        void D(byte[] b,int o,uint v)=>BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(o),v);
++        uint Enc(uint v)=>v==0?0:unchecked(((v-1)^0x6f01622bu)+1);
++        var globals=Alloc(image+0x16cfacd8,16);Q(globals,0,table);D(globals,8,6);
++        var slots=Alloc(table,192);var vt=Alloc(image+0x1000,8);Q(vt,0,image+0x2000);
++        // Class, Object, Actor and Function are class objects; Activate is a Function.
++        uint[] nameIds={2,1,3,4,5};
++        for(int i=0;i<5;i++)
++        {
++            ulong a=objects+(ulong)i*0x100;var b=Alloc(a,0x100);
++            Q(b,0,image+0x1000);Q(b,0x18,i==4?objects+0x300:objects);
++            D(b,0x20,Enc(nameIds[i]));Q(slots,i*32+8,a);
++            if(i==4)Q(b,0x48,(field^0x47dcc0173f15ec38UL)|1);
++        }
++        // Slot 5 deliberately lacks an object, so coverage is reported accurately.
++        var property=Alloc(field,0x70);Q(property,8,image+0x3000);D(property,0x1c,Enc(6));
++        Q(property,0x20,(objects+0x400)|1);D(property,0x28,1^0xaf687e4b);D(property,0x3c,0xf045716b);D(property,0x60,1);
++        var fc=Alloc(image+0x3000,0x40);D(fc,0x30,Enc(7));
++        byte[] Read(ulong a,int n)
++        {
++            foreach(var pair in segments)
++                if(a>=pair.Key && a-pair.Key<=(ulong)pair.Value.Length && (ulong)n<=(ulong)pair.Value.Length-(a-pair.Key))
++                    return pair.Value.AsSpan((int)(a-pair.Key),n).ToArray();
++            throw new InvalidDataException("Missing fixture memory");
++        }
++        var names=new Dictionary<uint,string>{{0,"None"},{1,"Object"},{2,"Class"},{3,"Actor"},{4,"Function"},{5,"Activate"},{6,"bReset"},{7,"BoolProperty"}};
++        var result=CaptureReflectionExporter38.Inspect(Read,image,names);
++        if(result.ReadableObjects!=5 || result.InvalidSlots!=1 || result.Properties.Count!=1 || result.Owners.Count!=1 || result.Rejections.Count!=0)
++            throw new Exception("Reflection fixture coverage mismatch");
++        if(result.Properties[0].Name!="bReset" || result.Properties[0].ElementSize!=1 || result.Properties[0].Offset!=0)
++            throw new Exception("Reflection property decoding mismatch");
++        void Refuse()
++        {
++            try{CaptureReflectionExporter38.Inspect(Read,image,names);}
++            catch(InvalidDataException){return;}
++            throw new Exception("Malformed property chain was accepted");
++        }
++        Q(property,16,field);Refuse();Q(property,16,0);
++        Q(property,0x20,objects|1);Refuse();Q(property,0x20,(objects+0x400)|1);
++        D(property,0x60,0);Refuse();D(property,0x60,1);
++        Q(segments[objects],0x18,objects+0x100);Refuse();
++        Console.WriteLine("Reflection checks passed: core identity, coverage, property decoding, cycles, ownership and bounds.");
++    }
++}

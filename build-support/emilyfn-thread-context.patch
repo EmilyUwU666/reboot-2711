@@ -1,0 +1,182 @@
+--- a/launcher/native/ThreadProbe/Probe.cpp
++++ b/launcher/native/ThreadProbe/Probe.cpp
+@@ -2,6 +2,8 @@
+ #define NOMINMAX
+ #include "Protocol.h"
+ #include "Registry38.h"
++#include "ThreadContext38.h"
++#include <intrin.h>
+ #include <cstring>
+ #include <cwchar>
+ using namespace EmilyfnProbe;
+@@ -72,6 +74,16 @@
+         return 0;
+     } __except(EXCEPTION_EXECUTE_HANDLER) { return GetExceptionCode(); }
+ }
++void CaptureThreadContext(Shared* p) {
++    p->threadContextStatus=1; // Profile rejected, no TLS read attempted.
++    const auto image=reinterpret_cast<std::uint64_t>(GetModuleHandleW(nullptr));
++    if (p->image!=image || p->imageSize!=0x18777000U ||
++        !Bytes(image+0x4449603, "\x8b\x05\x1b\xa4\x6f\x12\x65\x48\x8b\x0c\x25\x58\x00\x00\x00\x48\x8b\x1c\xc1\x8b\x83\xa0\x0c\x00\x00") ||
++        !Bytes(image+0x44499ba, "\x83\xf8\x02\x0f\x84\x68\xfc\xff\xff\x83\xf8\x01\x0f\x85\x56\xfc\xff\xff\xe8\x7d\x5a\x47\xfc\x89\xc7\xff\x15\x8f\x44\x40\x12\x39\xc7")) return;
++    const auto read=[](std::uint64_t address,auto& value) {return Read(address,value);};
++    const auto result=EmilyfnThreadContext38::Inspect(read,image,__readgsqword(0x58));
++    p->tlsIndex=result.index;p->rawThreadContext=result.value;p->threadContextStatus=result.status;
++}
+ DWORD Call(Shared* p) {
+     // Only the fixed read-only GetOwner test can reach this point.
+     __try {
+@@ -86,7 +98,7 @@
+         const auto message = RegisterWindowMessageW(MessageName);
+         if (message && msg->message == message && msg->wParam) {
+             wchar_t name[128]{};
+-            swprintf_s(name, L"Local\\Emilyfn-dispatch-v2-%lu-%lu-%016llx", GetCurrentProcessId(), GetCurrentThreadId(), static_cast<unsigned long long>(msg->wParam));
++            swprintf_s(name, L"Local\\Emilyfn-dispatch-v3-%lu-%lu-%016llx", GetCurrentProcessId(), GetCurrentThreadId(), static_cast<unsigned long long>(msg->wParam));
+             const auto mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, name);
+             if (mapping) {
+                 const auto p = static_cast<Shared*>(MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, MappingBytes));
+@@ -101,6 +113,7 @@
+                         if (!GameThread()) p->status = 7;
+                         else {
+                             p->stackException=CaptureGameFrames(p);
++                            CaptureThreadContext(p);
+                             if (!p->hasTarget) p->status = 2;
+                             else if (!Validate(*p, p->expected)) p->status = 3;
+                             else if (GetTickCount64() > p->deadline) p->status = 8;
+--- a/launcher/native/ThreadProbe/Protocol.h
++++ b/launcher/native/ThreadProbe/Protocol.h
+@@ -4,8 +4,8 @@
+ #include <cstddef>
+ namespace EmilyfnProbe {
+ inline constexpr std::uint32_t Magic = 0xef380003;
+-inline constexpr std::uint32_t ProtocolVersion = 2, MaxFrames = 48, MappingBytes = 1024;
+-inline constexpr wchar_t MessageName[] = L"Emilyfn.DispatchProbe.v2";
++inline constexpr std::uint32_t ProtocolVersion = 3, MaxFrames = 48, MappingBytes = 1024;
++inline constexpr wchar_t MessageName[] = L"Emilyfn.DispatchProbe.v3";
+ struct Shared {
+     std::uint32_t magic, version;
+     volatile LONG state; // 1 armed, 2 executing, 3 complete, 4 cancelled
+@@ -20,10 +20,13 @@
+     std::uint32_t gameFrameCount, totalFrameCount;
+     std::uint64_t gameFrameRvas[MaxFrames];
+     std::uint32_t stackException, stackReserved;
++    std::uint32_t threadContextStatus, tlsIndex, rawThreadContext, threadContextReserved;
+ };
+-static_assert(sizeof(Shared) == 552);
++static_assert(sizeof(Shared) == 568);
+ static_assert(offsetof(Shared, nonce) == 24 && offsetof(Shared, calls) == 112 && offsetof(Shared, status) == 144);
+ static_assert(offsetof(Shared, gameFrameCount) == 152 && offsetof(Shared, gameFrameRvas) == 160 && offsetof(Shared, stackException) == 544);
+ // status: 1 callback observed, 2 target absent, 3 profile rejected,
+ // 4 GetOwner matched, 5 exception, 6 return mismatch, 7 thread identity rejected.
+ }
++
++static_assert(offsetof(EmilyfnProbe::Shared, threadContextStatus) == 552);
+--- a/launcher/Emilyfn.Core/GameThreadProbe38.cs
++++ b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+@@ -14,7 +14,13 @@
+     public sealed record Result(string File,string Message);
+     internal sealed record CallbackResult(int State,int Status,int CallbackProcessId,int CallbackThreadId,bool? FunctionCallsAttempted,
+         ulong Returned,ulong Expected,uint ExceptionCode,bool HookRemoved,string? Failure,
+-        int CapturedStackFrames,List<string> GameFrameRvas,bool StackCapacityReached,uint StackCaptureException);
++        int CapturedStackFrames,List<string> GameFrameRvas,bool StackCapacityReached,uint StackCaptureException,ThreadContextObservation ThreadContext);
++    internal sealed record ThreadContextObservation(uint Status,uint? TlsIndex,uint? RawValue)
++    {
++        public string StatusText=>Status switch {0=>"Not observed",1=>"Instruction profile rejected",2=>"TLS block unavailable",3=>"TLS index outside diagnostic bound",4=>"Required memory unreadable",5=>"Raw value observed",_=>"Unknown status"};
++        public bool EngineTaskTagVerified=>false;
++        public string Scope=>"Read-only raw TLS observation at callback entry; enum meaning and startup suitability are unverified. No engine state was changed.";
++    }
+     private static readonly System.Collections.Concurrent.ConcurrentDictionary<(int,DateTime),byte> InFlight=new();
+     public static Task<Result> RunAsync(CaptureTarget target,string destination,IProgress<string>? progress=null)=>Task.Run(()=>Run(target,destination,progress));
+     private static Result Run(CaptureTarget target,string destination,IProgress<string>? progress)
+@@ -116,9 +122,9 @@
+         using var thread=OpenThread(0x0800,false,(uint)tid);
+         if(thread.IsInvalid||GetProcessIdOfThread(thread)!=(uint)process.Id)throw new InvalidOperationException("Thread no longer belongs to the selected process.");
+         ulong nonce=BinaryPrimitives.ReadUInt64LittleEndian(RandomNumberGenerator.GetBytes(8));if(nonce==0)nonce=1;
+-        string name=$"Local\\Emilyfn-dispatch-v2-{process.Id}-{tid}-{nonce:x16}";
++        string name=$"Local\\Emilyfn-dispatch-v3-{process.Id}-{tid}-{nonce:x16}";
+         using var mapping=MemoryMappedFile.CreateNew(name,1024);using var view=mapping.CreateViewAccessor(0,1024);
+-        view.Write(0,0xef380003u);view.Write(4,2u);view.Write(12,process.Id);view.Write(16,tid);
++        view.Write(0,0xef380003u);view.Write(4,3u);view.Write(12,process.Id);view.Write(16,tid);
+         view.Write(24,nonce);view.Write(32,process.StartTime.ToUniversalTime().ToFileTimeUtc());view.Write(40,GetTickCount64()+(ulong)timeoutMs);view.Write(48,image);
+         view.Write(124,checked((uint)process.MainModule!.ModuleMemorySize));
+         if(target is not null)
+@@ -131,7 +137,7 @@
+         try
+         {
+             library=NativeLibrary.Load(Path.GetFullPath(dll));var entry=NativeLibrary.GetExport(library,"EmilyfnThreadProbe");
+-            uint message=RegisterWindowMessageW("Emilyfn.DispatchProbe.v2");if(message==0)throw new Win32Exception(Marshal.GetLastWin32Error());
++            uint message=RegisterWindowMessageW("Emilyfn.DispatchProbe.v3");if(message==0)throw new Win32Exception(Marshal.GetLastWin32Error());
+             hook=SetWindowsHookExW(3,entry,library,(uint)tid);if(hook==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error(),"Windows could not install the thread-scoped diagnostic callback.");
+             Interlocked.Exchange(ref *(int*)(ptr+8),1);
+             if(!PostThreadMessageW((uint)tid,message,(nuint)nonce,IntPtr.Zero))throw new Win32Exception(Marshal.GetLastWin32Error(),"The game thread has no accessible message queue.");
+@@ -165,7 +171,10 @@
+                 }
+             }
+             result=new(state,view.ReadInt32(144),view.ReadInt32(120),view.ReadInt32(116),calls!=0?true:state==2?null:false,
+-                view.ReadUInt64(128),view.ReadUInt64(136),view.ReadUInt32(148),removed,failure,captured,frames,captured==48,stackException);
++                view.ReadUInt64(128),view.ReadUInt64(136),view.ReadUInt32(148),removed,failure,captured,frames,captured==48,stackException,
++                new ThreadContextObservation(state==3?view.ReadUInt32(552):0,
++                    state==3&&view.ReadUInt32(552)>=2?view.ReadUInt32(556):null,
++                    state==3&&view.ReadUInt32(552)==5?view.ReadUInt32(560):null));
+             // The remote hook mapping has its own handle. A callback already in flight retains it.
+             view.SafeMemoryMappedViewHandle.ReleasePointer();if(library!=IntPtr.Zero&&removed)NativeLibrary.Free(library);
+         }
+--- a/launcher/Emilyfn.ThreadProbeTests/Program.cs
++++ b/launcher/Emilyfn.ThreadProbeTests/Program.cs
+@@ -31,6 +31,7 @@
+     Check(result.GameFrameRvas.Count>0,"Callback stack did not reach the synthetic game module");
+     foreach(var frame in result.GameFrameRvas)
+         Check(Convert.ToUInt64(frame[2..],16)<(ulong)child.Process.MainModule!.ModuleMemorySize,"Stack frame escaped the main module");
++    Check(result.ThreadContext.Status==1&&result.ThreadContext.RawValue is null,"Synthetic image must reject the TLS profile without fabricating a value");
+     Console.WriteLine("CALLBACK STACK: "+string.Join(", ",result.GameFrameRvas));
+     var invalid=new DispatchTarget38.Target(1,2,3,4,5,6);
+     result=GameThreadProbe38.RunCallback(child.Process,child.Tid,dll,image,invalid,5000);
+--- /dev/null
++++ b/launcher/native/ThreadProbe/ThreadContext38.h
+@@ -0,0 +1,19 @@
++#pragma once
++#include <cstdint>
++namespace EmilyfnThreadContext38 {
++// No engine calls or writes. Caller must validate the exact module profile first.
++// Status: 2 missing TLS, 3 index outside diagnostic bound, 4 unreadable, 5 observed.
++struct Observation { std::uint32_t status=4,index=0,value=0; };
++template<class Reader> Observation Inspect(Reader read,std::uint64_t image,std::uint64_t tlsArray) {
++    Observation o;
++    if (!read(image+0x16b43a24,o.index)) return o;
++    if (o.index>=1024) {o.status=3;return o;}
++    if (!tlsArray) {o.status=2;return o;}
++    std::uint64_t block=0;
++    if (tlsArray>UINT64_MAX-static_cast<std::uint64_t>(o.index)*8 ||
++        !read(tlsArray+static_cast<std::uint64_t>(o.index)*8,block)) return o;
++    if (!block) {o.status=2;return o;}
++    if (block>UINT64_MAX-0xca0 || !read(block+0xca0,o.value)) return o;
++    o.status=5;return o;
++}
++}
+--- /dev/null
++++ b/launcher/native/ThreadProbe/ThreadContextTests.cpp
+@@ -0,0 +1,24 @@
++#include "ThreadContext38.h"
++#include <cstring>
++#include <map>
++#include <vector>
++#include <stdexcept>
++#include <iostream>
++int main() {
++    std::map<std::uint64_t,std::vector<unsigned char>> memory;
++    auto put=[&](std::uint64_t a,auto value){std::vector<unsigned char> bytes(sizeof(value));std::memcpy(bytes.data(),&value,sizeof(value));memory[a]=bytes;};
++    auto read=[&](std::uint64_t a,auto& value){auto it=memory.find(a);if(it==memory.end()||it->second.size()!=sizeof(value))return false;std::memcpy(&value,it->second.data(),sizeof(value));return true;};
++    auto check=[](bool ok){if(!ok)throw std::runtime_error("TLS diagnostic fixture failed");};
++    constexpr std::uint64_t image=0x10000000, array=0x20000000, block=0x30000000;
++    put(image+0x16b43a24,std::uint32_t(3));put(array+24,block);put(block+0xca0,std::uint32_t(2));
++    auto result=EmilyfnThreadContext38::Inspect(read,image,array);check(result.status==5&&result.index==3&&result.value==2);
++    put(block+0xca0,std::uint32_t(0));result=EmilyfnThreadContext38::Inspect(read,image,array);check(result.status==5&&result.value==0);
++    check(EmilyfnThreadContext38::Inspect(read,image,0).status==2);
++    put(array+24,std::uint64_t(0));check(EmilyfnThreadContext38::Inspect(read,image,array).status==2);
++    put(array+24,block);memory.erase(block+0xca0);check(EmilyfnThreadContext38::Inspect(read,image,array).status==4);
++    put(image+0x16b43a24,std::uint32_t(1024));check(EmilyfnThreadContext38::Inspect(read,image,array).status==3);
++    put(image+0x16b43a24,std::uint32_t(3));check(EmilyfnThreadContext38::Inspect(read,image,UINT64_MAX-8).status==4);
++    put(array+24,UINT64_MAX-10);check(EmilyfnThreadContext38::Inspect(read,image,array).status==4);
++    memory.erase(image+0x16b43a24);check(EmilyfnThreadContext38::Inspect(read,image,array).status==4);
++    std::cout<<"THREAD CONTEXT: 9 read-only checks passed\n";
++}

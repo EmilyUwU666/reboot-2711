@@ -1,0 +1,207 @@
+--- a/launcher/Emilyfn.Core/WorldReadiness38.cs
++++ b/launcher/Emilyfn.Core/WorldReadiness38.cs
+@@ -9,7 +9,7 @@
+         List<CaptureReflectionExporter38.Property> DeclaredProperties,
+         List<CaptureFunctionMetadata38.Function> DeclaredFunctions,int OmittedFunctions);
+     public sealed record Report(bool GameplayReady,string Scope,int UnreadableHeaders,List<ClassInventory> Classes)
+-    { public WorldLinks38.Report? WorldLinks { get; init; } public EngineWorldContexts38.Report? EngineContexts {get;init;} }
++    { public WorldLinks38.Report? WorldLinks { get; init; } public EngineWorldContexts38.Report? EngineContexts {get;init;} public DriverConfiguration38.Report? DriverConfiguration {get;init;} }
+     private static readonly string[] Targets = {
+         "/Script/Engine.World", "/Script/Engine.GameInstance", "/Script/FortniteGame.FortGameInstance",
+         "/Script/Engine.Engine", "/Script/FortniteGame.FortEngine",
+@@ -21,7 +21,7 @@
+         "GameViewport", "LocalPlayers", "World", "ServerConnection", "ClientConnections"
+     };
+     public static Report Inspect(Func<ulong,int,byte[]> read,CaptureReflectionExporter38.Observation reflection,
+-        CaptureFunctionMetadata38.Observation metadata,ulong imageBase=0)
++        CaptureFunctionMetadata38.Observation metadata,ulong imageBase=0,IReadOnlyDictionary<uint,string>? names=null)
+     {
+         var classes=Targets.ToDictionary(n=>n,n=>reflection.Candidates.Where(c=>c.Kind=="Class"&&c.Name==n).ToList());
+         var byAddress=classes.Where(c=>c.Value.Count==1).ToDictionary(c=>c.Value[0].Address,c=>c.Key);
+@@ -47,6 +47,6 @@
+                 Math.Max(0,instances[name].Count-16),reflection.Properties.Where(p=>p.Owner==name&&Fields.Contains(p.Name)).ToList(),
+                 functions.Take(48).ToList(),Math.Max(0,functions.Count-48)));
+         }
+-        return new(false,"Read-only exact-class inventory; derived classes are not counted. Instances may be inactive or pending destruction. Presence does not prove a playable world, active net driver or server readiness. No object pointers are exported and no world functions are called.",unreadable,result) {WorldLinks=WorldLinks38.Inspect(read,reflection,metadata,instances["/Script/Engine.World"]),EngineContexts=EngineWorldContexts38.Inspect(read,imageBase,reflection,instances["/Script/FortniteGame.FortEngine"])};
++        return new(false,"Read-only exact-class inventory; derived classes are not counted. Instances may be inactive or pending destruction. Presence does not prove a playable world, active net driver or server readiness. No object pointers are exported and no world functions are called.",unreadable,result) {WorldLinks=WorldLinks38.Inspect(read,reflection,metadata,instances["/Script/Engine.World"]),EngineContexts=EngineWorldContexts38.Inspect(read,imageBase,reflection,instances["/Script/FortniteGame.FortEngine"]),DriverConfiguration=names is null?null:DriverConfiguration38.Inspect(read,imageBase,reflection,names,instances["/Script/FortniteGame.FortEngine"])};
+     }
+ }
+--- a/launcher/Emilyfn.Core/LiveBindingProbe38.cs
++++ b/launcher/Emilyfn.Core/LiveBindingProbe38.cs
+@@ -66,7 +66,7 @@
+             checks[index]=checks[index] with {RequiredForDispatch=false,
+                 Detail=checks[index].Detail+" Unresolved native entries remain excluded; the exact GetOwner target passed independent validation."};
+         }
+-        return new(new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count,target.Reason,registry.Slots,registry.EmptySlots,registry.Rejections.Count,EarlyStartupPatcher38.Inspect(read,imageBase),CaptureFunctionMetadata38.Summarize(bindings),WorldReadiness38.Inspect(read,observed,bindings,imageBase),NetDriverBindings38.Inspect(read,imageBase,observed,names)),target.Value);
++        return new(new(checks,names.Count,observed.Owners.Count,observed.Properties.Count,observed.InvalidSlots,observed.Rejections.Count,bindings.Functions.Count,bindings.Rejections.Count,target.Reason,registry.Slots,registry.EmptySlots,registry.Rejections.Count,EarlyStartupPatcher38.Inspect(read,imageBase),CaptureFunctionMetadata38.Summarize(bindings),WorldReadiness38.Inspect(read,observed,bindings,imageBase,names),NetDriverBindings38.Inspect(read,imageBase,observed,names)),target.Value);
+     }
+     internal static bool CanScopeUnboundMetadata(CaptureFunctionMetadata38.Observation metadata,bool exactTargetValidated) =>
+         exactTargetValidated && metadata.Functions.Count>0 && metadata.Rejections.Count>0 &&
+--- a/launcher/Emilyfn.SdkTests/Program.cs
++++ b/launcher/Emilyfn.SdkTests/Program.cs
+@@ -59,3 +59,5 @@
+ EngineWorldContextChecks.Run();
+ 
+ NetDriverBindingChecks.Run();
++
++DriverConfigurationChecks.Run();
+--- /dev/null
++++ b/launcher/Emilyfn.Core/DriverConfiguration38.cs
+@@ -0,0 +1,111 @@
++using System.Buffers.Binary;
++namespace Emilyfn.Core;
++
++// Exact CL47722112 instruction-derived arrays; observational only.
++public static class DriverConfiguration38
++{
++    internal static readonly Dictionary<ulong,byte[]> Anchors=new()
++    {
++        [0x482F3C3]=Convert.FromHexString("486381580f000031ed4885c00f844a0300004489c74989cf488bb1500f00008d5fff81f32b62016fffc3b9d59dfe900f44d94183f8014189db440f42dd48c1e00448f7d84531f64531c0468b14364585d2741341ffca4181f22b62016f41ffc2440f44d1eb034531d24539da74124983c0f04983c6104c39c075cfe9dc02000031ed4c29c60f84d10200004c894c24484889542440488d4e040f57c04c8da424f0000000410f2904244c89e2e812997ffb"),
++        [0x1FAFE5E]=Convert.FromHexString("415741565657534881ec800100000f29b424700100004489cb4489c74989d64989cf488b057985a5144831e04889842468010000448944244c44894c2448488d8a080200004489c2e8bff387024885c00f84ea000000803d794cec14050f82010100004889c6488d15a1bfe00f488d4c245041b85a000000e8d5aa260fb06e31c90fb6c06bc061044430440c5048ffc14883f95a75eb488dbc24e2000000488d5c245041b85a0000004889f94889dae89eaa260f8b4620488d4c243089010f57f60f2933488d7424504889f2e8578e07fe837e0800488d3540b77e144989f674054c8b742450488d5c24300f2933488d4c244c4889dae82d8e07fe837b08004989f174054c8b4c24304c89742420488d15c14bec144889f14989f8e8c01505fe488b4c24304885c97405e8cf50d706488b4c24504885c9742be8c050d706eb244c89f94c89f24189d84189f9e8dff387024889c1b0014885c9750b803d744bec1405733331c0488b8c24680100004831e1483b0d2a84a51475170f28b424700100004881c4800100005b5f5e415e415fc3e8fc4c6207cc488d15cabee00f488d4c245041b886000000e8a4a9260fb07231c90fb6c06bc061044430440c5048ffc14881f98600000075e8488db424e2000000488d7c245041b8860000004889f14889fae86aa9260f0f57f60f2937488d4c2448488d7c24504889fae8288d07fe837f0800488d3d11b67e144989fe74054c8b742450488d5c24300f2933488d4c244c4889dae8fe8c07fe837b08004989f974054c8b4c24304c89742420488d15924aec144889f94989f0e9ccfeffff"),
++    };
++    public sealed record Name(uint Index,string? Text);
++    public sealed record Definition(int Ordinal,Name Name,Name ClassPath,Name FallbackClassPath,
++        int LoadedClassMatches,int LoadedFallbackMatches);
++    public sealed record ActiveDriver(int Ordinal,uint? Slot,string? ClassName,Name? Name,
++        int? DefinitionOrdinal,uint? WorldSlot,string? Failure);
++    public sealed record Context(int Ordinal,int? Count,int? Capacity,List<ActiveDriver> Drivers,string? Failure);
++    public sealed record Report(bool InstructionProfileMatched,List<Definition> Definitions,
++        List<Context> Contexts,string? Failure,bool NetworkingCallsAttempted=false,bool GameplayReady=false)
++    {
++        public string Scope=>"Read-only cached, non-atomic configuration inventory. Loaded class matches do not prove constructibility. No driver creation, destruction, world assignment or listen call was made.";
++    }
++    public static Report Inspect(Func<ulong,int,byte[]> read,ulong image,
++        CaptureReflectionExporter38.Observation reflection,IReadOnlyDictionary<uint,string> names,
++        IReadOnlyList<uint> engineSlots)
++    {
++        var definitions=new List<Definition>();var contexts=new List<Context>();bool matched=false;
++        uint D(ulong a)=>BinaryPrimitives.ReadUInt32LittleEndian(read(a,4));
++        ulong Q(ulong a)=>BinaryPrimitives.ReadUInt64LittleEndian(read(a,8));
++        Name Decode(uint value){uint index=NamePool38.DecodeIndex(value);return new(index,names.GetValueOrDefault(index));}
++        (ulong Pointer,int Count,int Capacity) Array(ulong address,int limit)
++        {
++            var b=read(address,16);ulong pointer=BinaryPrimitives.ReadUInt64LittleEndian(b);
++            int count=BinaryPrimitives.ReadInt32LittleEndian(b.AsSpan(8)),capacity=BinaryPrimitives.ReadInt32LittleEndian(b.AsSpan(12));
++            if(count<0||count>limit||capacity<count||capacity>4096||
++                (count>0&&(pointer==0||pointer>long.MaxValue||pointer%8!=0)))
++                throw new InvalidDataException("Unsupported array bounds or alignment.");
++            return(pointer,count,capacity);
++        }
++        var entries=(reflection.Registry?.Entries??new()).GroupBy(e=>e.Address)
++            .Where(g=>g.Count()==1).ToDictionary(g=>g.Key,g=>g.Single());
++        var classes=reflection.Candidates.Where(c=>c.Kind=="Class").ToList();
++        uint Registered(ulong pointer)
++        {
++            if(!entries.TryGetValue(pointer,out var entry)||
++                (D(checked(pointer+0x14))^RuntimeObjectRegistry38.IndexMask)!=entry.Index)
++                throw new InvalidDataException("Object absent from registry or internal index changed.");
++            return entry.Index;
++        }
++        int ClassMatches(Name path)=>path.Text is null?0:classes.Count(c=>c.Name==path.Text);
++        try
++        {
++            foreach(var a in Anchors)
++                if(image==0||!read(checked(image+a.Key),a.Value.Length).AsSpan().SequenceEqual(a.Value))
++                    throw new InvalidDataException("Driver configuration instruction profile mismatch.");
++            var engineCheck=EngineWorldContexts38.Inspect(read,image,reflection,engineSlots);
++            if(!engineCheck.InstructionProfileMatched||engineCheck.Failure is not null)
++                throw new InvalidDataException(engineCheck.Failure??"Engine context profile unavailable.");
++            matched=true;
++            var engineEntries=entries.Values.Where(e=>e.Index==engineCheck.EngineSlot).ToList();
++            if(engineEntries.Count!=1)throw new InvalidDataException("Engine registry identity ambiguous.");
++            ulong engine=engineEntries[0].Address;Registered(engine);
++            var defs=Array(checked(engine+0xf50),256);
++            for(int i=0;i<defs.Count;i++)
++            {
++                ulong a=checked(defs.Pointer+(ulong)i*16);
++                var name=Decode(D(a));var path=Decode(D(a+4));var fallback=Decode(D(a+8));
++                definitions.Add(new(i,name,path,fallback,ClassMatches(path),ClassMatches(fallback)));
++            }
++            var worldContexts=Array(checked(engine+0xfd8),128);
++            for(int i=0;i<worldContexts.Count;i++)
++            {
++                var drivers=new List<ActiveDriver>();int? count=null,capacity=null;
++                try
++                {
++                    ulong context=Q(checked(worldContexts.Pointer+(ulong)i*8));
++                    if(context==0||context>long.MaxValue||context%8!=0)throw new InvalidDataException("Invalid context pointer.");
++                    var active=Array(checked(context+0x208),256);count=active.Count;capacity=active.Capacity;
++                    for(int j=0;j<active.Count;j++)
++                    {
++                        uint? slot=null,worldSlot=null;string? className=null;Name? name=null;int? definition=null;
++                        try
++                        {
++                            ulong a=checked(active.Pointer+(ulong)j*16),driver=Q(a),definitionPointer=Q(a+8);
++                            slot=Registered(driver);
++                            if((D(checked(driver+0x10))&0x10)!=0)throw new InvalidDataException("Active entry points to a class default.");
++                            ulong driverClass=Q(checked(driver+0x18));
++                            var driverClasses=classes.Where(c=>c.Address==driverClass).ToList();
++                            if(driverClasses.Count!=1)throw new InvalidDataException("Driver class identity unavailable or ambiguous.");
++                            className=driverClasses[0].Name;name=Decode(D(checked(driver+0x210)));
++                            if(definitionPointer<defs.Pointer||(definitionPointer-defs.Pointer)%16!=0||
++                                (definitionPointer-defs.Pointer)/16>=(ulong)defs.Count)
++                                throw new InvalidDataException("Definition pointer is outside the configured array.");
++                            definition=(int)((definitionPointer-defs.Pointer)/16);
++                            ulong world=Q(checked(driver+0x1b0));if(world!=0)worldSlot=Registered(world);
++                            drivers.Add(new(j,slot,className,name,definition,worldSlot,null));
++                        }
++                        catch(Exception e) when(e is InvalidDataException or OverflowException)
++                        {drivers.Add(new(j,slot,className,name,definition,worldSlot,e.Message));}
++                    }
++                    contexts.Add(new(i,count,capacity,drivers,null));
++                }
++                catch(Exception e) when(e is InvalidDataException or OverflowException)
++                {contexts.Add(new(i,count,capacity,drivers,e.Message));}
++            }
++            return new(matched,definitions,contexts,null);
++        }
++        catch(Exception e) when(e is InvalidDataException or OverflowException)
++        {return new(matched,definitions,contexts,e.Message);}
++    }
++}
+--- /dev/null
++++ b/launcher/Emilyfn.SdkTests/DriverConfigurationChecks.cs
+@@ -0,0 +1,43 @@
++using Emilyfn.Core;
++static class DriverConfigurationChecks
++{
++    public static void Run()
++    {
++        const ulong image=0x10000000;
++        var memory=new Dictionary<ulong,byte>();
++        void Put(ulong a,byte[] b){for(int i=0;i<b.Length;i++)memory[a+(ulong)i]=b[i];}
++        void D(ulong a,uint v)=>Put(a,BitConverter.GetBytes(v));
++        void Q(ulong a,ulong v)=>Put(a,BitConverter.GetBytes(v));
++        void Array(ulong a,ulong p,int n,int c){Q(a,p);D(a+8,(uint)n);D(a+12,(uint)c);}
++        byte[] Read(ulong a,int n)=>Enumerable.Range(0,n).Select(i=>memory.TryGetValue(a+(ulong)i,out var b)?b:throw new InvalidDataException("Missing fixture memory")).ToArray();
++        uint Encode(uint i)=>i==0?0:unchecked(((i-1)^0x6f01622bu)+1);
++        foreach(var a in DriverConfiguration38.Anchors)Put(image+a.Key,a.Value);
++        Put(image+EngineWorldContexts38.AnchorRva,EngineWorldContexts38.Anchor);
++        D(0x2014,1u^RuntimeObjectRegistry38.IndexMask);Q(0x2018,0x1000);D(0x2010,0);
++        Array(0x2fd8,0x4000,1,1);Q(0x4000,0x5000);Q(0x52b8,0x3000);
++        D(0x3014,2u^RuntimeObjectRegistry38.IndexMask);Q(0x3018,0x1100);
++        Array(0x2f50,0x6000,1,1);D(0x6000,Encode(1));D(0x6004,Encode(2));D(0x6008,Encode(3));
++        Array(0x5208,0x7000,1,1);Q(0x7000,0x8000);Q(0x7008,0x6000);
++        D(0x8014,3u^RuntimeObjectRegistry38.IndexMask);D(0x8010,0);Q(0x8018,0x1200);
++        D(0x8210,Encode(1));Q(0x81b0,0x3000);
++        var reflection=new CaptureReflectionExporter38.Observation(new(),new(),new(),0,0,new(){
++            new(0x1000,"/Script/FortniteGame.FortEngine","Class"),new(0x1100,"/Script/Engine.World","Class"),
++            new(0x1200,"/Script/OnlineSubsystemUtils.IpNetDriver","Class")})
++            {Registry=new(4,0,new(){new(1,0x2000),new(2,0x3000),new(3,0x8000)},new())};
++        var names=new Dictionary<uint,string>{{1,"GameNetDriver"},{2,"/Script/OnlineSubsystemUtils.IpNetDriver"},{3,"/Script/Missing.Driver"}};
++        DriverConfiguration38.Report Run()=>DriverConfiguration38.Inspect(Read,image,reflection,names,new uint[]{1});
++        void Check(bool ok,string why){if(!ok)throw new Exception("Driver configuration: "+why);}
++        var good=Run();Check(good.Failure is null&&good.InstructionProfileMatched,"valid profile");
++        Check(good.Definitions.Single().LoadedClassMatches==1&&good.Definitions[0].LoadedFallbackMatches==0,"class availability");
++        var driver=good.Contexts.Single().Drivers.Single();Check(driver.Failure is null&&driver.Slot==3&&driver.WorldSlot==2&&driver.DefinitionOrdinal==0&&driver.Name?.Text=="GameNetDriver","registered active driver");
++        Check(!good.GameplayReady&&!good.NetworkingCallsAttempted,"observational scope");
++        Q(0x7008,0x6004);Check(Run().Contexts[0].Drivers[0].Failure is not null,"misaligned definition");Q(0x7008,0x6000);
++        D(0x8014,99u^RuntimeObjectRegistry38.IndexMask);Check(Run().Contexts[0].Drivers[0].Failure is not null,"stale identity");D(0x8014,3u^RuntimeObjectRegistry38.IndexMask);
++        Array(0x5208,0,0,0);Check(Run().Contexts[0].Count==0&&Run().Contexts[0].Failure is null,"empty active array");
++        Array(0x5208,0x7000,257,257);Check(Run().Contexts[0].Failure is not null,"active bounds");
++        names.Remove(2);Check(Run().Definitions[0].ClassPath.Text is null&&Run().Definitions[0].LoadedClassMatches==0,"missing name");
++        Array(0x2f50,0x6000,257,257);Check(Run().Failure is not null,"definition bounds");
++        Put(image+DriverConfiguration38.Anchors.First().Key,new byte[]{0});Check(!Run().InstructionProfileMatched,"changed code");
++        Console.WriteLine("Driver configuration checks passed: names, classes, active identities, definition membership, empty and bounded arrays, changed code.");
++    }
++}

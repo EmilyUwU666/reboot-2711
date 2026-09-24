@@ -1,0 +1,128 @@
+diff --git a/launcher/Emilyfn.Core/WorldLinks38.cs b/launcher/Emilyfn.Core/WorldLinks38.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.Core/WorldLinks38.cs
+@@ -0,0 +1,58 @@
++using System.Buffers.Binary;
++namespace Emilyfn.Core;
++
++public static class WorldLinks38
++{
++    public sealed record Link(string Property,uint? Offset,string Status,uint? TargetSlot=null,string? TargetClass=null,bool? TargetIsDefault=null);
++    public sealed record World(uint Slot,List<Link> Links);
++    public sealed record Report(List<World> Worlds,int OmittedWorlds,string Scope);
++    private static readonly string[] Properties={"PersistentLevel","OwningGameInstance","NetDriver","AuthorityGameMode","GameState"};
++    public static Report Inspect(Func<ulong,int,byte[]> read,CaptureReflectionExporter38.Observation reflection,
++        CaptureFunctionMetadata38.Observation metadata,IReadOnlyList<uint> worldSlots)
++    {
++        const string owner="/Script/Engine.World";
++        var entries=reflection.Registry?.Entries ?? new();
++        var slots=entries.GroupBy(e=>e.Index).Where(g=>g.Count()==1).ToDictionary(g=>g.Key,g=>g.Single());
++        var pointers=entries.GroupBy(e=>e.Address).Where(g=>g.Count()==1).ToDictionary(g=>g.Key,g=>g.Single());
++        var classes=reflection.Candidates.Where(c=>c.Kind=="Class").GroupBy(c=>c.Address)
++            .Where(g=>g.Count()==1).ToDictionary(g=>g.Key,g=>g.Single().Name);
++        var worldClasses=reflection.Candidates.Where(c=>c.Kind=="Class"&&c.Name==owner).ToList();
++        var sizes=metadata.OwnerSizes.Where(s=>s.Owner==owner).ToList();
++        uint D(ulong a)=>BinaryPrimitives.ReadUInt32LittleEndian(read(a,4));
++        ulong Q(ulong a)=>BinaryPrimitives.ReadUInt64LittleEndian(read(a,8));
++        var worlds=new List<World>();
++        foreach(uint slot in worldSlots.Take(16))
++        {
++            var links=new List<Link>();
++            foreach(string name in Properties)
++            {
++                var fields=reflection.Properties.Where(p=>p.Owner==owner&&p.Name==name).ToList();
++                if(fields.Count!=1||sizes.Count!=1||fields[0].Type!="ObjectProperty"||fields[0].ElementSize!=8||fields[0].ArrayDim!=1||
++                    (ulong)fields[0].Offset+8>sizes[0].StorageSize)
++                { links.Add(new(name,null,"Missing, ambiguous or unsupported reflected layout"));continue; }
++                uint offset=fields[0].Offset;
++                try
++                {
++                    if(!slots.TryGetValue(slot,out var source)||worldClasses.Count!=1||
++                        (D(checked(source.Address+0x14))^RuntimeObjectRegistry38.IndexMask)!=slot||
++                        Q(checked(source.Address+0x18))!=worldClasses[0].Address||(D(checked(source.Address+0x10))&0x10)!=0)
++                    {links.Add(new(name,offset,"World identity changed or unavailable"));continue;}
++                    ulong pointer=Q(checked(source.Address+offset));
++                    if(pointer==0){links.Add(new(name,offset,"Null"));continue;}
++                    if(!pointers.TryGetValue(pointer,out var target))
++                    {links.Add(new(name,offset,"Non-null value is not a registered object; encoding or stale reference unresolved"));continue;}
++                    if((D(checked(pointer+0x14))^RuntimeObjectRegistry38.IndexMask)!=target.Index)
++                    {links.Add(new(name,offset,"Target identity changed"));continue;}
++                    ulong klass=Q(checked(pointer+0x18));
++                    if(!classes.TryGetValue(klass,out var targetClass))
++                    {links.Add(new(name,offset,"Target class unresolved",target.Index));continue;}
++                    links.Add(new(name,offset,"Registered object",target.Index,targetClass,(D(checked(pointer+0x10))&0x10)!=0));
++                }
++                catch(Exception e) when(e is InvalidDataException or OverflowException)
++                {links.Add(new(name,offset,"Unreadable or changed memory"));}
++            }
++            worlds.Add(new(slot,links));
++        }
++        return new(worlds,Math.Max(0,worldSlots.Count-16),"Read-only reflected object references; registry membership and internal indices checked. Non-atomic. No raw pointers exported. Does not establish which world is active, reference type compatibility, or gameplay readiness.");
++    }
++}
+diff --git a/launcher/Emilyfn.Core/WorldReadiness38.cs b/launcher/Emilyfn.Core/WorldReadiness38.cs
+--- a/launcher/Emilyfn.Core/WorldReadiness38.cs
++++ b/launcher/Emilyfn.Core/WorldReadiness38.cs
+@@ -8,7 +8,8 @@
+         int DefaultObjects,List<uint> InstanceSlots,int OmittedInstances,
+         List<CaptureReflectionExporter38.Property> DeclaredProperties,
+         List<CaptureFunctionMetadata38.Function> DeclaredFunctions,int OmittedFunctions);
+-    public sealed record Report(bool GameplayReady,string Scope,int UnreadableHeaders,List<ClassInventory> Classes);
++    public sealed record Report(bool GameplayReady,string Scope,int UnreadableHeaders,List<ClassInventory> Classes)
++    { public WorldLinks38.Report? WorldLinks { get; init; } }
+     private static readonly string[] Targets = {
+         "/Script/Engine.World", "/Script/Engine.GameInstance", "/Script/FortniteGame.FortGameInstance",
+         "/Script/Engine.Engine", "/Script/FortniteGame.FortEngine",
+@@ -46,6 +47,6 @@
+                 Math.Max(0,instances[name].Count-16),reflection.Properties.Where(p=>p.Owner==name&&Fields.Contains(p.Name)).ToList(),
+                 functions.Take(48).ToList(),Math.Max(0,functions.Count-48)));
+         }
+-        return new(false,"Read-only exact-class inventory; derived classes are not counted. Instances may be inactive or pending destruction. Presence does not prove a playable world, active net driver or server readiness. No object pointers are exported and no world functions are called.",unreadable,result);
++        return new(false,"Read-only exact-class inventory; derived classes are not counted. Instances may be inactive or pending destruction. Presence does not prove a playable world, active net driver or server readiness. No object pointers are exported and no world functions are called.",unreadable,result) {WorldLinks=WorldLinks38.Inspect(read,reflection,metadata,instances["/Script/Engine.World"])};
+     }
+ }
+diff --git a/launcher/Emilyfn.SdkTests/Program.cs b/launcher/Emilyfn.SdkTests/Program.cs
+--- a/launcher/Emilyfn.SdkTests/Program.cs
++++ b/launcher/Emilyfn.SdkTests/Program.cs
+@@ -53,3 +53,5 @@
+ BoundedReadCacheChecks.Run();
+ 
+ WorldReadinessChecks.Run();
++
++WorldLinksChecks.Run();
+diff --git a/launcher/Emilyfn.SdkTests/WorldLinksChecks.cs b/launcher/Emilyfn.SdkTests/WorldLinksChecks.cs
+new file mode 100644
+--- /dev/null
++++ b/launcher/Emilyfn.SdkTests/WorldLinksChecks.cs
+@@ -0,0 +1,30 @@
++using Emilyfn.Core;
++static class WorldLinksChecks
++{
++    public static void Run()
++    {
++        const string world="/Script/Engine.World";
++        var values=new Dictionary<ulong,ulong> {
++            [0x2014]=1u^RuntimeObjectRegistry38.IndexMask,[0x2018]=0x1000,[0x2010]=0,
++            [0x2080]=0x3000,[0x3014]=2u^RuntimeObjectRegistry38.IndexMask,[0x3018]=0x1100,[0x3010]=0
++        };
++        byte[] Read(ulong a,int n)=>n==4?BitConverter.GetBytes((uint)values[a]):BitConverter.GetBytes(values[a]);
++        var reflection=new CaptureReflectionExporter38.Observation(new(),new(){new(world,"PersistentLevel","ObjectProperty",0x80,8,1)},new(),0,0,
++            new(){new(0x1000,world,"Class"),new(0x1100,"/Script/Engine.Level","Class")})
++            {Registry=new(3,0,new(){new(1,0x2000),new(2,0x3000)},new())};
++        var metadata=new CaptureFunctionMetadata38.Observation(new(){new(world,0x100)},new(),new());
++        WorldLinks38.Link Link()=>WorldLinks38.Inspect(Read,reflection,metadata,new uint[]{1}).Worlds[0].Links[0];
++        void Check(bool b){if(!b)throw new Exception("World-link validation failed");}
++        Check(Link().Status=="Registered object"&&Link().TargetSlot==2&&Link().TargetClass=="/Script/Engine.Level");
++        values[0x2080]=0;Check(Link().Status=="Null");
++        values[0x2080]=0xdead;Check(Link().TargetSlot is null&&Link().Status.StartsWith("Non-null"));
++        values[0x2080]=0x3000;values[0x3014]=3u^RuntimeObjectRegistry38.IndexMask;Check(Link().Status=="Target identity changed");
++        values[0x3014]=2u^RuntimeObjectRegistry38.IndexMask;values[0x2018]=0x1100;Check(Link().Status.StartsWith("World identity"));values[0x2018]=0x1000;
++        metadata.OwnerSizes.Clear();Check(Link().Offset is null);
++        metadata.OwnerSizes.Add(new(world,0x80));Check(Link().Offset is null);
++        metadata.OwnerSizes.Clear();metadata.OwnerSizes.Add(new(world,0x100));
++        var capped=WorldLinks38.Inspect(Read,reflection,metadata,Enumerable.Repeat(1u,20).ToList());Check(capped.Worlds.Count==16&&capped.OmittedWorlds==4);
++        var failed=WorldLinks38.Inspect((a,n)=>throw new InvalidDataException(),reflection,metadata,new uint[]{1});Check(failed.Worlds[0].Links[0].Status=="Unreadable or changed memory");
++        Console.WriteLine("World-link checks passed: registered/null/unregistered targets, stale identities, layout bounds, bounded reports and unreadable memory.");
++    }
++}

@@ -1,0 +1,322 @@
+--- a/launcher/native/ThreadProbe/Probe.cpp
++++ b/launcher/native/ThreadProbe/Probe.cpp
+@@ -3,6 +3,7 @@
+ #include "Protocol.h"
+ #include "Registry38.h"
+ #include "ThreadContext38.h"
++#include "UrlLifecycle38.h"
+ #include <intrin.h>
+ #include <cstring>
+ #include <cwchar>
+@@ -92,13 +93,45 @@
+         return 0;
+     } __except(EXCEPTION_EXECUTE_HANDLER) { return GetExceptionCode(); }
+ }
++DWORD ConstructUrl(std::uint64_t image,void* storage,bool& same) {
++    __try {
++        using Construct=void*(*)(void*,const wchar_t*);
++        same=reinterpret_cast<Construct>(image+0xb2fc82)(storage,nullptr)==storage;
++        return 0;
++    } __except(EXCEPTION_EXECUTE_HANDLER) {return GetExceptionCode();}
++}
++DWORD DestroyUrl(std::uint64_t image,void* storage) {
++    __try {
++        using Destroy=void(*)(void*);
++        reinterpret_cast<Destroy>(image+0x1b609fa)(storage);return 0;
++    } __except(EXCEPTION_EXECUTE_HANDLER) {return GetExceptionCode();}
++}
++void TestUrl(Shared* p) {
++    p->urlStatus=2; // prerequisites rejected; no lifecycle calls
++    CaptureThreadContext(p);
++    if(p->status!=4 || p->threadContextStatus!=5 || p->rawThreadContext!=2 || GetTickCount64()>p->deadline) return;
++    p->urlStatus=1;
++    if(!Bytes(p->image+0xb2fc82,"\x41\x57\x41\x56\x56\x57\x53\x48\x83\xec\x70\x48\x89\xd7\x48\x89\xce\x48\x8b\x05\x66\x87\xed\x15\x48\x31\xe0\x48\x89\x44\x24\x68\x48\xc7\x01\x00\x00\x00\x00\x48\x63\x1d\x58\x80\x37\x16\x48\x8d\x41\x0c\x4c\x8b\x35\x45\x80\x37\x16\x89\x59\x08\x48\x85\xdb\x0f\x84\x7e\x01\x00\x00\x48\x89\x44\x24\x30\x89\x5c\x24\x28\x48\x89\x74\x24\x20\xb9\x02\x00\x00\x00\xba\x02\x00\x00\x00\x41\x89\xd8\x45\x31\xc9\xe8\xf1\x46\x20\x08\x48\x8b\x0e\x48\x01\xdb\x4c\x89\xf2\x49\x89\xd8\xe8\xb5\xac\x6e\x10\x48\xc7\x46\x10\x00\x00\x00\x00\x48\x63\x1d\x1e\x80\x37\x16\x48\x8d\x46\x1c\x4c\x8b\x35\x0b\x80\x37\x16\x89\x5e\x18\x48\x85\xdb\x0f\x84\x2f\x01\x00\x00\x4c\x8d\x7e\x10\x48\x89\x44\x24\x30\x89\x5c\x24\x28\x4c\x89\x7c\x24\x20\xb9\x02\x00\x00\x00\xba\x02\x00\x00\x00\x41\x89\xd8\x45\x31\xc9\xe8\x93\x46\x20\x08\x49\x8b\x0f\x48\x01\xdb\x4c\x89\xf2\x49\x89\xd8\xe8\x57\xac\x6e\x10\x8b\x05\xf1\x7f\x37\x16\x89\x46\x20\xc7\x46\x24\x01\x00\x00\x00\x0f\x57\xc0\x0f\x11\x46\x28\x0f\x11\x46\x38\x0f\x11\x46\x48\x48\xc7\x46\x58\x00\x00\x00\x00\x48\x63\x1d\xb1\x7f\x37\x16\x48\x8d\x46\x64\x4c\x8b\x35\x9e\x7f\x37\x16\x89\x5e\x60\x48\x85\xdb\x0f\x84\xbd\x00\x00\x00\x48\x8d\x4e\x58\x48\x89\x44\x24\x30\x89\x5c\x24\x28\x48\x89\x4c\x24\x20\xb9\x02\x00\x00\x00\xba\x02\x00\x00\x00\x41\x89\xd8\x45\x31\xc9\xe8\x16\x46\x20\x08\x48\x8b\x4e\x58\x48\x01\xdb\x4c\x89\xf2\x49\x89\xd8\xe8\xd9\xab\x6e\x10\x48\x8d\x5e\x28\x48\x85\xff\x0f\x85\x82\x00\x00\x00\x48\x8d\x7c\x24\x48\x48\x89\xf9\x31\xd2\xe8\x39\x01\x00\x00\x48\x39\xfb\x0f\x84\x9d\x00\x00\x00\x48\x8b\x0b\x48\x85\xc9\x0f\x85\xa9\x00\x00\x00\x48\x8b\x44\x24\x48\x48\x89\x46\x28\x8b\x44\x24\x50\x89\x46\x30\x8b\x44\x24\x54\x89\x46\x34\x48\x8b\x4c\x24\x68\x48\x31\xe1\x48\x3b\x0d\xd2\x85\xed\x15\x75\x0f\x48\x89\xf0\x48\x83\xc4\x70\x5b\x5f\x5e\x41\x5e\x41\x5f\xc3\xe8\xac\x4e\xaa\x08\xcc\xc7\x00\x00\x00\x00\x00\xe9\xab\xfe\xff\xff\xc7\x00\x00\x00\x00\x00\xe9\xfe\xfe\xff\xff\xc7\x00\x00\x00\x00\x00\xe9\x71\xff\xff\xff\x4c\x8d\x74\x24\x58\x49\x89\x3e\x48\x89\xf9\xff\x15\xb1\xff\xd1\x15\x41\x89\x46\x08\x4c\x89\xf1\x31\xd2\x45\x31\xc0\xe8\xf6\xe9\x4a\x08\x84\xc0\x74\x2f\x48\x89\xd9\x48\x89\xfa\xe8\xc3\x0c\x83\x08\xeb\x86\x48\x8b\x4c\x24\x48\x48\x85\xc9\x0f\x84\x78\xff\xff\xff\xe8\xb0\x51\x1f\x08\xe9\x6e\xff\xff\xff\xe8\xa6\x51\x1f\x08\xe9\x4d\xff\xff\xff\x4c\x8d\x74\x24\x38\x4c\x89\xf1\x48\x89\xfa\xe8\xf9\xb9\x67\x08\x48\x8d\x7c\x24\x48\x48\x89\xf9\x4c\x89\xf2\x41\xb0\x01\xe8\xae\x8d\x60\xff\x48\x39\xfb\x74\x37\x48\x8b\x0b\x48\x85\xc9\x74\x05\xe8\x6c\x51\x1f\x08\x48\x8b\x44\x24\x48\x48\x89\x46\x28\x31\xc0\x48\x89\x44\x24\x48\x8b\x4c\x24\x50\x89\x4e\x30\x8b\x4c\x24\x54\x89\x4e\x34\x48\x89\x44\x24\x50\x48\x8b\x4c\x24\x38\xeb\x84\x48\x8b\x4c\x24\x48\x48\x85\xc9\x74\xef\xe8\x33\x51\x1f\x08\xeb\xe8") || !Bytes(p->image+0x1b609fa,"\x56\x48\x83\xec\x20\x48\x89\xce\x48\x8b\x49\x58\x48\x85\xc9\x75\x55\x8b\x56\x50\x48\x8b\x4e\x48\xe8\xd8\xf5\x1c\x07\x48\x8b\x4e\x48\x48\x85\xc9\x75\x39\x48\x8b\x4e\x38\x48\x85\xc9\x75\x3e\x48\x8b\x4e\x28\x48\x85\xc9\x74\x05\xe8\x25\x46\x1c\x07\x48\x8b\x4e\x10\x48\x85\xc9\x75\x2e\x48\x8b\x0e\x48\x85\xc9\x74\x0a\x48\x83\xc4\x20\x5e\xe9\x0a\x46\x1c\x07\x90\x48\x83\xc4\x20\x5e\xc3\xe8\xfe\x45\x1c\x07\xeb\xc0\xe8\xf7\x45\x1c\x07\xeb\xa4\xe8\xf0\x45\x1c\x07\xeb\xbb\xe8\xe9\x45\x1c\x07\xeb\xcb")) return;
++    alignas(16) unsigned char storage[0x68]{};
++    p->urlStatus=3; // in progress
++    const auto outcome=EmilyfnUrl38::Run([&](bool& same) {
++        p->urlConstructCalls=1;
++        auto error=ConstructUrl(p->image,storage,same);
++        if(!error&&same) {
++            std::memcpy(&p->urlValidity,storage+0x24,4);
++            std::memcpy(&p->urlPort,storage+0x20,4);
++        }
++        return error;
++    },[&]() {p->urlDestroyCalls=1;return DestroyUrl(p->image,storage);});
++    p->urlException=outcome.exception;p->urlStatus=outcome.status;
++}
+ extern "C" __declspec(dllexport) LRESULT CALLBACK EmilyfnThreadProbe(int code, WPARAM remove, LPARAM parameter) {
+     if (code == HC_ACTION && remove == PM_REMOVE && parameter) {
+         const auto msg = reinterpret_cast<const MSG*>(parameter);
+         const auto message = RegisterWindowMessageW(MessageName);
+         if (message && msg->message == message && msg->wParam) {
+             wchar_t name[128]{};
+-            swprintf_s(name, L"Local\\Emilyfn-dispatch-v3-%lu-%lu-%016llx", GetCurrentProcessId(), GetCurrentThreadId(), static_cast<unsigned long long>(msg->wParam));
++            swprintf_s(name, L"Local\\Emilyfn-dispatch-v4-%lu-%lu-%016llx", GetCurrentProcessId(), GetCurrentThreadId(), static_cast<unsigned long long>(msg->wParam));
+             const auto mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, name);
+             if (mapping) {
+                 const auto p = static_cast<Shared*>(MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, MappingBytes));
+@@ -124,6 +157,7 @@
+                                 p->status = p->exception ? 5 : p->returned == p->expected ? 4 : 6;
+                             }
+                         }
++                        if(p->urlRequested==1) TestUrl(p);
+                         InterlockedExchange(&p->state, 3);
+                     }
+                     UnmapViewOfFile(p);
+--- a/launcher/native/ThreadProbe/Protocol.h
++++ b/launcher/native/ThreadProbe/Protocol.h
+@@ -4,8 +4,8 @@
+ #include <cstddef>
+ namespace EmilyfnProbe {
+ inline constexpr std::uint32_t Magic = 0xef380003;
+-inline constexpr std::uint32_t ProtocolVersion = 3, MaxFrames = 48, MappingBytes = 1024;
+-inline constexpr wchar_t MessageName[] = L"Emilyfn.DispatchProbe.v3";
++inline constexpr std::uint32_t ProtocolVersion = 4, MaxFrames = 48, MappingBytes = 1024;
++inline constexpr wchar_t MessageName[] = L"Emilyfn.DispatchProbe.v4";
+ struct Shared {
+     std::uint32_t magic, version;
+     volatile LONG state; // 1 armed, 2 executing, 3 complete, 4 cancelled
+@@ -21,8 +21,9 @@
+     std::uint64_t gameFrameRvas[MaxFrames];
+     std::uint32_t stackException, stackReserved;
+     std::uint32_t threadContextStatus, tlsIndex, rawThreadContext, threadContextReserved;
++    std::uint32_t urlRequested,urlStatus,urlValidity,urlPort,urlConstructCalls,urlDestroyCalls,urlException,urlReserved;
+ };
+-static_assert(sizeof(Shared) == 568);
++static_assert(sizeof(Shared) == 600);
+ static_assert(offsetof(Shared, nonce) == 24 && offsetof(Shared, calls) == 112 && offsetof(Shared, status) == 144);
+ static_assert(offsetof(Shared, gameFrameCount) == 152 && offsetof(Shared, gameFrameRvas) == 160 && offsetof(Shared, stackException) == 544);
+ // status: 1 callback observed, 2 target absent, 3 profile rejected,
+@@ -30,3 +31,5 @@
+ }
+ 
+ static_assert(offsetof(EmilyfnProbe::Shared, threadContextStatus) == 552);
++
++static_assert(offsetof(EmilyfnProbe::Shared, urlRequested) == 568);
+--- a/launcher/Emilyfn.Core/GameThreadProbe38.cs
++++ b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+@@ -14,20 +14,26 @@
+     public sealed record Result(string File,string Message);
+     internal sealed record CallbackResult(int State,int Status,int CallbackProcessId,int CallbackThreadId,bool? FunctionCallsAttempted,
+         ulong Returned,ulong Expected,uint ExceptionCode,bool HookRemoved,string? Failure,
+-        int CapturedStackFrames,List<string> GameFrameRvas,bool StackCapacityReached,uint StackCaptureException,ThreadContextObservation ThreadContext);
++        int CapturedStackFrames,List<string> GameFrameRvas,bool StackCapacityReached,uint StackCaptureException,ThreadContextObservation ThreadContext,UrlLifecycleObservation UrlLifecycle);
+     internal sealed record ThreadContextObservation(uint Status,uint? TlsIndex,uint? RawValue)
+     {
+         public string StatusText=>Status switch {0=>"Not observed",1=>"Instruction profile rejected",2=>"TLS block unavailable",3=>"TLS index outside diagnostic bound",4=>"Required memory unreadable",5=>"Raw value observed",_=>"Unknown status"};
+         public bool EngineTaskTagVerified=>false;
+         public string Scope=>"Read-only raw TLS observation at callback entry; enum meaning and startup suitability are unverified. No engine state was changed.";
+     }
++    internal sealed record UrlLifecycleObservation(bool Requested,uint Status,uint ConstructCalls,uint DestroyCalls,uint ExceptionCode,uint? Validity,uint? Port)
++    {
++        public string StatusText=>Status switch {0=>"Not run",1=>"URL instruction profile rejected",2=>"Dispatch or thread prerequisites rejected",3=>"Still running",4=>"Constructor exception; cleanup not attempted",5=>"Destructor exception; cleanup uncertain",6=>"Unexpected constructor return; cleanup uncertain",7=>"Construction and destruction returned",_=>"Unknown status"};
++        public bool NetworkingCallsAttempted=>false;
++    }
+     private static readonly System.Collections.Concurrent.ConcurrentDictionary<(int,DateTime),byte> InFlight=new();
+-    public static Task<Result> RunAsync(CaptureTarget target,string destination,IProgress<string>? progress=null)=>Task.Run(()=>Run(target,destination,progress));
+-    private static Result Run(CaptureTarget target,string destination,IProgress<string>? progress)
++    public static Task<Result> RunAsync(CaptureTarget target,string destination,IProgress<string>? progress=null)=>Task.Run(()=>Run(target,destination,progress,false));
++    public static Task<Result> RunUrlLifecycleAsync(CaptureTarget target,string destination,IProgress<string>? progress=null)=>Task.Run(()=>Run(target,destination,progress,true));
++    private static Result Run(CaptureTarget target,string destination,IProgress<string>? progress,bool urlTest)
+     {
+         if(!OperatingSystem.IsWindows()||!Environment.Is64BitProcess)throw new PlatformNotSupportedException("The game-thread test requires Windows x64.");
+         string folder=Path.Combine(Path.GetFullPath(destination),"Emilyfn-dispatch-test-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
+-        string file=Path.Combine(folder,"dispatch-test.json");string? failure=null;LiveBindingProbe38.Evidence? evidence=null;CallbackResult? callback=null;
++        string file=Path.Combine(folder,urlTest?"url-lifecycle-test.json":"dispatch-test.json");string? failure=null;LiveBindingProbe38.Evidence? evidence=null;CallbackResult? callback=null;
+         string? imageHash=null;int? threadId=null;bool stable=false,alive=false;
+         EarlyStartupPatcher38.State? startupPatcher=null;
+         CaptureReflectionExporter38.IdentityDiagnostics? objectIdentity=null;
+@@ -74,8 +80,8 @@
+             if(expected.Length!=64||!string.Equals(Convert.ToHexString(SHA256.HashData(library)),expected,StringComparison.OrdinalIgnoreCase))
+                 throw new InvalidDataException("The diagnostic DLL does not match this package. Extract a fresh complete launcher ZIP.");
+             progress?.Report(inspected.Target is null?"Testing entry into GameThread; no initialized GetOwner target is available…":"Testing one GetOwner call on GameThread…");
+-            callback=RunCallback(process,threadId.Value,dll,imageBase,inspected.Target,30000);
+-            if(callback.State==2||!callback.HookRemoved)InFlight.TryAdd((target.Id,target.StartedUtc),0);
++            callback=RunCallback(process,threadId.Value,dll,imageBase,inspected.Target,30000,urlTest);
++            if(callback.State==2||!callback.HookRemoved||callback.UrlLifecycle.Status is 4 or 5 or 6)InFlight.TryAdd((target.Id,target.StartedUtc),0);
+             alive=!process.HasExited;
+             failure=callback.Failure ?? (callback.Status switch {
+                 3=>"GameThread was reached, but the native target/profile no longer matched.",
+@@ -85,6 +91,7 @@
+                 8=>"The request expired before the function call.",
+                 _=>null
+             });
++            if(urlTest&&callback.UrlLifecycle.Status!=7)failure??="URL lifecycle: "+callback.UrlLifecycle.StatusText;
+             if(!alive)failure??="The game exited during the probe.";
+         }
+         catch(Exception error) when(error is InvalidDataException or Win32Exception or InvalidOperationException or IOException or UnauthorizedAccessException or OverflowException or ArgumentException or TimeoutException)
+@@ -93,9 +100,11 @@
+         bool callPassed=observed&&alive&&callback is {Status:4,FunctionCallsAttempted:true,HookRemoved:true};
+         string message=callPassed?"The guarded GetOwner call passed on GameThread.":observed&&callback?.Status==2?
+             "GameThread callback passed. GetOwner was skipped because its default component is not initialized. The callback stack is included in dispatch-test.json.":"The game-thread/dispatch test did not pass; see dispatch-test.json.";
+-        File.WriteAllText(file,JsonSerializer.Serialize(new{FormatVersion=2,Test="38.00 game-thread and guarded GetOwner dispatch",Utc=DateTime.UtcNow,ProcessId=target.Id,GameThreadId=threadId,
++        bool urlPassed=urlTest&&callPassed&&callback?.UrlLifecycle is {Status:7,ConstructCalls:1,DestroyCalls:1,Validity:1};
++        if(urlTest)message=urlPassed?"The temporary URL was constructed and destroyed successfully. Networking was not started.":"The URL lifecycle test did not pass; see url-lifecycle-test.json.";
++        File.WriteAllText(file,JsonSerializer.Serialize(new{FormatVersion=2,Test=urlTest?"38.00 temporary default URL lifecycle":"38.00 game-thread and guarded GetOwner dispatch",Utc=DateTime.UtcNow,ProcessId=target.Id,GameThreadId=threadId,
+             ExecutableSha256=imageHash,StableBoundaryCounters=stable,GameAliveAfterProbe=callback is null?(bool?)null:alive,GameThreadCallbackObserved=observed,EngineTaskTagVerified=false,
+-            FunctionCallsAttempted=callback is null?(bool?)false:callback.FunctionCallsAttempted,ControlledGetOwnerPassed=callPassed,GameplayReady=false,
++            FunctionCallsAttempted=callback is null?(bool?)false:callback.FunctionCallsAttempted,ControlledGetOwnerPassed=callPassed,UrlLifecyclePassed=urlPassed,GameplayReady=false,
+             Failure=failure,Message=message,StartupPatcher=startupPatcher,BindingReadAttempts=readAttempts,ReadCache=cache?.Snapshot(),ObjectIdentity=objectIdentity,Evidence=evidence,Callback=callback,
+             Note="Thread identity uses a unique Windows GameThread description and matching process/thread IDs. GameFrameRvas records the callback-delivery stack, not a GetOwner execution trace. It may omit callers across native callback boundaries. This does not validate Unreal task tags or general gameplay dispatch. No arbitrary function is exposed."},new JsonSerializerOptions{WriteIndented=true}));
+         return new(file,message);
+@@ -116,16 +125,17 @@
+         }
+         return found;
+     }
+-    internal static unsafe CallbackResult RunCallback(Process process,int tid,string dll,ulong image,DispatchTarget38.Target? target,int timeoutMs)
++    internal static unsafe CallbackResult RunCallback(Process process,int tid,string dll,ulong image,DispatchTarget38.Target? target,int timeoutMs,bool urlTest=false)
+     {
+         if(!OperatingSystem.IsWindows()||!Environment.Is64BitProcess||tid<=0||process.HasExited)throw new InvalidOperationException("Invalid callback target.");
+         using var thread=OpenThread(0x0800,false,(uint)tid);
+         if(thread.IsInvalid||GetProcessIdOfThread(thread)!=(uint)process.Id)throw new InvalidOperationException("Thread no longer belongs to the selected process.");
+         ulong nonce=BinaryPrimitives.ReadUInt64LittleEndian(RandomNumberGenerator.GetBytes(8));if(nonce==0)nonce=1;
+-        string name=$"Local\\Emilyfn-dispatch-v3-{process.Id}-{tid}-{nonce:x16}";
++        string name=$"Local\\Emilyfn-dispatch-v4-{process.Id}-{tid}-{nonce:x16}";
+         using var mapping=MemoryMappedFile.CreateNew(name,1024);using var view=mapping.CreateViewAccessor(0,1024);
+-        view.Write(0,0xef380003u);view.Write(4,3u);view.Write(12,process.Id);view.Write(16,tid);
++        view.Write(0,0xef380003u);view.Write(4,4u);view.Write(12,process.Id);view.Write(16,tid);
+         view.Write(24,nonce);view.Write(32,process.StartTime.ToUniversalTime().ToFileTimeUtc());view.Write(40,GetTickCount64()+(ulong)timeoutMs);view.Write(48,image);
++        view.Write(568,urlTest?1u:0u);
+         view.Write(124,checked((uint)process.MainModule!.ModuleMemorySize));
+         if(target is not null)
+         {
+@@ -137,7 +147,7 @@
+         try
+         {
+             library=NativeLibrary.Load(Path.GetFullPath(dll));var entry=NativeLibrary.GetExport(library,"EmilyfnThreadProbe");
+-            uint message=RegisterWindowMessageW("Emilyfn.DispatchProbe.v3");if(message==0)throw new Win32Exception(Marshal.GetLastWin32Error());
++            uint message=RegisterWindowMessageW("Emilyfn.DispatchProbe.v4");if(message==0)throw new Win32Exception(Marshal.GetLastWin32Error());
+             hook=SetWindowsHookExW(3,entry,library,(uint)tid);if(hook==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error(),"Windows could not install the thread-scoped diagnostic callback.");
+             Interlocked.Exchange(ref *(int*)(ptr+8),1);
+             if(!PostThreadMessageW((uint)tid,message,(nuint)nonce,IntPtr.Zero))throw new Win32Exception(Marshal.GetLastWin32Error(),"The game thread has no accessible message queue.");
+@@ -174,7 +184,11 @@
+                 view.ReadUInt64(128),view.ReadUInt64(136),view.ReadUInt32(148),removed,failure,captured,frames,captured==48,stackException,
+                 new ThreadContextObservation(state==3?view.ReadUInt32(552):0,
+                     state==3&&view.ReadUInt32(552)>=2?view.ReadUInt32(556):null,
+-                    state==3&&view.ReadUInt32(552)==5?view.ReadUInt32(560):null));
++                    state==3&&view.ReadUInt32(552)==5?view.ReadUInt32(560):null),
++                new UrlLifecycleObservation(urlTest,state==3?view.ReadUInt32(572):urlTest&&state==2?3u:0u,
++                    view.ReadUInt32(584),view.ReadUInt32(588),state==3?view.ReadUInt32(592):0,
++                    state==3&&view.ReadUInt32(572)==7?view.ReadUInt32(576):null,
++                    state==3&&view.ReadUInt32(572)==7?view.ReadUInt32(580):null));
+             // The remote hook mapping has its own handle. A callback already in flight retains it.
+             view.SafeMemoryMappedViewHandle.ReleasePointer();if(library!=IntPtr.Zero&&removed)NativeLibrary.Free(library);
+         }
+--- a/launcher/Emilyfn.App/MemoryCaptureWindow.cs
++++ b/launcher/Emilyfn.App/MemoryCaptureWindow.cs
+@@ -20,6 +20,7 @@
+     private readonly ComboBox captureDelay = new() { ItemsSource = new[] { 15, 30, 60, 120 }, SelectedItem = 30, Width = 100, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 6, 0, 12) };
+     private readonly Button live = new() { Content = "Test 38.00 live bindings", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 12, 0, 0) };
+     private readonly Button dispatch = new() { Content = "Test 38.00 game-thread dispatch", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 12, 0, 0) };
++    private readonly Button urlLifecycle = new() { Content = "Test 38.00 URL lifecycle", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 12, 0, 0) };
+     private bool busy;
+ 
+     public MemoryCaptureWindow(Func<string, Task> exportLogs, string logsDirectory)
+@@ -49,6 +50,8 @@
+         panel.Children.Add(new TextBlock { Text = "Reads the selected 38.00 process and saves a small live-test.json. It does not call game functions or create a memory dump.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
+         panel.Children.Add(dispatch);
+         panel.Children.Add(new TextBlock { Text = "Loads the diagnostic DLL to test a GameThread callback. Calls GetOwner once only when the matching default component and bindings validate. Saves a small dispatch-test.json with the callback stack and startup-patcher state.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
++        panel.Children.Add(urlLifecycle);
++        panel.Children.Add(new TextBlock { Text = "Experimental: constructs and destroys one temporary URL after dispatch checks pass. Saves url-lifecycle-test.json. Does not start networking.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
+         panel.Children.Add(status);
+         panel.Children.Add(new TextBlock { Text = "Full memory captures", FontSize = 18, Margin = new Thickness(0, 20, 0, 0) });
+         panel.Children.Add(new TextBlock { Text = "These captures may take several GB and contain session credentials. Keep them private. Nothing is uploaded automatically. Keep the complete game installation in place.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
+@@ -64,6 +67,7 @@
+         launch.Click += async (_, _) => await Launch();
+         refresh.Click += (_, _) => Refresh();
+         capture.Click += async (_, _) => await Capture();
++        urlLifecycle.Click += async (_, _) => await DispatchTest(true);
+         Closing += (_, e) => { if (busy) { e.Cancel = true; status.Text = "Please wait for the current operation to finish before closing this window."; } };
+         Refresh();
+     }
+@@ -71,7 +75,7 @@
+     {
+         busy = value;
+         diagnosticLaunch.IsEnabled = refresh.IsEnabled = targets.IsEnabled = launch.IsEnabled = captureDelay.IsEnabled = !value;
+-        dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = !value && targets.Items.Count > 0;
++        urlLifecycle.IsEnabled = dispatch.IsEnabled = live.IsEnabled = capture.IsEnabled = !value && targets.Items.Count > 0;
+     }
+     private async Task LaunchDiagnostic()
+     {
+@@ -98,10 +102,10 @@
+         {
+             var found = GameMemoryCapture.FindTargets(); targets.ItemsSource = found;
+             targets.SelectedIndex = found.Count == 1 ? 0 : -1;
+-            capture.IsEnabled = dispatch.IsEnabled = live.IsEnabled = found.Count > 0;
++            capture.IsEnabled = urlLifecycle.IsEnabled = dispatch.IsEnabled = live.IsEnabled = found.Count > 0;
+             status.Text = found.Count == 0 ? "No accessible Fortnite game found. Start the game first, then refresh." : "Choose the client or host PID you want to capture.";
+         }
+-        catch (Exception error) { status.Text = error.Message; capture.IsEnabled = dispatch.IsEnabled = live.IsEnabled = false; }
++        catch (Exception error) { status.Text = error.Message; capture.IsEnabled = urlLifecycle.IsEnabled = dispatch.IsEnabled = live.IsEnabled = false; }
+     }
+     private async Task Launch()
+     {
+@@ -141,15 +145,16 @@
+         catch (Exception error) { status.Text = error.Message; }
+         finally { SetBusy(false); }
+     }
+-    private async Task DispatchTest()
++    private async Task DispatchTest(bool urlTest=false)
+     {
+         if (targets.SelectedItem is not CaptureTarget target) { status.Text = "Select a game process first."; return; }
+-        var dialog = new OpenFolderDialog { Title = "Choose where to save dispatch-test.json" };
++        var dialog = new OpenFolderDialog { Title = urlTest?"Choose where to save url-lifecycle-test.json":"Choose where to save dispatch-test.json" };
+         if (dialog.ShowDialog(this) != true) return;
+         SetBusy(true);
+         try
+         {
+-            var result = await GameThreadProbe38.RunAsync(target, dialog.FolderName, new Progress<string>(s => status.Text = s));
++            var progress = new Progress<string>(s => status.Text = s);
++            var result = urlTest?await GameThreadProbe38.RunUrlLifecycleAsync(target, dialog.FolderName, progress):await GameThreadProbe38.RunAsync(target, dialog.FolderName, progress);
+             status.Text = result.Message + " Saved to " + result.File;
+             try { Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { System.IO.Path.GetDirectoryName(result.File)! } }); } catch { }
+         }
+--- a/launcher/Emilyfn.ThreadProbeTests/Program.cs
++++ b/launcher/Emilyfn.ThreadProbeTests/Program.cs
+@@ -36,6 +36,8 @@
+     var invalid=new DispatchTarget38.Target(1,2,3,4,5,6);
+     result=GameThreadProbe38.RunCallback(child.Process,child.Tid,dll,image,invalid,5000);
+     Check(result.State==3&&result.Status==3&&result.FunctionCallsAttempted==false&&result.HookRemoved,"Invalid call target did not fail closed");
++    result=GameThreadProbe38.RunCallback(child.Process,child.Tid,dll,image,invalid,5000,true);
++    Check(result.UrlLifecycle.Status==2&&result.UrlLifecycle.ConstructCalls==0&&result.UrlLifecycle.DestroyCalls==0,"URL lifecycle bypassed dispatch/profile guards");
+     var noPump=await Start("--no-pump");
+     result=GameThreadProbe38.RunCallback(noPump.Process,noPump.Tid,dll,0,null,500);
+     Check(result.State==4&&result.FunctionCallsAttempted==false&&result.HookRemoved&&result.Failure is not null,"Unpumped queue did not time out and cancel");
+--- /dev/null
++++ b/launcher/native/ThreadProbe/UrlLifecycle38.h
+@@ -0,0 +1,15 @@
++#pragma once
++#include <cstdint>
++namespace EmilyfnUrl38 {
++// Fixed diagnostic sequence. No networking or parsing, no retry after exceptions.
++// construct returns an exception code; completed construction must return the input address.
++struct Outcome {std::uint32_t status=0,constructCalls=0,destroyCalls=0,exception=0;};
++template<class Construct,class Destroy> Outcome Run(Construct construct,Destroy destroy) {
++    Outcome o;o.constructCalls=1;bool same=false;
++    o.exception=construct(same);
++    if(o.exception) {o.status=4;return o;}
++    if(!same) {o.status=6;return o;}
++    o.destroyCalls=1;o.exception=destroy();
++    o.status=o.exception?5:7;return o;
++}
++}
+--- /dev/null
++++ b/launcher/native/ThreadProbe/UrlLifecycleTests.cpp
+@@ -0,0 +1,17 @@
++#include "UrlLifecycle38.h"
++#include <stdexcept>
++#include <iostream>
++int main() {
++    auto check=[](bool value){if(!value)throw std::runtime_error("URL lifecycle sequence failed");};
++    int stage=0;
++    auto result=EmilyfnUrl38::Run([&](bool& same){check(stage++==0);same=true;return 0u;},[&](){check(stage++==1);return 0u;});
++    check(result.status==7&&stage==2&&result.constructCalls==1&&result.destroyCalls==1);
++    stage=0;
++    result=EmilyfnUrl38::Run([](bool& same){same=false;return 0xc0000005u;},[&](){++stage;return 0u;});
++    check(result.status==4&&result.exception==0xc0000005u&&stage==0&&result.destroyCalls==0);
++    result=EmilyfnUrl38::Run([](bool& same){same=false;return 0u;},[&](){++stage;return 0u;});
++    check(result.status==6&&stage==0&&result.destroyCalls==0);
++    result=EmilyfnUrl38::Run([](bool& same){same=true;return 0u;},[&](){++stage;return 0xc0000005u;});
++    check(result.status==5&&result.exception==0xc0000005u&&stage==1&&result.destroyCalls==1);
++    std::cout<<"URL LIFECYCLE: order, partial construction, wrong return and destructor failure passed\n";
++}

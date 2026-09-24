@@ -1,0 +1,220 @@
+diff --git a/launcher/Emilyfn.App/MemoryCaptureWindow.cs b/launcher/Emilyfn.App/MemoryCaptureWindow.cs
+--- a/launcher/Emilyfn.App/MemoryCaptureWindow.cs
++++ b/launcher/Emilyfn.App/MemoryCaptureWindow.cs
+@@ -36,7 +36,7 @@
+         buttons.Children.Add(capture); buttons.Children.Add(refresh); buttons.Children.Add(launch); panel.Children.Add(buttons); panel.Children.Add(live);
+         panel.Children.Add(new TextBlock { Text = "Live binding test reads the selected 38.00 process and saves a small live-test.json. It does not call game functions or create a memory dump.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
+         panel.Children.Add(dispatch);
+-        panel.Children.Add(new TextBlock { Text = "Loads the diagnostic DLL into the selected game to test a GameThread callback. Calls GetOwner once only when the matching default component and bindings validate. Saves dispatch-test.json.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
++        panel.Children.Add(new TextBlock { Text = "Loads the diagnostic DLL into the selected game to test a GameThread callback. Calls GetOwner once only when the matching default component and bindings validate. Saves a small dispatch-test.json with the game-thread callback stack; no full memory dump is needed.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) });
+         panel.Children.Add(status);
+         panel.Children.Add(new TextBlock { Text = "Startup capture saves memory at the initial Windows loader breakpoint, observes startup, then attempts a later capture if it stays open. Early memory may lack SDK objects. It does not enable gameplay or remove Epic/EAC startup requirements. Keep the complete game installation in place.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
+         Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+diff --git a/launcher/Emilyfn.Core/GameThreadProbe38.cs b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+--- a/launcher/Emilyfn.Core/GameThreadProbe38.cs
++++ b/launcher/Emilyfn.Core/GameThreadProbe38.cs
+@@ -13,7 +13,8 @@
+ {
+     public sealed record Result(string File,string Message);
+     internal sealed record CallbackResult(int State,int Status,int CallbackProcessId,int CallbackThreadId,bool? FunctionCallsAttempted,
+-        ulong Returned,ulong Expected,uint ExceptionCode,bool HookRemoved,string? Failure);
++        ulong Returned,ulong Expected,uint ExceptionCode,bool HookRemoved,string? Failure,
++        int CapturedStackFrames,List<string> GameFrameRvas,bool StackCapacityReached,uint StackCaptureException);
+     private static readonly System.Collections.Concurrent.ConcurrentDictionary<(int,DateTime),byte> InFlight=new();
+     public static Task<Result> RunAsync(CaptureTarget target,string destination,IProgress<string>? progress=null)=>Task.Run(()=>Run(target,destination,progress));
+     private static Result Run(CaptureTarget target,string destination,IProgress<string>? progress)
+@@ -95,12 +96,12 @@
+         bool observed=callback is {State:3} && callback.CallbackProcessId==target.Id&&callback.CallbackThreadId==threadId&&callback.Status is >=1 and <=6;
+         bool callPassed=observed&&alive&&callback is {Status:4,FunctionCallsAttempted:true,HookRemoved:true};
+         string message=callPassed?"The guarded GetOwner call passed on GameThread.":observed&&callback?.Status==2?
+-            "GameThread callback passed. GetOwner was skipped because its default component is not initialized.":"The game-thread/dispatch test did not pass; see dispatch-test.json.";
+-        File.WriteAllText(file,JsonSerializer.Serialize(new{FormatVersion=1,Test="38.00 game-thread and guarded GetOwner dispatch",Utc=DateTime.UtcNow,ProcessId=target.Id,GameThreadId=threadId,
++            "GameThread callback passed. GetOwner was skipped because its default component is not initialized. The callback stack is included in dispatch-test.json.":"The game-thread/dispatch test did not pass; see dispatch-test.json.";
++        File.WriteAllText(file,JsonSerializer.Serialize(new{FormatVersion=2,Test="38.00 game-thread and guarded GetOwner dispatch",Utc=DateTime.UtcNow,ProcessId=target.Id,GameThreadId=threadId,
+             ExecutableSha256=imageHash,StableBoundaryCounters=stable,GameAliveAfterProbe=alive,GameThreadCallbackObserved=observed,EngineTaskTagVerified=false,
+             FunctionCallsAttempted=callback is null?(bool?)false:callback.FunctionCallsAttempted,ControlledGetOwnerPassed=callPassed,GameplayReady=false,
+             Failure=failure,Message=message,Evidence=evidence,Callback=callback,
+-            Note="Thread identity uses a unique Windows GameThread description and matching process/thread IDs. This does not validate Unreal task tags or general gameplay dispatch. No arbitrary function is exposed."},new JsonSerializerOptions{WriteIndented=true}));
++            Note="Thread identity uses a unique Windows GameThread description and matching process/thread IDs. GameFrameRvas records the callback-delivery stack, not a GetOwner execution trace. It may omit callers across native callback boundaries. This does not validate Unreal task tags or general gameplay dispatch. No arbitrary function is exposed."},new JsonSerializerOptions{WriteIndented=true}));
+         return new(file,message);
+     }
+     internal static List<int> FindGameThreads(Process process)
+@@ -125,10 +126,11 @@
+         using var thread=OpenThread(0x0800,false,(uint)tid);
+         if(thread.IsInvalid||GetProcessIdOfThread(thread)!=(uint)process.Id)throw new InvalidOperationException("Thread no longer belongs to the selected process.");
+         ulong nonce=BinaryPrimitives.ReadUInt64LittleEndian(RandomNumberGenerator.GetBytes(8));if(nonce==0)nonce=1;
+-        string name=$"Local\\Emilyfn-dispatch-{process.Id}-{tid}-{nonce:x16}";
+-        using var mapping=MemoryMappedFile.CreateNew(name,256);using var view=mapping.CreateViewAccessor(0,256);
+-        view.Write(0,0xef380002u);view.Write(4,1u);view.Write(12,process.Id);view.Write(16,tid);
++        string name=$"Local\\Emilyfn-dispatch-v2-{process.Id}-{tid}-{nonce:x16}";
++        using var mapping=MemoryMappedFile.CreateNew(name,1024);using var view=mapping.CreateViewAccessor(0,1024);
++        view.Write(0,0xef380003u);view.Write(4,2u);view.Write(12,process.Id);view.Write(16,tid);
+         view.Write(24,nonce);view.Write(32,process.StartTime.ToUniversalTime().ToFileTimeUtc());view.Write(40,GetTickCount64()+(ulong)timeoutMs);view.Write(48,image);
++        view.Write(124,checked((uint)process.MainModule!.ModuleMemorySize));
+         if(target is not null)
+         {
+             view.Write(56,target.Class);view.Write(64,target.Object);view.Write(72,target.Function);view.Write(80,target.ObjectName);view.Write(84,target.ClassName);
+@@ -139,7 +141,7 @@
+         try
+         {
+             library=NativeLibrary.Load(Path.GetFullPath(dll));var entry=NativeLibrary.GetExport(library,"EmilyfnThreadProbe");
+-            uint message=RegisterWindowMessageW("Emilyfn.DispatchProbe.v1");if(message==0)throw new Win32Exception(Marshal.GetLastWin32Error());
++            uint message=RegisterWindowMessageW("Emilyfn.DispatchProbe.v2");if(message==0)throw new Win32Exception(Marshal.GetLastWin32Error());
+             hook=SetWindowsHookExW(3,entry,library,(uint)tid);if(hook==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error(),"Windows could not install the thread-scoped diagnostic callback.");
+             Interlocked.Exchange(ref *(int*)(ptr+8),1);
+             if(!PostThreadMessageW((uint)tid,message,(nuint)nonce,IntPtr.Zero))throw new Win32Exception(Marshal.GetLastWin32Error(),"The game thread has no accessible message queue.");
+@@ -156,8 +158,24 @@
+             if(hook!=IntPtr.Zero)removed=UnhookWindowsHookEx(hook);
+             if(!removed)failure="Windows failed to remove the diagnostic hook. Close this game instance before testing again.";
+             int state=Volatile.Read(ref *(int*)(ptr+8));int calls=view.ReadInt32(112);
++            var frames=new List<string>();int captured=0;uint stackException=0;
++            if(state==3)
++            {
++                uint count=view.ReadUInt32(152),total=view.ReadUInt32(156);stackException=view.ReadUInt32(544);
++                if(count>48 || total>48 || count>total)failure??="Invalid stack-frame count returned by diagnostic DLL.";
++                else
++                {
++                    captured=(int)total;uint size=view.ReadUInt32(124);
++                    for(uint i=0;i<count;i++)
++                    {
++                        ulong rva=view.ReadUInt64(160+i*8);
++                        if(rva>=size){frames.Clear();failure??="Diagnostic stack contains an out-of-image frame.";break;}
++                        frames.Add($"0x{rva:X}");
++                    }
++                }
++            }
+             result=new(state,view.ReadInt32(144),view.ReadInt32(120),view.ReadInt32(116),calls!=0?true:state==2?null:false,
+-                view.ReadUInt64(128),view.ReadUInt64(136),view.ReadUInt32(148),removed,failure);
++                view.ReadUInt64(128),view.ReadUInt64(136),view.ReadUInt32(148),removed,failure,captured,frames,captured==48,stackException);
+             // The remote hook mapping has its own handle. A callback already in flight retains it.
+             view.SafeMemoryMappedViewHandle.ReleasePointer();if(library!=IntPtr.Zero&&removed)NativeLibrary.Free(library);
+         }
+diff --git a/launcher/Emilyfn.ThreadProbeTests/Program.cs b/launcher/Emilyfn.ThreadProbeTests/Program.cs
+--- a/launcher/Emilyfn.ThreadProbeTests/Program.cs
++++ b/launcher/Emilyfn.ThreadProbeTests/Program.cs
+@@ -22,16 +22,23 @@
+         throw new Exception("Fixture GameThread was not discovered");
+     }
+     var child=await Start("");
+-    var result=GameThreadProbe38.RunCallback(child.Process,child.Tid,dll,0,null,5000);
++    ulong image=(ulong)child.Process.MainModule!.BaseAddress.ToInt64();
++    var result=GameThreadProbe38.RunCallback(child.Process,child.Tid,dll,image,null,5000);
+     Check(result.State==3&&result.Status==2,"Thread-scoped callback did not report missing target");
+     Check(result.CallbackProcessId==child.Process.Id&&result.CallbackThreadId==child.Tid,"Callback ran in the wrong process/thread");
+     Check(result.FunctionCallsAttempted==false&&result.HookRemoved,"No-target callback called a function or leaked a hook");
++    Check(result.StackCaptureException==0&&result.CapturedStackFrames>0&&result.CapturedStackFrames<=48,"Native callback stack capture failed");
++    Check(result.GameFrameRvas.Count>0,"Callback stack did not reach the synthetic game module");
++    foreach(var frame in result.GameFrameRvas)
++        Check(Convert.ToUInt64(frame[2..],16)<(ulong)child.Process.MainModule!.ModuleMemorySize,"Stack frame escaped the main module");
++    Console.WriteLine("CALLBACK STACK: "+string.Join(", ",result.GameFrameRvas));
+     var invalid=new DispatchTarget38.Target(1,2,3,4,5,6);
+-    result=GameThreadProbe38.RunCallback(child.Process,child.Tid,dll,0,invalid,5000);
++    result=GameThreadProbe38.RunCallback(child.Process,child.Tid,dll,image,invalid,5000);
+     Check(result.State==3&&result.Status==3&&result.FunctionCallsAttempted==false&&result.HookRemoved,"Invalid call target did not fail closed");
+     var noPump=await Start("--no-pump");
+     result=GameThreadProbe38.RunCallback(noPump.Process,noPump.Tid,dll,0,null,500);
+     Check(result.State==4&&result.FunctionCallsAttempted==false&&result.HookRemoved&&result.Failure is not null,"Unpumped queue did not time out and cancel");
++    Check(result.CapturedStackFrames==0&&result.GameFrameRvas.Count==0,"Cancelled callback fabricated a stack");
+     bool rejected=false;
+     try{GameThreadProbe38.RunCallback(child.Process,noPump.Tid,dll,0,null,500);}catch(InvalidOperationException){rejected=true;}
+     Check(rejected,"Another process's thread was accepted");
+diff --git a/launcher/native/ThreadProbe/Probe.cpp b/launcher/native/ThreadProbe/Probe.cpp
+--- a/launcher/native/ThreadProbe/Probe.cpp
++++ b/launcher/native/ThreadProbe/Probe.cpp
+@@ -57,6 +57,21 @@
+         Read(p.function + 0xbc, parameters) && (parameters ^ 0x8250) == 8 &&
+         Read(p.object + 0xa8, expected);
+ }
++DWORD CaptureGameFrames(Shared* p) {
++    // Capture the current callback stack; export only game-module RVAs, no stack contents.
++    __try {
++        void* frames[MaxFrames]{};
++        const auto count=CaptureStackBackTrace(0,MaxFrames,frames,nullptr);
++        p->totalFrameCount=count;
++        const auto image=reinterpret_cast<std::uint64_t>(GetModuleHandleW(nullptr));
++        if (p->image!=image || !p->imageSize || p->imageSize>0x20000000U) return ERROR_INVALID_DATA;
++        for (USHORT i=0;i<count;++i) {
++            const auto a=reinterpret_cast<std::uint64_t>(frames[i]);
++            if (a>=image && a-image<p->imageSize) p->gameFrameRvas[p->gameFrameCount++]=a-image;
++        }
++        return 0;
++    } __except(EXCEPTION_EXECUTE_HANDLER) { return GetExceptionCode(); }
++}
+ DWORD Call(Shared* p) {
+     // Only the fixed read-only GetOwner test can reach this point.
+     __try {
+@@ -71,27 +86,30 @@
+         const auto message = RegisterWindowMessageW(MessageName);
+         if (message && msg->message == message && msg->wParam) {
+             wchar_t name[128]{};
+-            swprintf_s(name, L"Local\\Emilyfn-dispatch-%lu-%lu-%016llx", GetCurrentProcessId(), GetCurrentThreadId(), static_cast<unsigned long long>(msg->wParam));
++            swprintf_s(name, L"Local\\Emilyfn-dispatch-v2-%lu-%lu-%016llx", GetCurrentProcessId(), GetCurrentThreadId(), static_cast<unsigned long long>(msg->wParam));
+             const auto mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, name);
+             if (mapping) {
+-                const auto p = static_cast<Shared*>(MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, 256));
++                const auto p = static_cast<Shared*>(MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, MappingBytes));
+                 if (p) {
+                     FILETIME created{}, exited{}, kernel{}, user{};
+                     const bool identity = GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user) &&
+                         p->created == (static_cast<std::uint64_t>(created.dwHighDateTime) << 32 | created.dwLowDateTime);
+-                    if (p->magic == Magic && p->version == 1 && p->nonce == msg->wParam && p->pid == GetCurrentProcessId() &&
++                    if (p->magic == Magic && p->version == ProtocolVersion && p->nonce == msg->wParam && p->pid == GetCurrentProcessId() &&
+                         p->tid == GetCurrentThreadId() && identity && GetTickCount64() <= p->deadline &&
+                         InterlockedCompareExchange(&p->state, 2, 1) == 1) {
+                         p->callbackPid = GetCurrentProcessId(); p->callbackTid = GetCurrentThreadId(); p->status = 1;
+                         if (!GameThread()) p->status = 7;
+-                        else if (!p->hasTarget) p->status = 2;
+-                        else if (!Validate(*p, p->expected)) p->status = 3;
+-                        else if (GetTickCount64() > p->deadline) p->status = 8;
+                         else {
+-                            p->returned = p->expected ^ 0xffffffffffffffffULL;
+-                            InterlockedExchange(&p->calls, 1);
+-                            p->exception = Call(p);
+-                            p->status = p->exception ? 5 : p->returned == p->expected ? 4 : 6;
++                            p->stackException=CaptureGameFrames(p);
++                            if (!p->hasTarget) p->status = 2;
++                            else if (!Validate(*p, p->expected)) p->status = 3;
++                            else if (GetTickCount64() > p->deadline) p->status = 8;
++                            else {
++                                p->returned = p->expected ^ 0xffffffffffffffffULL;
++                                InterlockedExchange(&p->calls, 1);
++                                p->exception = Call(p);
++                                p->status = p->exception ? 5 : p->returned == p->expected ? 4 : 6;
++                            }
+                         }
+                         InterlockedExchange(&p->state, 3);
+                     }
+diff --git a/launcher/native/ThreadProbe/Protocol.h b/launcher/native/ThreadProbe/Protocol.h
+--- a/launcher/native/ThreadProbe/Protocol.h
++++ b/launcher/native/ThreadProbe/Protocol.h
+@@ -3,8 +3,9 @@
+ #include <cstdint>
+ #include <cstddef>
+ namespace EmilyfnProbe {
+-inline constexpr std::uint32_t Magic = 0xef380002;
+-inline constexpr wchar_t MessageName[] = L"Emilyfn.DispatchProbe.v1";
++inline constexpr std::uint32_t Magic = 0xef380003;
++inline constexpr std::uint32_t ProtocolVersion = 2, MaxFrames = 48, MappingBytes = 1024;
++inline constexpr wchar_t MessageName[] = L"Emilyfn.DispatchProbe.v2";
+ struct Shared {
+     std::uint32_t magic, version;
+     volatile LONG state; // 1 armed, 2 executing, 3 complete, 4 cancelled
+@@ -13,12 +14,16 @@
+     std::uint32_t objectName, className, functionName, hasTarget;
+     std::uint64_t dispatchRva, nativeRva;
+     volatile LONG calls;
+-    std::uint32_t callbackTid, callbackPid, reserved;
++    std::uint32_t callbackTid, callbackPid, imageSize;
+     std::uint64_t returned, expected;
+     std::uint32_t status, exception;
++    std::uint32_t gameFrameCount, totalFrameCount;
++    std::uint64_t gameFrameRvas[MaxFrames];
++    std::uint32_t stackException, stackReserved;
+ };
+-static_assert(sizeof(Shared) == 152);
++static_assert(sizeof(Shared) == 552);
+ static_assert(offsetof(Shared, nonce) == 24 && offsetof(Shared, calls) == 112 && offsetof(Shared, status) == 144);
++static_assert(offsetof(Shared, gameFrameCount) == 152 && offsetof(Shared, gameFrameRvas) == 160 && offsetof(Shared, stackException) == 544);
+ // status: 1 callback observed, 2 target absent, 3 profile rejected,
+ // 4 GetOwner matched, 5 exception, 6 return mismatch, 7 thread identity rejected.
+ }
