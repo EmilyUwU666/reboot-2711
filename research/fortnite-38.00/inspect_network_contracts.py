@@ -12,6 +12,11 @@ import capstone
 
 EXPECTED = "f4ddac1044edd0e8cc123f586f7204de8724989b6adcf25b2e34b4855747a5c0"
 RANGES = {
+    "EngineContextIteration": (0x444867D, 0x4448785),
+    "EngineThreadLocalRead": (0x44495F7, 0x444962B),
+    "EngineThreadLocalBranches": (0x44499BA, 0x4449A3B),
+    "EngineThreadIdentityFallback": (0x4449F22, 0x4449F3C),
+    "ThreadIdentityHelperPrefix": (0x8BF44E, 0x8BF47E),
     "ContextConnectionWorkPrefix": (0x4832B9A, 0x4832C85),
     "ConnectionObjectConstruction": (0xA9EDE75, 0xA9EDEC6),
     "ConnectionObjectDestruction": (0x18E770E, 0x18E77C2),
@@ -82,6 +87,44 @@ def inspect(path, live_report=None):
         evidence[name] = {"StartRva": hex(start), "EndRvaExclusive": hex(end),
             "Sha256": hashlib.sha256(code).hexdigest(),
             "Instructions": [f"0x{i.address:X}: {i.mnemonic} {i.op_str}".rstrip() for i in ins]}
+    engine_tables = (0x119FC3F0, 0x11BBDD10, 0x12FB3A80)
+    for table in engine_tables:
+        if struct.unpack("<Q", read(table + 153 * 8, 8))[0] - imagebase != 0x4832B9A:
+            raise ValueError("Unexpected engine context-travel entry")
+    if struct.unpack("<Q", read(0x11BBDD10 + 94 * 8, 8))[0] - imagebase != 0x44481DA:
+        raise ValueError("Unexpected engine update entry")
+    # Verify the indirect thread-ID call against the PE import name, not a guessed API.
+    import_rva = struct.unpack_from("<I", data, pe + 24 + 120)[0]
+    def cstring(rva):
+        out = bytearray()
+        for i in range(512):
+            ch = read(rva + i, 1)[0]
+            if ch == 0:
+                return out.decode("ascii")
+            out.append(ch)
+        raise ValueError("Unterminated import name")
+    thread_import = None
+    for index in range(4096):
+        original, _, _, dll, first = struct.unpack("<IIIII", read(import_rva + index * 20, 20))
+        if not any((original, dll, first)):
+            break
+        if first <= 0x1684DE68 and (0x1684DE68 - first) % 8 == 0:
+            offset = 0x1684DE68 - first
+            # Only inspect a descriptor if its thunk walk actually reaches the target.
+            if offset > 65536:
+                continue
+            for thunk in range(0, offset + 8, 8):
+                value = struct.unpack("<Q", read((original or first) + thunk, 8))[0]
+                if value == 0:
+                    break
+                if thunk == offset and value < (1 << 63):
+                    thread_import = (cstring(dll), cstring(value + 2))
+    if thread_import != ("KERNEL32.dll", "GetCurrentThreadId"):
+        raise ValueError("Thread-ID import did not match")
+    thread_context = {"TlsIndexRva": "0x16B43A24", "TlsFieldOffset": "0xCA0",
+        "ThreadIdImport": list(thread_import), "EngineUpdateRva": "0x44481DA",
+        "EngineTaskTagMeaningVerified": False, "LiveCallbackValueObserved": False,
+        "StartupBoundaryApproved": False}
     connection_table = 0x11CD07B0
     connection_work = struct.unpack("<Q", read(connection_table + 86 * 8, 8))[0] - imagebase
     if connection_work != 0x46BA5F2:
@@ -140,7 +183,7 @@ def inspect(path, live_report=None):
             "Slots": dict(zip((50, 93, 130), map(hex, entries))),
             "SuppliedLiveReportMatchesFileTable": live_match})
     return {"ImageSha256": digest, "NetworkingCallsAttempted": False,
-        "CallableBindingsVerified": False, "InstructionEvidence": evidence, "Tables": tables, "CleanupTables": cleanup_tables, "PostWorkTables": postwork_tables, "ConnectionWorkPath": connection_path,
+        "CallableBindingsVerified": False, "InstructionEvidence": evidence, "Tables": tables, "CleanupTables": cleanup_tables, "PostWorkTables": postwork_tables, "ConnectionWorkPath": connection_path, "ThreadContextCandidate": thread_context,
         "Limitations": "Report correlation trusts supplied JSON. File table matches do not validate live method bytes, full parameter layouts, construction, engine task tags, or side effects."}
 
 if __name__ == "__main__":

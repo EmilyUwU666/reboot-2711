@@ -32,3 +32,7 @@ The existing diagnostic's successful GetOwner result remains valid, but does not
 The checker now includes the complete constructor and destructor routines and the context routine's prefix through its slot-86 call and follow-up object read. It checks the candidate table entry and emits `LiveObjectClassVerified=false`, `ServerStartupBoundaryVerified=false`, and `EngineTaskContextVerified=false`. All 33 instruction windows, the candidate connection table entry, existing driver table checks and supplied live table associations passed offline.
 
 Next work must resolve an actual engine/world execution boundary and its task-state requirements, rather than treating the pending-connection route as sufficient. This investigation requires no repeat of the unchanged live capture.
+
+## Engine-level follow-up
+
+See `engine-thread-context.md` for an engine-context iteration calling the context-travel slot and a separate conditional world-update path. It also records a TLS candidate with a verified OS-thread-ID import; its task meaning and live value remain unverified.
