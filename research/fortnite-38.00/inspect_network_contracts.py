@@ -12,6 +12,13 @@ import capstone
 
 EXPECTED = "f4ddac1044edd0e8cc123f586f7204de8724989b6adcf25b2e34b4855747a5c0"
 RANGES = {
+    "UrlDefaultConstruction": (0xB2FC82, 0xB2FF2B),
+    "UrlParseConstructionPrefix": (0x47CEE60, 0x47CF009),
+    "UrlDestruction": (0x1B609FA, 0x1B60A75),
+    "UrlOptionElementsDestruction": (0x8D2FFEF, 0x8D3001C),
+    "UrlLifetimeCaller": (0xC5A644D, 0xC5A6573),
+    "DriverObjectConstruction": (0x482F81F, 0x482F8C0),
+    "DriverContextRegistration": (0x482FFDA, 0x4830065),
     "IpListenForwarding": (0x49354B8, 0x4935504),
     "IpListenSuccess": (0x4935504, 0x493552A),
     "IpListenErrorString": (0x493561A, 0x493562E),
