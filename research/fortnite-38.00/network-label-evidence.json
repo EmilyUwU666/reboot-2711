@@ -1,0 +1,68 @@
+[
+  {
+    "reference": "0x1fafec4",
+    "function": [
+      "0x1fafe5e",
+      "0x1fb00ad"
+    ],
+    "encoded_data": "0x11dbbe6c",
+    "length": 90,
+    "seed": 110,
+    "text": "CreateNamedNetDriver %s already exists as %s"
+  },
+  {
+    "reference": "0x1fafff5",
+    "function": [
+      "0x1fafe5e",
+      "0x1fb00ad"
+    ],
+    "encoded_data": "0x11dbbec6",
+    "length": 134,
+    "seed": 114,
+    "text": "CreateNamedNetDriver failed to create driver %s from definition %s"
+  },
+  {
+    "reference": "0x482f735",
+    "function": [
+      "0x482f38e",
+      "0x4830253"
+    ],
+    "encoded_data": "0x11dbbdec",
+    "length": 128,
+    "seed": 90,
+    "text": "CreateNamedNetDriver failed to create driver from definition %s"
+  },
+  {
+    "reference": "0x4935539",
+    "function": [
+      "0x49354b8",
+      "0x49356a4"
+    ],
+    "encoded_data": "0x11e0e87a",
+    "length": 72,
+    "seed": 6,
+    "text": "%s IpNetDriver listening on port %i"
+  },
+  {
+    "reference": "0x49355cf",
+    "function": [
+      "0x49354b8",
+      "0x49356a4"
+    ],
+    "encoded_data": "0x11e0e822",
+    "length": 88,
+    "seed": 253,
+    "text": "Failed to init net driver ListenURL: %s: %s"
+  },
+  {
+    "reference": "0x500f14d",
+    "function": [
+      "0x500f0ca",
+      "0x500f4be"
+    ],
+    "encoded_data": "0x1220df60",
+    "length": 102,
+    "seed": 140,
+    "text": "Init as IPNetDriver listen server. LocalURL = (%s)"
+  }
+]
