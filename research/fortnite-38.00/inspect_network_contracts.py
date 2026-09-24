@@ -12,6 +12,12 @@ import capstone
 
 EXPECTED = "f4ddac1044edd0e8cc123f586f7204de8724989b6adcf25b2e34b4855747a5c0"
 RANGES = {
+    "DriverPostWorkCaller": (0x46BA5F2, 0x46BA88F),
+    "DemoPostWorkOverride": (0x33584A, 0x335923),
+    "UrlInvalidBranch1": (0x47CF4DD, 0x47CF531),
+    "UrlInvalidBranch2": (0x47CF732, 0x47CF76A),
+    "UrlInvalidReturn": (0x47D0A5D, 0x47D0AEA),
+    "UrlInvalidBranch3": (0x47D0FA4, 0x47D0FE5),
     "DeferredRemovalConsumer": (0x335924, 0x335AC6),
     "NamedRemovalWorldWrapper": (0xA64AFBC, 0xA64B00F),
     "NamedRemovalContext": (0x1F551F0, 0x1F554BA),
@@ -73,6 +79,15 @@ def inspect(path, live_report=None):
         evidence[name] = {"StartRva": hex(start), "EndRvaExclusive": hex(end),
             "Sha256": hashlib.sha256(code).hexdigest(),
             "Instructions": [f"0x{i.address:X}: {i.mnemonic} {i.op_str}".rstrip() for i in ins]}
+    postwork_tables = []
+    for name, (table, _) in TABLES.items():
+        entry = struct.unpack("<Q", read(table + 110 * 8, 8))[0] - imagebase
+        expected = 0x33584A if table == 0x11B9D340 else 0x335924
+        if entry != expected:
+            raise ValueError(f"Unexpected post-work entry: {name}")
+        postwork_tables.append({"Class": name, "TableRva": hex(table),
+            "Slot": 110, "EntryRva": hex(entry), "LiveEntryBytesVerified": False,
+            "EngineTaskContextVerified": False})
     cleanup_tables = []
     cleanup_expected = {
         0x11CA8470: (0x4641FFA, 0x1C44944),
@@ -113,7 +128,7 @@ def inspect(path, live_report=None):
             "Slots": dict(zip((50, 93, 130), map(hex, entries))),
             "SuppliedLiveReportMatchesFileTable": live_match})
     return {"ImageSha256": digest, "NetworkingCallsAttempted": False,
-        "CallableBindingsVerified": False, "InstructionEvidence": evidence, "Tables": tables, "CleanupTables": cleanup_tables,
+        "CallableBindingsVerified": False, "InstructionEvidence": evidence, "Tables": tables, "CleanupTables": cleanup_tables, "PostWorkTables": postwork_tables,
         "Limitations": "Report correlation trusts supplied JSON. File table matches do not validate live method bytes, full parameter layouts, construction, engine task tags, or side effects."}
 
 if __name__ == "__main__":

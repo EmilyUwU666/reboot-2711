@@ -71,3 +71,7 @@ The checker now includes 16 complete instruction windows, covering the lifetime 
 ## Cleanup follow-up
 
 See `network-cleanup.md` for the now-located named-removal path, normal cleanup order, world-reference clearing and deferred-removal branch. This supersedes the earlier statement that no matching removal path had been found; runtime cleanup and its task context remain unvalidated.
+
+## Post-work and parser follow-up
+
+See `network-scheduling-parser.md` for the slot-110 association, a networking work-sequence caller, and normal parser failure paths. A returned URL pointer is not sufficient evidence of successful parsing. Engine task context and exceptional construction failure remain unresolved.
