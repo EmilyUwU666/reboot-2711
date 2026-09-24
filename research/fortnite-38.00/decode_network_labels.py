@@ -15,6 +15,6 @@ for m in re.finditer(pat,b[:0x1121e000],re.S):
  for v in b[p:p+n]:key=(key*97+68)&255;decoded.append(v^key)
  try:s=decoded.decode('utf-16le').rstrip('\0')
  except UnicodeDecodeError:continue
- if not any(t in s.lower() for t in ['createnamednetdriver','ipnetdriver listening','failed to init net driver listenurl','init as ipnetdriver listen server']):continue
+ if not any(t in s.lower() for t in ['createnamednetdriver','ipnetdriver listening','failed to init net driver listenurl','init as ipnetdriver listen server','netdriver::shutdown','world netdriver shutdown']):continue
  f=fs[bisect.bisect_right(ss,a)-1];row=dict(reference=hex(a),function=[hex(f[0]),hex(f[1])],encoded_data=hex(p),length=n,seed=m[3][0],text=s);out.append(row)
 print(json.dumps(out,indent=2))

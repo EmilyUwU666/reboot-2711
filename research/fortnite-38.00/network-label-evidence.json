@@ -22,6 +22,28 @@
     "text": "CreateNamedNetDriver failed to create driver %s from definition %s"
   },
   {
+    "reference": "0x4642219",
+    "function": [
+      "0x4641ffa",
+      "0x4642d91"
+    ],
+    "encoded_data": "0x11cab7e4",
+    "length": 80,
+    "seed": 119,
+    "text": "NetDriver::Shutdown: Pending Guids: \n%s"
+  },
+  {
+    "reference": "0x482f169",
+    "function": [
+      "0x482ef38",
+      "0x482f26a"
+    ],
+    "encoded_data": "0x11dbba2c",
+    "length": 66,
+    "seed": 239,
+    "text": "World NetDriver shutdown %s [%s]"
+  },
+  {
     "reference": "0x482f735",
     "function": [
       "0x482f38e",

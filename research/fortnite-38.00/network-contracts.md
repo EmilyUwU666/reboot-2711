@@ -67,3 +67,7 @@ Driver creation also has observable registration side effects. The lower-level c
 At 0x482FFE4 the instance-name value is written to new object+0x210. After two configuration calls, the routine grows the context array at +0x208 when its count (+0x210) equals capacity (+0x214), increments the count, and appends a 16-byte pair: new driver pointer and selected definition pointer. It then calls 0xBBCF6E with the context world and new driver. Thus a rollback must account for context registration and notification, not merely release the object. No matching removal/destruction path has yet been validated.
 
 The checker now includes 16 complete instruction windows, covering the lifetime caller, constructor, destructor, option-element cleanup and driver registration. All four supplied live table associations still match. The next unresolved items are constructor/parser failure behavior, the task-context requirement, and symmetric driver cleanup. No new live capture or build is needed for this offline update.
+
+## Cleanup follow-up
+
+See `network-cleanup.md` for the now-located named-removal path, normal cleanup order, world-reference clearing and deferred-removal branch. This supersedes the earlier statement that no matching removal path had been found; runtime cleanup and its task context remain unvalidated.

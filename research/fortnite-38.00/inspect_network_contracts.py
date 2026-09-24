@@ -12,6 +12,14 @@ import capstone
 
 EXPECTED = "f4ddac1044edd0e8cc123f586f7204de8724989b6adcf25b2e34b4855747a5c0"
 RANGES = {
+    "DeferredRemovalConsumer": (0x335924, 0x335AC6),
+    "NamedRemovalWorldWrapper": (0xA64AFBC, 0xA64B00F),
+    "NamedRemovalContext": (0x1F551F0, 0x1F554BA),
+    "ActiveDriverRemoveSwap": (0xAA162EC, 0xAA16362),
+    "DeferredRemovalRequest": (0xC3D7254, 0xC3D7290),
+    "DeferredRemovalFlagWrite": (0x464D5CD, 0x464D604),
+    "WorldDriverReferenceCleanup": (0xC56FD12, 0xC56FD7C),
+    "WorldNetworkShutdown": (0x482EF38, 0x482F26A),
     "UrlDefaultConstruction": (0xB2FC82, 0xB2FF2B),
     "UrlParseConstructionPrefix": (0x47CEE60, 0x47CF009),
     "UrlDestruction": (0x1B609FA, 0x1B60A75),
@@ -65,6 +73,20 @@ def inspect(path, live_report=None):
         evidence[name] = {"StartRva": hex(start), "EndRvaExclusive": hex(end),
             "Sha256": hashlib.sha256(code).hexdigest(),
             "Instructions": [f"0x{i.address:X}: {i.mnemonic} {i.op_str}".rstrip() for i in ins]}
+    cleanup_tables = []
+    cleanup_expected = {
+        0x11CA8470: (0x4641FFA, 0x1C44944),
+        0x11E085C0: (0x4641FFA, 0x4937BF0),
+        0x11B9D340: (0x4641FFA, 0x1C44944),
+        0x1220CC80: (0x500F4BE, 0x4937BF0),
+    }
+    for name, (table, _) in TABLES.items():
+        targets = tuple(struct.unpack("<Q", read(table + slot * 8, 8))[0] - imagebase for slot in (100, 101))
+        if targets != cleanup_expected[table]:
+            raise ValueError(f"Unexpected file cleanup entries: {name}")
+        cleanup_tables.append({"Class": name, "TableRva": hex(table),
+            "Slot100": hex(targets[0]), "Slot101": hex(targets[1]),
+            "LiveEntryBytesVerified": False})
     tables = []
     live = None
     if live_report:
@@ -91,7 +113,7 @@ def inspect(path, live_report=None):
             "Slots": dict(zip((50, 93, 130), map(hex, entries))),
             "SuppliedLiveReportMatchesFileTable": live_match})
     return {"ImageSha256": digest, "NetworkingCallsAttempted": False,
-        "CallableBindingsVerified": False, "InstructionEvidence": evidence, "Tables": tables,
+        "CallableBindingsVerified": False, "InstructionEvidence": evidence, "Tables": tables, "CleanupTables": cleanup_tables,
         "Limitations": "Report correlation trusts supplied JSON. File table matches do not validate live method bytes, full parameter layouts, construction, engine task tags, or side effects."}
 
 if __name__ == "__main__":
